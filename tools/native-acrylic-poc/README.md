@@ -41,3 +41,61 @@ On the Phase 7 development machine, bootstrap currently stops with HRESULT
 `0x80670016` because the matching Framework dependency is not registered in the
 desktop user's package graph. The product integration must not begin until this
 PoC reaches `READY` and its capture passes visual review.
+
+## Self-contained diagnostic
+
+If the current user cannot resolve the framework package, prepare the isolated
+PoC with the official component-package self-contained layout:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/prepare-self-contained.ps1
+target/self-contained/dist/native-acrylic-poc.exe --self-contained --qa-capture qa-output/self-contained.bmp
+```
+
+The preparation script pins and verifies the Foundation and
+InteractiveExperiences NuGet packages, copies their x64 `runtimes-framework`
+payload and metadata, generates WinRT registration from the official package
+fragments, and embeds that manifest during the MSVC-compatible Rust link. The
+binary then calls the official Undocked RegFree WinRT
+`WindowsAppRuntime_EnsureIsLoaded` entry point instead of the package-graph
+bootstrapper. All downloaded/generated assets remain ignored under `target`;
+no runtime binary is committed.
+
+## Activation matrix
+
+Run one isolated layer for four seconds with:
+
+```powershell
+target/self-contained/dist/native-acrylic-poc.exe --self-contained --qa-variant runtime-full --qa-seconds 4
+```
+
+Supported variants are `runtime-only`, `runtime-dispatcher`,
+`runtime-compositor`, `runtime-target`, `runtime-controller`,
+`runtime-controller-config`, `runtime-controller-target`, `runtime-full`, and
+`runtime-target-then-config`. `runtime-full-no-root` is a deliberate negative
+control: it reproduces the deferred `STATUS_STOWED_EXCEPTION` after `SetTarget`
+by omitting the root visual. It must never be treated as a valid setup.
+
+The positive target variants retain the `DesktopWindowTarget`, its projected
+`CompositionTarget`, a root `ContainerVisual`, `WindowId`, configuration,
+controller, compositor, and DispatcherQueue for the complete message loop.
+Shutdown explicitly removes targets and closes the controller before releasing
+configuration, composition, DispatcherQueue, and finally the runtime lifetime.
+
+The one-shot capture first attempts the existing screen BMP path. If the host
+does not expose a usable screen DC, it tries the official Windows Graphics
+Capture HWND API. Some automation desktops provide neither a screen DC nor the
+per-user capture service; that is a capture-environment failure and never counts
+as visual proof.
+
+## Regenerating Windows App SDK bindings
+
+After preparing the self-contained payload, regenerate the narrow projection
+from the official `Microsoft.UI.winmd` and `Microsoft.Foundation.winmd` files:
+
+```powershell
+cargo run --manifest-path bindgen/Cargo.toml
+```
+
+The generator pins `windows-bindgen` 0.61.0 and emits `src/winappsdk.rs`. No
+handwritten Acrylic vtable is used.

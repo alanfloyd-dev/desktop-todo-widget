@@ -2,14 +2,14 @@
 
 ## Status and stop gate
 
-Phase 7 is stopped at **Gate A**. The isolated Win32 proof of concept builds,
-creates its two top-level HWNDs, and has code for a current-thread
-DispatcherQueue, `Compositor`, `DesktopWindowTarget`,
-`DWMWA_USE_HOSTBACKDROPBRUSH`, and `DesktopAcrylicController.SetTarget`.
-However, the unpackaged process cannot initialize the Windows App SDK Framework
-in the actual desktop-user package graph. `MddBootstrapInitialize` returns
-`0x80670016` (package dependency criteria could not be resolved). There is no
-successful controller instance and therefore no visual Acrylic evidence.
+Phase 7 remains stopped at **Gate A**. The framework-dependent PoC still cannot
+initialize the Windows App SDK Framework in the desktop user's package graph:
+`MddBootstrapInitialize` returns `0x80670016`. The official self-contained
+payload now loads successfully, and the isolated PoC can create and retain its
+DispatcherQueue, `Compositor`, rooted `DesktopWindowTarget`, configuration, and
+`DesktopAcrylicController`; `SetTarget` returns `true` and the complete chain is
+stable through a four-second Win32 message pump. This is controller-path proof,
+not visual Acrylic proof. No acceptable screenshot exists yet.
 
 Per the Phase 7 failure boundary, no Tauri Floating, Sidebar, or Desktop
 integration has been attempted. The existing product and data layers remain
@@ -70,6 +70,16 @@ it is a successful/no-op installer result that did not repair registration for
 the user running the PoC. The framework-dependent route is therefore blocked by
 the host's user/elevation-context separation, and no repeated install or manual
 package-state manipulation will be attempted.
+
+The isolated fallback follows Microsoft's
+[self-contained deployment model](https://learn.microsoft.com/windows/apps/package-and-deploy/self-contained-deploy/deploy-self-contained-apps).
+It pins Foundation `1.8.260803002` and InteractiveExperiences `1.8.260708001`,
+copies only their official x64 `runtimes-framework` payload into ignored build
+output, derives the activation manifest from the official package fragments,
+and calls `WindowsAppRuntime_EnsureIsLoaded`. The resolved runtime is
+`1.8.260804001`; the prepared layout contains 48 files, and every copied DLL
+has a valid Authenticode signature. Runtime binaries and raw QA artifacts are
+not committed.
 
 ## Architecture overview
 
@@ -207,23 +217,46 @@ Observed sequence:
 | --- | --- |
 | WinRT single-thread apartment | Success |
 | Test fixture and Acrylic HWND creation | Success |
-| DispatcherQueue creation | Success before bootstrap was added |
-| DesktopWindowTarget creation | Success before bootstrap was added |
-| `DWMWA_USE_HOSTBACKDROPBRUSH=true` | Success before bootstrap was added |
+| Self-contained Undocked RegFree WinRT initialization | Success |
+| DispatcherQueue creation | Success |
+| DesktopWindowTarget creation | Success |
+| Root `ContainerVisual` set and retained | Success |
+| `DWMWA_USE_HOSTBACKDROPBRUSH=true` | Success |
 | Controller activation without bootstrap | `0x80040154` (`REGDB_E_CLASSNOTREG`) |
 | Microsoft-signed runtime/bootstrap artifacts | Signature valid |
 | Bootstrap with 1.8 / min `8000.946.1701.0` | `0x80670016` |
 | Current desktop-user Framework package | Absent; only CBS packages visible |
 | Current-user installer attempt | `0x80070005` (access denied in sandbox) |
 | Elevated package registration | Registered in isolated elevated context, not the desktop-user graph |
-| `DesktopAcrylicController.SetTarget` | Not reached after bootstrap was added |
-| Screenshot/visual result | Not available; Gate A failed |
+| Generated official-WinMD Rust controller projection | Success |
+| `SystemBackdropConfiguration` (active, dark) | Set and retained |
+| `DesktopAcrylicController.SetTarget` | Returned `true` |
+| Complete message-pump survival | Stable for 4 seconds, clean shutdown |
+| Screenshot/visual result | Not available; Gate A remains failed |
 
-The required continuation is to run the Microsoft Windows App Runtime installer
-interactively as the actual desktop user (or configure a self-contained
-unpackaged deployment), verify `Microsoft.WindowsAppRuntime.1.8` is visible in
-that same user's package graph, then rerun the PoC. Only a screenshot showing
-background colors and blurred grid/text through the target can pass Gate A.
+The PoC exposes an activation matrix from `runtime-only` through `runtime-full`.
+All nine supported positive variants survived the same four-second message loop
+and exited with code 0. Both configuration-before-target (the retained final
+order) and target-before-configuration survived. The no-configuration target
+variant also survived, but it is diagnostic only because the official
+configuration contract still applies.
+
+The earlier `0xC000027B` delayed failure was isolated with a deliberate
+`runtime-full-no-root` negative control. It repeats the complete setup except
+for `DesktopWindowTarget.Root`; `SetTarget` returns `true`, then the process
+terminates in the message pump with `STATUS_STOWED_EXCEPTION`. Restoring and
+retaining a `ContainerVisual` root makes the otherwise identical full variant
+stable. This distinguishes a deferred invalid Composition target from a Rust
+vtable or temporary projected-object lifetime failure. No native debugger is
+installed in this environment, so the nested stowed HRESULT was not recovered;
+the fail-fast was not swallowed.
+
+The remaining blocker is capture, not runtime/controller stability. The host
+has no valid screen DC for `BitBlt`, and the official Windows Graphics Capture
+`CreateForWindow` path returns `0x80070424` because its capture service is not
+available in this execution environment. Only an interactive-desktop screenshot
+showing fixture colors and spatially blurred grid/text through the Acrylic HWND
+can pass Gate A.
 
 ## Lifecycle and mode gates
 
@@ -267,15 +300,16 @@ marshalling might need them. Release installer/CI work is intentionally deferred
 ## Known limitations and recommendation
 
 - Gate A is unresolved; no production Acrylic backend exists.
-- No visual screenshot can be accepted from this run.
-- The handwritten Rust ABI is intentionally limited to the PoC and should be
-  replaced by generated bindings or a small reviewed C++/WinRT bridge before
-  production use.
+- No visual screenshot can be accepted from this run; capture is unavailable in
+  the current execution desktop.
+- The PoC now uses bindings generated from the official Windows App SDK WinMD;
+  the former handwritten controller ABI has been removed.
 - Existing `product_window.rs` and `window_mode.rs` responsibilities remain
   coupled because changing them after Gate A failed would violate the stop gate.
 - The current Shell child host remains experimental and untested with
   `DesktopAcrylicController`.
 
-Recommendation: fix the actual desktop-user Windows App Runtime deployment (or
-choose and prototype self-contained deployment), rerun the isolated visual test,
-and proceed to the architecture refactor only after Gate A passes.
+Recommendation: run the already prepared self-contained `runtime-full` PoC on
+the interactive desktop and capture red, blue, and mixed-boundary positions plus
+the transparent A/B control. Proceed to production architecture work only after
+those images visibly prove spatial backdrop blur.
