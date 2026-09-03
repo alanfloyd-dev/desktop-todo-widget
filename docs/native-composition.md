@@ -1,0 +1,225 @@
+# Native window and composition architecture
+
+## Status and stop gate
+
+Phase 7 is stopped at **Gate A**. The isolated Win32 proof of concept builds,
+creates its two top-level HWNDs, and has code for a current-thread
+DispatcherQueue, `Compositor`, `DesktopWindowTarget`,
+`DWMWA_USE_HOSTBACKDROPBRUSH`, and `DesktopAcrylicController.SetTarget`.
+However, the unpackaged process cannot initialize the Windows App SDK Framework
+in the actual desktop-user package graph. `MddBootstrapInitialize` returns
+`0x80670016` (package dependency criteria could not be resolved). There is no
+successful controller instance and therefore no visual Acrylic evidence.
+
+Per the Phase 7 failure boundary, no Tauri Floating, Sidebar, or Desktop
+integration has been attempted. The existing product and data layers remain
+unchanged.
+
+## Architecture overview
+
+The intended architecture separates product intent from Windows mechanisms:
+
+```text
+ProductSettings (Glass, Solid, Gradient, Image, WindowsWallpaper)
+    -> window orchestrator
+        -> NativeWindowContext (single native-state owner)
+            -> WindowHost (Floating | Sidebar | CurrentShellChildHost)
+            -> material resolver
+                -> MaterialBackend (Acrylic | Transparent | Disabled)
+```
+
+This is the target boundary, not a claim that the production refactor has been
+implemented. Gate A must pass before replacing the current implementation.
+
+## Window Host
+
+A host owns HWND placement and relationship mechanics: parent/owner, top-level
+versus child styles, attach/detach, z-order, geometry, DPI, monitor, visibility,
+topmost behavior, and Shell relationships. Floating and Sidebar are ordinary
+top-level hosts. Desktop's current `SHELLDLL_DefView` + `WS_CHILD` + `SetParent`
+route is named `CurrentShellChildHost` conceptually and remains replaceable.
+
+The existing Shell adapter is not to be rewritten merely because Acrylic is
+desired. If a later Desktop compatibility test proves the child host cannot be
+targeted, that result becomes an explicit capability failure and a separate
+host-replacement investigation.
+
+## Material Backend
+
+A material backend owns only visual native state: transparent background,
+system backdrop setup, Composition object lifetime, enable/update/disable, and
+fallback cleanup. It must not own product mode, persistence, geometry, Shell
+attachment, Todo, Weather, Review, or database behavior.
+
+The smallest reliable Rust representation may be an enum-backed state machine;
+a general plugin framework is unnecessary. A C++/WinRT bridge remains acceptable
+only if generated Windows App SDK bindings and COM lifetime management cannot be
+kept narrow and auditable in Rust.
+
+## Native Window Context
+
+`NativeWindowContext` is intended to be the sole owner of the live HWND truth,
+WebView2 controller access boundary, current host, requested/resolved material,
+capabilities, DPI/monitor snapshot, DispatcherQueue, Compositor,
+CompositionTarget, and controller lifetime. Host and backend operations receive
+this context; they do not rediscover or cache HWND independently.
+
+Shutdown order matters. Backdrop targets/controllers must be removed or closed
+before their CompositionTarget, then the Compositor/DispatcherQueue, and finally
+the Windows App SDK bootstrap reference. Mode changes must disable the old
+backend before changing an incompatible host relationship.
+
+## Capability detection
+
+The future central capability snapshot should include the Windows build,
+top-level/child host kind, system transparency policy, composition availability,
+Desktop Acrylic support, host-backdrop support, and future Mica support. Build
+numbers are inputs, not proof: runtime `IsSupported`, target creation, controller
+return state, and visual evidence remain distinct gates.
+
+The tested host is Windows 11 24H2 build `26100.8037`. The isolated failure is a
+deployment/package-graph failure, not evidence that the OS compositor lacks
+Acrylic support.
+
+## Resolver
+
+`resolve_material(requested, host, mode, capabilities)` should be pure and
+unit-tested. Expected policy:
+
+| Request and host | Resolved backend |
+| --- | --- |
+| Glass + expanded Floating top-level + supported | Acrylic |
+| Glass + Sidebar top-level + supported | Acrylic |
+| Glass + collapsed Floating | Transparent orb fallback |
+| Glass + Desktop child with no proven support | Transparent/solid fallback with reason |
+| Solid, Gradient, Image, Windows Wallpaper | Disabled native backdrop |
+
+The result records requested product intent, selected backend, and a structured
+fallback reason. UI settings continue to persist `Glass`; they never persist a
+Windows API or backend name.
+
+## WebView2 transparency chain
+
+The required chain is:
+
+```text
+transparent HTML/CSS roots
+    -> transparent WebView2 DefaultBackgroundColor
+        -> transparent Tauri host client area
+            -> native CompositionTarget/system backdrop
+                -> windows or desktop content behind the HWND
+```
+
+Transparency is necessary but is not Acrylic. The future composition backend
+must be the single owner of WebView2 `DefaultBackgroundColor`; the orchestrator,
+appearance module, and hosts must not each set it independently.
+
+## Acrylic implementation research
+
+Microsoft's Win32 path requires:
+
+1. initialize COM/WinRT on the UI thread;
+2. initialize the Windows App SDK package graph for an unpackaged process;
+3. create one current-thread DispatcherQueue and keep its controller alive;
+4. create a `Windows.UI.Composition.Compositor`;
+5. create a `DesktopWindowTarget` for the top-level HWND;
+6. set `DWMWA_USE_HOSTBACKDROPBRUSH` on that top-level HWND;
+7. create and retain `DesktopAcrylicController`;
+8. call `SetTarget(WindowId, CompositionTarget)` on the DispatcherQueue thread;
+9. treat its Boolean return as setup state, not visual proof;
+10. close targets/controllers before tearing down composition and bootstrap.
+
+Official references:
+
+- [DesktopAcrylicController.SetTarget](https://learn.microsoft.com/windows/windows-app-sdk/api/winrt/microsoft.ui.composition.systembackdrops.desktopacryliccontroller.settarget)
+- [Using the Visual Layer with Win32](https://learn.microsoft.com/windows/uwp/composition/using-the-visual-layer-with-win32)
+- [CreateDispatcherQueueController](https://learn.microsoft.com/windows/win32/api/dispatcherqueue/nf-dispatcherqueue-createdispatcherqueuecontroller)
+- [DWMWA_USE_HOSTBACKDROPBRUSH](https://learn.microsoft.com/windows/win32/api/dwmapi/ne-dwmapi-dwmwindowattribute)
+- [Unpackaged Windows App SDK deployment](https://learn.microsoft.com/windows/apps/windows-app-sdk/deploy-unpackaged-apps)
+
+## Isolated proof of concept
+
+The PoC lives in `tools/native-acrylic-poc`. It uses an ordinary top-level test
+fixture painted with red, blue, and green regions, a fine white grid, and
+high-contrast text. A separate overlapping top-level HWND is the composition
+target. Its optional one-shot BMP capture exists only for QA; there is no screen
+capture loop and no captured-image blur mechanism.
+
+Observed sequence:
+
+| Step | Result |
+| --- | --- |
+| WinRT single-thread apartment | Success |
+| Test fixture and Acrylic HWND creation | Success |
+| DispatcherQueue creation | Success before bootstrap was added |
+| DesktopWindowTarget creation | Success before bootstrap was added |
+| `DWMWA_USE_HOSTBACKDROPBRUSH=true` | Success before bootstrap was added |
+| Controller activation without bootstrap | `0x80040154` (`REGDB_E_CLASSNOTREG`) |
+| Microsoft-signed runtime/bootstrap artifacts | Signature valid |
+| Bootstrap with 1.8 / min `8000.946.1701.0` | `0x80670016` |
+| Current desktop-user Framework package | Absent; only CBS packages visible |
+| Current-user installer attempt | `0x80070005` (access denied in sandbox) |
+| Elevated package registration | Registered in isolated elevated context, not the desktop-user graph |
+| `DesktopAcrylicController.SetTarget` | Not reached after bootstrap was added |
+| Screenshot/visual result | Not available; Gate A failed |
+
+The required continuation is to run the Microsoft Windows App Runtime installer
+interactively as the actual desktop user (or configure a self-contained
+unpackaged deployment), verify `Microsoft.WindowsAppRuntime.1.8` is visible in
+that same user's package graph, then rerun the PoC. Only a screenshot showing
+background colors and blurred grid/text through the target can pass Gate A.
+
+## Lifecycle and mode gates
+
+Floating integration may begin only after Gate A. It must reuse the existing
+Tauri HWND/WebView2, verify Glass/Solid/Image transitions and 20-cycle
+enable/disable and collapse/expand tests, and preserve the 56 DIP Orb invariant.
+Sidebar follows only after Floating passes. Desktop follows only after Sidebar
+and begins with a compatibility test of the current child host; incompatibility
+stops work before any host rewrite.
+
+## Fallback behavior
+
+Fallbacks are explicit resolver results, never silent claims of Acrylic. Solid,
+Gradient, Image, and Windows Wallpaper do not request a native backdrop.
+Collapsed Floating uses transparent orb rendering. Desktop Glass uses the
+documented translucent Graphite fallback until its host compatibility is proven.
+
+## Diagnostics and privacy
+
+Safe diagnostics may include requested/resolved material, backend, host kind,
+capability flags, Windows build, target/controller state, HRESULT/code, and a
+sanitized fallback reason. They must omit usernames, absolute personal paths,
+database/task content, coordinates, weather location details, managed image IDs,
+and wallpaper paths.
+
+## Windows App SDK build, runtime, and packaging impact
+
+The PoC targets stable Windows App SDK 1.8.11 (`1.8.260804001`) with runtime
+minimum `8000.946.1701.0`; 1.8 is near end of support and must be reconsidered
+before production integration. The development machine has the Windows SDK but
+not Visual Studio C++ Build Tools, CMake, or a .NET SDK, which favors a narrow
+Rust ABI experiment but is not a release-toolchain decision.
+
+Framework-dependent unpackaged deployment has the smallest application payload
+but requires the matching Windows App Runtime and bootstrap initialization on
+every target machine. Self-contained deployment copies framework files beside
+the app, increases installer and binary payload substantially, and changes
+packaging/build rules. Microsoft recommends deploying WinMD files where runtime
+marshalling might need them. Release installer/CI work is intentionally deferred.
+
+## Known limitations and recommendation
+
+- Gate A is unresolved; no production Acrylic backend exists.
+- No visual screenshot can be accepted from this run.
+- The handwritten Rust ABI is intentionally limited to the PoC and should be
+  replaced by generated bindings or a small reviewed C++/WinRT bridge before
+  production use.
+- Existing `product_window.rs` and `window_mode.rs` responsibilities remain
+  coupled because changing them after Gate A failed would violate the stop gate.
+- The current Shell child host remains experimental and untested with
+  `DesktopAcrylicController`.
+
+Recommendation: fix the actual desktop-user Windows App Runtime deployment (or
+choose and prototype self-contained deployment), rerun the isolated visual test,
+and proceed to the architecture refactor only after Gate A passes.

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 src-tauri/target/
+tools/native-acrylic-poc/target/
 src-tauri/gen/
 *.log
 .DS_Store
@@ -11,6 +12,8 @@ native-shell-probe.pdb
 # Phase-specific Rust targets
 .phase31-target/
 .phase4-target/
+.phase7-target/
+cargo-target-phase7/
 
 # Package manager local cache
 .pnpm-store/
