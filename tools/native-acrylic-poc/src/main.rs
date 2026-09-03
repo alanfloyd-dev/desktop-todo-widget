@@ -19,7 +19,8 @@ mod windows_poc {
         core::{IInspectable, Interface, Result as WinResult, BOOL, HRESULT, HSTRING},
         Win32::{
             Foundation::{
-                COLORREF, FARPROC, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+                COLORREF, ERROR_INSUFFICIENT_BUFFER, FARPROC, HINSTANCE, HMODULE, HWND, LPARAM,
+                LRESULT, RECT, WPARAM,
             },
             Graphics::{
                 Dwm::{DwmSetWindowAttribute, DWMWA_USE_HOSTBACKDROPBRUSH},
@@ -31,8 +32,16 @@ mod windows_poc {
                     HBRUSH, HGDIOBJ, PAINTSTRUCT, SRCCOPY, TRANSPARENT, WHITE_BRUSH,
                 },
             },
+            Storage::{
+                FileSystem::{
+                    GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO,
+                },
+                Packaging::Appx::{GetCurrentPackageInfo, PACKAGE_FILTER_DYNAMIC, PACKAGE_INFO},
+            },
             System::{
-                LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW},
+                LibraryLoader::{
+                    GetModuleFileNameW, GetModuleHandleW, GetProcAddress, LoadLibraryW,
+                },
                 WinRT::{
                     Composition::ICompositorDesktopInterop, CreateDispatcherQueueController,
                     DispatcherQueueOptions, RoActivateInstance, RoInitialize, DQTAT_COM_ASTA,
@@ -132,21 +141,137 @@ mod windows_poc {
         Ok(std::mem::transmute_copy(&address))
     }
 
+    fn process_architecture() -> &'static str {
+        #[cfg(target_arch = "x86_64")]
+        return "x64";
+        #[cfg(target_arch = "x86")]
+        return "x86";
+        #[cfg(target_arch = "aarch64")]
+        return "arm64";
+        #[allow(unreachable_code)]
+        "unknown"
+    }
+
+    unsafe fn module_file_version(module: HMODULE) -> WinResult<String> {
+        let mut path = vec![0_u16; 32_768];
+        let path_length = GetModuleFileNameW(Some(module), &mut path) as usize;
+        if path_length == 0 || path_length >= path.len() {
+            return Err(windows::core::Error::from_win32());
+        }
+        path.truncate(path_length + 1);
+
+        let info_size = GetFileVersionInfoSizeW(windows::core::PCWSTR(path.as_ptr()), None);
+        if info_size == 0 {
+            return Err(windows::core::Error::from_win32());
+        }
+        let mut info = vec![0_u8; info_size as usize];
+        GetFileVersionInfoW(
+            windows::core::PCWSTR(path.as_ptr()),
+            None,
+            info_size,
+            info.as_mut_ptr().cast(),
+        )?;
+
+        let mut fixed = std::ptr::null_mut::<c_void>();
+        let mut fixed_size = 0_u32;
+        VerQueryValueW(
+            info.as_ptr().cast(),
+            windows::core::w!("\\"),
+            &mut fixed,
+            &mut fixed_size,
+        )
+        .ok()?;
+        if fixed.is_null() || fixed_size < size_of::<VS_FIXEDFILEINFO>() as u32 {
+            return Err(windows::core::Error::new(
+                HRESULT(0x80004005_u32 as i32),
+                "bootstrap DLL has no fixed file version",
+            ));
+        }
+        let fixed = std::ptr::read_unaligned(fixed.cast::<VS_FIXEDFILEINFO>());
+        Ok(format!(
+            "{}.{}.{}.{}",
+            fixed.dwFileVersionMS >> 16,
+            fixed.dwFileVersionMS & 0xffff,
+            fixed.dwFileVersionLS >> 16,
+            fixed.dwFileVersionLS & 0xffff
+        ))
+    }
+
+    unsafe fn log_resolved_runtime() -> WinResult<()> {
+        let mut byte_length = 0_u32;
+        let mut count = 0_u32;
+        let probe = GetCurrentPackageInfo(
+            PACKAGE_FILTER_DYNAMIC,
+            &mut byte_length,
+            None,
+            Some(&mut count),
+        );
+        if probe != ERROR_INSUFFICIENT_BUFFER {
+            return Err(HRESULT::from_win32(probe.0).into());
+        }
+
+        let word_count = (byte_length as usize).div_ceil(size_of::<usize>());
+        let mut buffer = vec![0_usize; word_count];
+        let result = GetCurrentPackageInfo(
+            PACKAGE_FILTER_DYNAMIC,
+            &mut byte_length,
+            Some(buffer.as_mut_ptr().cast()),
+            Some(&mut count),
+        );
+        if result.0 != 0 {
+            return Err(HRESULT::from_win32(result.0).into());
+        }
+
+        let packages =
+            std::slice::from_raw_parts(buffer.as_ptr().cast::<PACKAGE_INFO>(), count as usize);
+        for package in packages {
+            let full_name = std::ptr::addr_of!(package.packageFullName)
+                .read_unaligned()
+                .to_string()?;
+            if full_name.starts_with("Microsoft.WindowsAppRuntime.1.8_") {
+                eprintln!("[poc] resolved_runtime={full_name}");
+                eprintln!("[poc] runtime_architecture={}", process_architecture());
+                return Ok(());
+            }
+        }
+
+        Err(windows::core::Error::new(
+            HRESULT(0x80004005_u32 as i32),
+            "bootstrap succeeded but no Windows App Runtime framework was found in the dynamic package graph",
+        ))
+    }
+
     unsafe fn initialize_bootstrap() -> WinResult<BootstrapLifetime> {
+        eprintln!("[poc] requested_runtime_major_minor=0x{WINDOWS_APP_SDK_MAJOR_MINOR:08x}");
+        eprintln!("[poc] requested_runtime_tag=<stable-empty>");
+        eprintln!("[poc] requested_min_version=8000.946.1701.0");
+        eprintln!("[poc] process_arch={}", process_architecture());
         let module = LoadLibraryW(windows::core::w!(
             "Microsoft.WindowsAppRuntime.Bootstrap.dll"
         ))?;
+        eprintln!(
+            "[poc] bootstrap_dll_version={}",
+            module_file_version(module)?
+        );
         let initialize: BootstrapInitialize =
             required_export(module, windows::core::s!("MddBootstrapInitialize"))?;
         let shutdown: BootstrapShutdown =
             required_export(module, windows::core::s!("MddBootstrapShutdown"))?;
-        initialize(
+        let bootstrap_result = initialize(
             WINDOWS_APP_SDK_MAJOR_MINOR,
             windows::core::w!(""),
             WINDOWS_APP_RUNTIME_MIN_VERSION,
         )
-        .ok()?;
-        eprintln!("[poc] windows_app_sdk=1.8 runtime_min=8000.946.1701.0 bootstrap=initialized");
+        .ok();
+        if let Err(error) = bootstrap_result {
+            eprintln!(
+                "[poc] windows_app_runtime_bootstrap=failed HRESULT={:#010x}",
+                error.code().0 as u32
+            );
+            return Err(error);
+        }
+        eprintln!("[poc] windows_app_runtime_bootstrap=success");
+        log_resolved_runtime()?;
         Ok(BootstrapLifetime {
             _module: module,
             shutdown,

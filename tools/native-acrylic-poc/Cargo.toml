@@ -13,6 +13,8 @@ windows = { version = "0.61.3", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
     "Win32_System_LibraryLoader",
     "Win32_System_WinRT",
     "Win32_System_WinRT_Composition",

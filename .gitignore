@@ -2,6 +2,7 @@ node_modules/
 dist/
 src-tauri/target/
 tools/native-acrylic-poc/target/
+tools/native-acrylic-poc/qa-output/
 src-tauri/gen/
 *.log
 .DS_Store

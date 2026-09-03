@@ -18,6 +18,12 @@ The PoC is an unpackaged process. It requires a matching Windows App Runtime
 signed `Microsoft.WindowsAppRuntime.Bootstrap.dll` beside the executable. The
 bootstrapper is intentionally not committed to this repository.
 
+Before bootstrap, the executable prints its requested major/minor, stable
+version tag, minimum runtime version, process architecture, and the loaded
+bootstrap DLL's file version. After a successful bootstrap it enumerates the
+dynamic package graph and prints the resolved Framework package full name and
+architecture. These diagnostics contain no username, SID, or personal path.
+
 Run from this directory with `cargo run`. The console reports bootstrap,
 DispatcherQueue, target, DWM attribute, and controller results. Press Escape or
 close either window to stop the process. For a single QA capture that exits

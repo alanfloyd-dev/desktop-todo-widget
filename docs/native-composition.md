@@ -15,6 +15,53 @@ Per the Phase 7 failure boundary, no Tauri Floating, Sidebar, or Desktop
 integration has been attempted. The existing product and data layers remain
 unchanged.
 
+## Runtime Gate
+
+The PoC consumes the Microsoft Windows App SDK 1.8.11 runtime package
+`1.8.260804001` and the Foundation/bootstrap package `1.8.260803002`. Values
+were verified against the official `WindowsAppSDK-VersionInfo.h` contained in
+that runtime package rather than inferred from package family names:
+
+| Bootstrap input | Verified value |
+| --- | --- |
+| Release major/minor | `0x00010008` (1.8, exact match) |
+| Version tag | empty (stable) |
+| Minimum runtime | `8000.946.1701.0` / `0x1F4003B206A50000` |
+| Process and requested package architecture | x64 |
+| Loaded bootstrap DLL file version | `1.8.0.0` |
+
+The inputs match Microsoft's
+[`MddBootstrapInitialize2`](https://learn.microsoft.com/windows/windows-app-sdk/api/win32/mddbootstrap/nf-mddbootstrap-mddbootstrapinitialize2)
+contract. A fresh diagnostic run prints them before failing with
+`0x80670016` (package dependency criteria could not be resolved). Current-user
+package enumeration finds no `Microsoft.WindowsAppRuntime.1.8` Framework; the
+only visible 1.8 package is the inbox/CBS package, which is not the Framework
+dependency requested by the bootstrapper. AppX deployment events show that the
+Framework/Main/DDLM 1.8.11 packages were registered successfully for one other
+user SID, not for the interactive PoC user. Dynamic package dependency
+resolution is per-user, so that registration cannot satisfy this process, as
+described in the official
+[Windows App SDK dynamic-dependencies specification](https://github.com/microsoft/WindowsAppSDK/blob/main/specs/dynamicdependencies/DynamicDependencies.md).
+
+The prior non-elevated installer failure is separate: AppX deployment event
+IDs 403/404/465 record `0x80070005` while opening the installer's temporary
+MSIX. AppX, ClipSVC, and InstallService were running and no blocking per-user
+AppX policy was found. Microsoft's
+[framework-dependent deployment guide](https://learn.microsoft.com/windows/apps/windows-app-sdk/deploy-unpackaged-apps)
+documents `0x80070005` from this installer as
+failure to perform system-wide installation/provisioning without the required
+elevation. No new installation, package removal, repair, registry change, or
+ACL change was attempted during this diagnostic checkpoint.
+
+Framework-dependent recovery therefore requires the official signed runtime
+installer to execute with elevation in the actual interactive user's Windows
+session, so its package registration becomes resolvable for that same user. If
+that cannot be performed in the host environment, the next isolated research
+route is an officially built unpackaged
+[self-contained PoC](https://learn.microsoft.com/windows/apps/package-and-deploy/self-contained-deploy/deploy-self-contained-apps)
+using Undocked RegFree WinRT initialization; copying arbitrary DLLs beside the
+Rust executable is not an acceptable substitute.
+
 ## Architecture overview
 
 The intended architecture separates product intent from Windows mechanisms:
