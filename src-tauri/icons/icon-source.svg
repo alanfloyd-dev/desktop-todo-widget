@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Alan Desktop Layer PoC</title>
+  <desc id="desc">Restrained mineral-blue contour lines on a dark square.</desc>
+  <rect width="512" height="512" rx="92" fill="#141b1f"/>
+  <path d="M80 321c37-83 90-136 162-157 73-21 140 2 190 69" fill="none" stroke="#5d8298" stroke-width="18" stroke-linecap="round"/>
+  <path d="M103 360c43-67 94-106 153-118 60-12 113 5 158 52" fill="none" stroke="#8cabb9" stroke-width="14" stroke-linecap="round"/>
+  <path d="M139 393c34-43 75-68 123-74 47-6 88 7 121 39" fill="none" stroke="#c2d3db" stroke-width="11" stroke-linecap="round"/>
+  <circle cx="256" cy="188" r="30" fill="#8cabb9"/>
+</svg>

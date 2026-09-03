@@ -1,0 +1,69 @@
+name: Bug report
+description: Report reproducible Alan Desktop behavior
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Settings → Developer → Copy diagnostics provides a privacy-minimized report.
+  - type: input
+    id: app-version
+    attributes:
+      label: App version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version and build
+      placeholder: Windows 11, build 26100
+    validations:
+      required: true
+  - type: dropdown
+    id: window-mode
+    attributes:
+      label: Window mode
+      options:
+        - Floating
+        - Sidebar
+        - Desktop (Experimental)
+        - Not mode-specific
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open…
+        2. Switch to…
+        3. Observe…
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Paste Settings → Developer → Copy diagnostics output. Review it before submitting.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: media
+    attributes:
+      label: Screenshots or video (optional)
+      description: Drag and drop media here. Remove anything private first.

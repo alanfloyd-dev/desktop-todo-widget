@@ -1,0 +1,36 @@
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+*.log
+.DS_Store
+Thumbs.db
+native-shell-probe.exe
+native-shell-probe.pdb
+
+# Phase-specific Rust targets
+.phase31-target/
+.phase4-target/
+
+# Package manager local cache
+.pnpm-store/
+
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Local databases / runtime state
+*.sqlite
+*.sqlite3
+
+# Local development / QA artifacts
+.codex/
+visualizations/
+
+# Codex-specific Rust build target
+src-tauri/.codex-target/
+
+# Python bytecode cache
+__pycache__/
+*.py[cod]
