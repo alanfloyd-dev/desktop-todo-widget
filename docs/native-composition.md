@@ -62,6 +62,15 @@ route is an officially built unpackaged
 using Undocked RegFree WinRT initialization; copying arbitrary DLLs beside the
 Rust executable is not an acceptable substitute.
 
+The signed 1.8.11 x64 installer was subsequently launched through an approved
+interactive UAC elevation and returned exit code `0`. It emitted no new AppX
+deployment events, the interactive user's package list remained unchanged, and
+the diagnostic PoC again returned `0x80670016`. This is not an installer failure:
+it is a successful/no-op installer result that did not repair registration for
+the user running the PoC. The framework-dependent route is therefore blocked by
+the host's user/elevation-context separation, and no repeated install or manual
+package-state manipulation will be attempted.
+
 ## Architecture overview
 
 The intended architecture separates product intent from Windows mechanisms:
