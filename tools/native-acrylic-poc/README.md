@@ -116,3 +116,16 @@ exit. In transparent mode, grid/text edges should remain sharp. In Acrylic mode,
 the sampled background color should change with position and the same edges
 must show clear spatial blur rather than a uniform tint, black frame, or plain
 alpha transparency.
+
+The test-window class has a null background brush, handles `WM_ERASEBKGND`
+without filling, and performs an empty `BeginPaint`/`EndPaint` validation for
+`WM_PAINT`. Its empty `ContainerVisual` has no SpriteVisual or color brush. The
+foreground HWND uses `WS_EX_NOREDIRECTIONBITMAP` so the transparent comparison
+does not expose an opaque default Win32 redirection surface when the Acrylic
+controller target is removed.
+
+If an older manual-QA process is still running and locking the default output,
+prepare a separate ignored output slot with
+`scripts/prepare-self-contained.ps1 -OutputSlot qa-transparent`. The slot name
+is restricted to a short lowercase alphanumeric/hyphen value and always remains
+under the PoC `target` directory.

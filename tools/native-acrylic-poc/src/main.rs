@@ -75,11 +75,12 @@ mod windows_poc {
                 },
             },
             UI::WindowsAndMessaging::{
-                CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, LoadCursorW,
-                PeekMessageW, PostQuitMessage, RegisterClassW, SetWindowTextW, ShowWindow,
-                TranslateMessage, CS_HREDRAW, CS_VREDRAW, IDC_ARROW, MSG, PM_REMOVE, SW_SHOW,
-                WINDOW_EX_STYLE, WM_DESTROY, WM_KEYDOWN, WM_PAINT, WM_QUIT, WNDCLASSW,
-                WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+                CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClassLongPtrW, GetMessageW,
+                GetWindowLongPtrW, LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassW,
+                SetWindowTextW, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
+                GCLP_HBRBACKGROUND, GWL_EXSTYLE, IDC_ARROW, MSG, PM_REMOVE, SW_SHOW,
+                WINDOW_EX_STYLE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_PAINT, WM_QUIT,
+                WNDCLASSW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
             },
         },
         UI::Composition::{Compositor, ContainerVisual, Desktop::DesktopWindowTarget},
@@ -530,6 +531,13 @@ mod windows_poc {
         lparam: LPARAM,
     ) -> LRESULT {
         match message {
+            WM_ERASEBKGND => LRESULT(1),
+            WM_PAINT => {
+                let mut paint = PAINTSTRUCT::default();
+                let _ = BeginPaint(hwnd, &mut paint);
+                let _ = EndPaint(hwnd, &paint);
+                LRESULT(0)
+            }
             WM_KEYDOWN if wparam.0 == 0x1b => {
                 PostQuitMessage(0);
                 LRESULT(0)
@@ -592,6 +600,7 @@ mod windows_poc {
             let root = compositor.CreateContainerVisual()?;
             target.SetRoot(&root)?;
             eprintln!("[poc] composition_root=ContainerVisual");
+            eprintln!("[poc] composition_root_content=empty-no-fill");
             Some(root)
         } else {
             eprintln!("[poc] composition_root=<not-set-negative-control>");
@@ -1036,6 +1045,8 @@ mod windows_poc {
             HBRUSH(GetStockObject(WHITE_BRUSH).0),
         )?;
         register_window_class(instance, ACRYLIC_CLASS, acrylic_proc, HBRUSH::default())?;
+        eprintln!("[poc] test_window_class_background=null");
+        eprintln!("[poc] erase_background=disabled");
 
         let fixture = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
@@ -1054,10 +1065,10 @@ mod windows_poc {
         let _ = ShowWindow(fixture, SW_SHOW);
 
         let acrylic = CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
+            WS_EX_NOREDIRECTIONBITMAP,
             ACRYLIC_CLASS,
             windows::core::w!("DesktopAcrylicController proof"),
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            WS_OVERLAPPEDWINDOW,
             330,
             250,
             640,
@@ -1067,7 +1078,13 @@ mod windows_poc {
             Some(instance),
             None,
         )?;
-        let _ = ShowWindow(acrylic, SW_SHOW);
+        let class_background = GetClassLongPtrW(acrylic, GCLP_HBRBACKGROUND);
+        let ex_style = GetWindowLongPtrW(acrylic, GWL_EXSTYLE) as u32;
+        eprintln!("[poc] test_window_class_background_value={class_background:#x}");
+        eprintln!(
+            "[poc] test_window_exstyle={ex_style:#010x} no_redirection_bitmap={}",
+            ex_style & WS_EX_NOREDIRECTIONBITMAP.0 != 0
+        );
         eprintln!(
             "[poc] fixture_hwnd={:#x} acrylic_hwnd={:#x} host=top-level",
             fixture.0 as usize, acrylic.0 as usize
@@ -1139,6 +1156,7 @@ mod windows_poc {
             eprintln!("[poc] controls=A:Acrylic_ON T:Transparent_OFF Esc:Exit");
             eprintln!("[poc] waiting_for_human_visual_verification=true");
         }
+        let _ = ShowWindow(acrylic, SW_SHOW);
         eprintln!("[poc] READY: variant entered message pump; press Escape to exit");
 
         if let Some(path) = capture_path {

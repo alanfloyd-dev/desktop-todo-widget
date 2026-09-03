@@ -1,11 +1,14 @@
 [CmdletBinding()]
-param()
+param(
+    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,39}$')]
+    [string]$OutputSlot = 'self-contained'
+)
 
 $ErrorActionPreference = 'Stop'
 
 $pocRoot = Split-Path -Parent $PSScriptRoot
 $targetRoot = Join-Path $pocRoot 'target'
-$selfContainedRoot = Join-Path $targetRoot 'self-contained'
+$selfContainedRoot = Join-Path $targetRoot $OutputSlot
 $cargoTarget = Join-Path $selfContainedRoot 'cargo'
 $stageRoot = Join-Path $selfContainedRoot 'stage'
 $distRoot = Join-Path $selfContainedRoot 'dist'

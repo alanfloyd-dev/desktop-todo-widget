@@ -258,6 +258,23 @@ available in this execution environment. Only an interactive-desktop screenshot
 showing fixture colors and spatially blurred grid/text through the Acrylic HWND
 can pass Gate A.
 
+The first human A/B run found that target removal exposed an opaque white client
+surface, so that negative control was invalid and Gate A remained pending. The
+fixture class was not responsible: only it owns a paint brush and colored GDI
+painting. The Acrylic class already had a null `hbrBackground`, and its retained
+Root is an empty `ContainerVisual` with no SpriteVisual or ColorBrush. The actual
+gap was the test HWND's ordinary DWM redirection surface plus default message
+handling. The corrected Composition host now uses
+[`WS_EX_NOREDIRECTIONBITMAP`](https://learn.microsoft.com/windows/win32/winmsg/extended-window-styles),
+explicitly handles
+[`WM_ERASEBKGND`](https://learn.microsoft.com/windows/win32/winmsg/wm-erasebkgnd)
+without a fill, and validates `WM_PAINT` with an empty `BeginPaint`/`EndPaint`
+pair. Runtime diagnostics confirmed class background `0x0`, extended style
+`0x00200100` with the no-redirection flag present, and an empty rooted target;
+the complete chain again survived four seconds and shut down cleanly. Human
+verification that T is now sharp transparency is still required before Acrylic
+can be assessed.
+
 ## Lifecycle and mode gates
 
 Floating integration may begin only after Gate A. It must reuse the existing
