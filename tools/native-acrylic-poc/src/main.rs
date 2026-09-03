@@ -76,10 +76,10 @@ mod windows_poc {
             },
             UI::WindowsAndMessaging::{
                 CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, LoadCursorW,
-                PeekMessageW, PostQuitMessage, RegisterClassW, ShowWindow, TranslateMessage,
-                CS_HREDRAW, CS_VREDRAW, IDC_ARROW, MSG, PM_REMOVE, SW_SHOW, WINDOW_EX_STYLE,
-                WM_DESTROY, WM_KEYDOWN, WM_PAINT, WM_QUIT, WNDCLASSW, WS_OVERLAPPEDWINDOW,
-                WS_VISIBLE,
+                PeekMessageW, PostQuitMessage, RegisterClassW, SetWindowTextW, ShowWindow,
+                TranslateMessage, CS_HREDRAW, CS_VREDRAW, IDC_ARROW, MSG, PM_REMOVE, SW_SHOW,
+                WINDOW_EX_STYLE, WM_DESTROY, WM_KEYDOWN, WM_PAINT, WM_QUIT, WNDCLASSW,
+                WS_OVERLAPPEDWINDOW, WS_VISIBLE,
             },
         },
         UI::Composition::{Compositor, ContainerVisual, Desktop::DesktopWindowTarget},
@@ -645,6 +645,9 @@ mod windows_poc {
     }
 
     fn attach_controller(hwnd: HWND, state: &mut PocState) -> WinResult<()> {
+        if state.target_attached {
+            return Ok(());
+        }
         let controller = state.controller.as_ref().ok_or_else(|| {
             windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "controller missing")
         })?;
@@ -671,6 +674,21 @@ mod windows_poc {
         }
         state.window_id = Some(window_id);
         state.target_attached = true;
+        Ok(())
+    }
+
+    fn detach_controller(state: &mut PocState) -> WinResult<()> {
+        if !state.target_attached {
+            return Ok(());
+        }
+        state
+            .controller
+            .as_ref()
+            .ok_or_else(|| {
+                windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "controller missing")
+            })?
+            .RemoveAllSystemBackdropTargets()?;
+        state.target_attached = false;
         Ok(())
     }
 
@@ -935,10 +953,16 @@ mod windows_poc {
         let mut qa_variant = QaVariant::Full;
         let mut qa_variant_requested = false;
         let mut qa_seconds = 4_u64;
+        let mut qa_manual = false;
         let mut arguments = std::env::args().skip(1);
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
                 "--self-contained" => self_contained = true,
+                "--qa-manual" => {
+                    qa_manual = true;
+                    self_contained = true;
+                    qa_variant = QaVariant::Full;
+                }
                 "--qa-capture" => {
                     capture_path = Some(match arguments.next() {
                         Some(path) => path,
@@ -976,6 +1000,12 @@ mod windows_poc {
                 }
                 _ => {}
             }
+        }
+        if qa_manual {
+            capture_path = None;
+            qa_variant_requested = false;
+            eprintln!("[poc] visual_qa=manual");
+            eprintln!("[poc] runtime=self-contained");
         }
         eprintln!("[poc] qa_variant={qa_variant:?}");
 
@@ -1097,6 +1127,18 @@ mod windows_poc {
                 )?)?;
             eprintln!("[poc] configuration_order=target-then-configuration");
         }
+        if qa_manual {
+            SetWindowTextW(
+                acrylic,
+                windows::core::w!("Acrylic ON — A: Acrylic, T: Transparent, Esc: Exit"),
+            )?;
+            eprintln!("[poc] root_visual=attached");
+            eprintln!("[poc] controller=created");
+            eprintln!("[poc] configuration=active");
+            eprintln!("[poc] set_target=true");
+            eprintln!("[poc] controls=A:Acrylic_ON T:Transparent_OFF Esc:Exit");
+            eprintln!("[poc] waiting_for_human_visual_verification=true");
+        }
         eprintln!("[poc] READY: variant entered message pump; press Escape to exit");
 
         if let Some(path) = capture_path {
@@ -1122,6 +1164,31 @@ mod windows_poc {
 
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
+            if qa_manual && message.hwnd == acrylic && message.message == WM_KEYDOWN {
+                match message.wParam.0 {
+                    0x41 => {
+                        attach_controller(acrylic, &mut state)?;
+                        SetWindowTextW(
+                            acrylic,
+                            windows::core::w!("Acrylic ON — A: Acrylic, T: Transparent, Esc: Exit"),
+                        )?;
+                        eprintln!("[poc] comparison=acrylic-on");
+                        continue;
+                    }
+                    0x54 => {
+                        detach_controller(&mut state)?;
+                        SetWindowTextW(
+                            acrylic,
+                            windows::core::w!(
+                                "Transparent — A: Acrylic, T: Transparent, Esc: Exit"
+                            ),
+                        )?;
+                        eprintln!("[poc] comparison=transparent-acrylic-off");
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }

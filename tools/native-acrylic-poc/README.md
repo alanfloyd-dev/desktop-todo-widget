@@ -99,3 +99,20 @@ cargo run --manifest-path bindgen/Cargo.toml
 
 The generator pins `windows-bindgen` 0.61.0 and emits `src/winappsdk.rs`. No
 handwritten Acrylic vtable is used.
+
+## Human visual QA
+
+From a normal, non-administrator Windows PowerShell on the interactive desktop:
+
+```powershell
+.\target\self-contained\dist\native-acrylic-poc.exe --self-contained --qa-manual
+```
+
+The manual mode never captures the screen and does not time out. Drag the
+foreground window across the red, blue, green, mixed-boundary, grid, and text
+areas. Press `A` for Acrylic ON and `T` to remove the Acrylic target while
+keeping the same HWND and fixture position; press Escape or close a window to
+exit. In transparent mode, grid/text edges should remain sharp. In Acrylic mode,
+the sampled background color should change with position and the same edges
+must show clear spatial blur rather than a uniform tint, black frame, or plain
+alpha transparency.
