@@ -23,6 +23,7 @@ mod windows_poc {
         io::Write,
         mem::size_of,
         path::Path,
+        sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
     use windows::{
@@ -66,6 +67,7 @@ mod windows_poc {
                 },
                 Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS},
                 Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD},
+                SystemInformation::GetLocalTime,
                 WinRT::{
                     Composition::ICompositorDesktopInterop,
                     CreateDispatcherQueueController,
@@ -217,6 +219,9 @@ mod windows_poc {
         window_id: Option<WindowId>,
         configuration: Option<SystemBackdropConfiguration>,
         controller: Option<DesktopAcrylicController>,
+        controller_generation: u64,
+        state_changed_token: Option<i64>,
+        diagnostic_mode: Arc<Mutex<&'static str>>,
         target_attached: bool,
         shutdown_complete: bool,
     }
@@ -232,6 +237,9 @@ mod windows_poc {
                 window_id: None,
                 configuration: None,
                 controller: None,
+                controller_generation: 0,
+                state_changed_token: None,
+                diagnostic_mode: Arc::new(Mutex::new("A")),
                 target_attached: false,
                 shutdown_complete: false,
             }
@@ -252,6 +260,17 @@ mod windows_poc {
                     }
                 }
                 self.target_attached = false;
+            }
+            if let (Some(controller), Some(token)) =
+                (self.controller.as_ref(), self.state_changed_token.take())
+            {
+                match controller.RemoveStateChanged(token) {
+                    Ok(()) => eprintln!("[poc] state_changed_subscription=removed"),
+                    Err(error) => eprintln!(
+                        "[poc] state_changed_subscription=remove-failed HRESULT={:#010x}",
+                        error.code().0 as u32
+                    ),
+                }
             }
             if let Some(controller) = self.controller.as_ref() {
                 match controller.Close() {
@@ -677,6 +696,182 @@ mod windows_poc {
         }
     }
 
+    fn timestamp() -> String {
+        let local = unsafe { GetLocalTime() };
+        format!(
+            "{:02}:{:02}:{:02}.{:03}",
+            local.wHour, local.wMinute, local.wSecond, local.wMilliseconds
+        )
+    }
+
+    fn controller_identity(controller: &DesktopAcrylicController) -> usize {
+        Interface::as_raw(controller) as usize
+    }
+
+    fn theme_name(theme: SystemBackdropTheme) -> &'static str {
+        if theme == SystemBackdropTheme::Dark {
+            "Dark"
+        } else if theme == SystemBackdropTheme::Light {
+            "Light"
+        } else {
+            "Default"
+        }
+    }
+
+    fn diagnostic_mode(mode: &Arc<Mutex<&'static str>>) -> &'static str {
+        *mode.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn set_diagnostic_mode(state: &PocState, mode: &'static str) {
+        *state
+            .diagnostic_mode
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = mode;
+    }
+
+    fn log_property_write(source: &str, operation: &str) {
+        eprintln!(
+            "[poc][{}] property_write source={source} operation={operation}",
+            timestamp()
+        );
+    }
+
+    fn log_diagnostic_snapshot(
+        hwnd: HWND,
+        mode: &Arc<Mutex<&'static str>>,
+        event: &str,
+        controller: &DesktopAcrylicController,
+        configuration: &SystemBackdropConfiguration,
+        generation: u64,
+    ) -> WinResult<SystemBackdropState> {
+        let now = timestamp();
+        let state = controller.State()?;
+        let input_active = configuration.IsInputActive()?;
+        let theme = configuration.Theme()?;
+        let fallback = controller.FallbackColor()?;
+        let tint_opacity = controller.TintOpacity()?;
+        let luminosity_opacity = controller.LuminosityOpacity()?;
+        let identity = controller_identity(controller);
+
+        eprintln!("[poc][{now}] event={event}");
+        eprintln!(
+            "[poc][{now}] controller_state={} raw={}",
+            backdrop_state_name(state),
+            state.0
+        );
+        eprintln!(
+            "[poc][{now}] fallback=A{} R{} G{} B{} argb=#{:02X}{:02X}{:02X}{:02X}",
+            fallback.A,
+            fallback.R,
+            fallback.G,
+            fallback.B,
+            fallback.A,
+            fallback.R,
+            fallback.G,
+            fallback.B
+        );
+        eprintln!(
+            "[poc][{now}] input_active={} theme={}",
+            input_active,
+            theme_name(theme)
+        );
+        eprintln!(
+            "[poc][{now}] tint_opacity={tint_opacity:.3} luminosity_opacity={luminosity_opacity:.3}"
+        );
+        eprintln!(
+            "[poc][{now}] controller_identity={identity:#x} controller_generation={generation}"
+        );
+
+        let title = format!(
+            "{} | state={} | input={} | fallback=#{:02X}{:02X}{:02X}{:02X}",
+            diagnostic_mode(mode),
+            backdrop_state_name(state),
+            u8::from(input_active),
+            fallback.A,
+            fallback.R,
+            fallback.G,
+            fallback.B
+        );
+        let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+        unsafe { SetWindowTextW(hwnd, windows::core::PCWSTR(title.as_ptr()))? };
+        Ok(state)
+    }
+
+    fn subscribe_state_changed(hwnd: HWND, state: &mut PocState) -> WinResult<()> {
+        let controller = state.controller.as_ref().ok_or_else(|| {
+            windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "controller missing")
+        })?;
+        let configuration = state.configuration.as_ref().ok_or_else(|| {
+            windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "configuration missing")
+        })?;
+        let generation = state.controller_generation;
+        let initial_state = controller.State()?;
+        let previous_state = Arc::new(Mutex::new(initial_state));
+        let callback_previous_state = Arc::clone(&previous_state);
+        let callback_controller = controller.clone();
+        let callback_configuration = configuration.clone();
+        let callback_mode = Arc::clone(&state.diagnostic_mode);
+        let hwnd_value = hwnd.0 as usize;
+        let handler = windows::Foundation::TypedEventHandler::new(move |_, _| {
+            let callback_hwnd = HWND(hwnd_value as *mut c_void);
+            let current_state = callback_controller.State()?;
+            let prior_state = {
+                let mut previous = callback_previous_state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let prior = *previous;
+                *previous = current_state;
+                prior
+            };
+            let event = format!(
+                "state_changed {} -> {}",
+                backdrop_state_name(prior_state),
+                backdrop_state_name(current_state)
+            );
+            if let Err(error) = log_diagnostic_snapshot(
+                callback_hwnd,
+                &callback_mode,
+                &event,
+                &callback_controller,
+                &callback_configuration,
+                generation,
+            ) {
+                eprintln!(
+                    "[poc][{}] event=state_changed snapshot_failed HRESULT={:#010x}",
+                    timestamp(),
+                    error.code().0 as u32
+                );
+            }
+            Ok(())
+        });
+        state.state_changed_token = Some(controller.StateChanged(&handler)?);
+        eprintln!(
+            "[poc][{}] event=state_changed_subscribed controller_identity={:#x} controller_generation={generation}",
+            timestamp(),
+            controller_identity(controller)
+        );
+        Ok(())
+    }
+
+    fn log_state_event(
+        hwnd: HWND,
+        state: &PocState,
+        event: &str,
+    ) -> WinResult<SystemBackdropState> {
+        log_diagnostic_snapshot(
+            hwnd,
+            &state.diagnostic_mode,
+            event,
+            state.controller.as_ref().ok_or_else(|| {
+                windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "controller missing")
+            })?,
+            state.configuration.as_ref().ok_or_else(|| {
+                windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "configuration missing")
+            })?,
+            state.controller_generation,
+        )
+    }
+
     fn log_backdrop_state(state: &PocState) -> WinResult<()> {
         let controller = state.controller.as_ref().ok_or_else(|| {
             windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "controller missing")
@@ -703,6 +898,7 @@ mod windows_poc {
         let controller = state.controller.as_ref().ok_or_else(|| {
             windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "controller missing")
         })?;
+        log_property_write("key:A", "ResetProperties");
         controller.ResetProperties()?;
         attach_controller(hwnd, state)?;
         eprintln!("[poc] acrylic_probe=default");
@@ -713,7 +909,9 @@ mod windows_poc {
         let controller = state.controller.as_ref().ok_or_else(|| {
             windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "controller missing")
         })?;
+        log_property_write("key:M", "ResetProperties");
         controller.ResetProperties()?;
+        log_property_write("key:M", "SetFallbackColor(A255,R255,G0,B255,#FFFF00FF)");
         controller.SetFallbackColor(Color {
             A: 255,
             R: 255,
@@ -722,7 +920,7 @@ mod windows_poc {
         })?;
         attach_controller(hwnd, state)?;
         eprintln!("[poc] acrylic_probe=fallback-magenta");
-        eprintln!("[poc] fallback_probe_color=#FF00FF");
+        eprintln!("[poc] fallback_probe_color=#FFFF00FF alpha=255");
         Ok(())
     }
 
@@ -735,11 +933,20 @@ mod windows_poc {
         let controller = state.controller.as_ref().ok_or_else(|| {
             windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "controller missing")
         })?;
+        let source = match (tint_zero, luminosity_zero) {
+            (true, false) => "key:1",
+            (false, true) => "key:2",
+            (true, true) => "key:3",
+            (false, false) => "internal",
+        };
+        log_property_write(source, "ResetProperties");
         controller.ResetProperties()?;
         if tint_zero {
+            log_property_write(source, "SetTintOpacity(0)");
             controller.SetTintOpacity(0.0)?;
         }
         if luminosity_zero {
+            log_property_write(source, "SetLuminosityOpacity(0)");
             controller.SetLuminosityOpacity(0.0)?;
         }
         attach_controller(hwnd, state)?;
@@ -752,7 +959,6 @@ mod windows_poc {
             windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "configuration missing")
         })?;
         configuration.SetIsInputActive(active)?;
-        eprintln!("[poc] configuration_is_input_active={active}");
         Ok(())
     }
 
@@ -1277,7 +1483,18 @@ mod windows_poc {
             state.configuration = Some(create_configuration()?);
         }
         if qa_variant.needs_controller() {
-            state.controller = Some(create_controller()?);
+            let controller = create_controller()?;
+            state.controller_generation += 1;
+            eprintln!(
+                "[poc][{}] event=controller_created controller_identity={:#x} controller_generation={}",
+                timestamp(),
+                controller_identity(&controller),
+                state.controller_generation
+            );
+            state.controller = Some(controller);
+            if qa_manual {
+                subscribe_state_changed(acrylic, &mut state)?;
+            }
         }
         if qa_variant.needs_configuration() && qa_variant != QaVariant::TargetThenConfig {
             state
@@ -1324,7 +1541,6 @@ mod windows_poc {
                 ),
             )?;
             let _ = ShowWindow(acrylic, SW_SHOW);
-            pump_for(Duration::from_millis(500));
             eprintln!("[poc] root_visual=attached");
             eprintln!("[poc] controller=created");
             eprintln!("[poc] configuration=active");
@@ -1333,7 +1549,7 @@ mod windows_poc {
                 "[poc] controls=A:default M:fallback-magenta 1:tint0 2:luminosity0 3:both0 T:transparent S:status Esc:exit"
             );
             log_manual_environment(&state)?;
-            log_backdrop_state(&state)?;
+            log_state_event(acrylic, &state, "manual_qa_ready")?;
             eprintln!("[poc] waiting_for_human_visual_verification=true");
         } else {
             let _ = ShowWindow(acrylic, SW_SHOW);
@@ -1372,71 +1588,55 @@ mod windows_poc {
             if qa_manual && message.hwnd == acrylic && message.message == WM_ACTIVATE {
                 let active = message.wParam.0 & 0xffff != WA_INACTIVE as usize;
                 set_configuration_active(&state, active)?;
+                log_state_event(acrylic, &state, &format!("WM_ACTIVATE active={active}"))?;
             }
             if qa_manual && message.hwnd == acrylic && message.message == WM_ACTIVATEAPP {
-                set_configuration_active(&state, message.wParam.0 != 0)?;
+                let active = message.wParam.0 != 0;
+                set_configuration_active(&state, active)?;
+                log_state_event(acrylic, &state, &format!("WM_ACTIVATEAPP active={active}"))?;
             }
             if qa_manual && message.hwnd == acrylic && message.message == WM_KEYDOWN {
                 match message.wParam.0 {
                     0x41 => {
+                        set_diagnostic_mode(&state, "A");
                         apply_default_probe(acrylic, &mut state)?;
-                        SetWindowTextW(
-                            acrylic,
-                            windows::core::w!("Acrylic default — press T for transparent"),
-                        )?;
-                        log_backdrop_state(&state)?;
+                        log_state_event(acrylic, &state, "key:A default")?;
                         continue;
                     }
                     0x4d => {
+                        set_diagnostic_mode(&state, "M");
                         apply_magenta_fallback_probe(acrylic, &mut state)?;
-                        SetWindowTextW(
-                            acrylic,
-                            windows::core::w!("Acrylic fallback probe — #FF00FF"),
-                        )?;
-                        log_backdrop_state(&state)?;
+                        log_state_event(acrylic, &state, "key:M fallback-magenta")?;
                         continue;
                     }
                     0x31 => {
+                        set_diagnostic_mode(&state, "1");
                         apply_opacity_probe(acrylic, &mut state, true, false)?;
-                        SetWindowTextW(
-                            acrylic,
-                            windows::core::w!("Acrylic probe — TintOpacity=0"),
-                        )?;
-                        log_backdrop_state(&state)?;
+                        log_state_event(acrylic, &state, "key:1 tint-zero")?;
                         continue;
                     }
                     0x32 => {
+                        set_diagnostic_mode(&state, "2");
                         apply_opacity_probe(acrylic, &mut state, false, true)?;
-                        SetWindowTextW(
-                            acrylic,
-                            windows::core::w!("Acrylic probe — LuminosityOpacity=0"),
-                        )?;
-                        log_backdrop_state(&state)?;
+                        log_state_event(acrylic, &state, "key:2 luminosity-zero")?;
                         continue;
                     }
                     0x33 => {
+                        set_diagnostic_mode(&state, "3");
                         apply_opacity_probe(acrylic, &mut state, true, true)?;
-                        SetWindowTextW(
-                            acrylic,
-                            windows::core::w!("Acrylic probe — Tint=0, Luminosity=0"),
-                        )?;
-                        log_backdrop_state(&state)?;
+                        log_state_event(acrylic, &state, "key:3 tint-zero luminosity-zero")?;
                         continue;
                     }
                     0x54 => {
+                        set_diagnostic_mode(&state, "T");
                         detach_controller(&mut state)?;
-                        SetWindowTextW(
-                            acrylic,
-                            windows::core::w!(
-                                "Transparent — A: Acrylic, T: Transparent, Esc: Exit"
-                            ),
-                        )?;
+                        log_state_event(acrylic, &state, "key:T transparent")?;
                         eprintln!("[poc] comparison=transparent-acrylic-off");
                         continue;
                     }
                     0x53 => {
                         log_manual_environment(&state)?;
-                        log_backdrop_state(&state)?;
+                        log_state_event(acrylic, &state, "key:S status")?;
                         continue;
                     }
                     _ => {}

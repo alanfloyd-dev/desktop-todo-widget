@@ -135,6 +135,21 @@ in sync through `WM_ACTIVATE` and `WM_ACTIVATEAPP`. The diagnostics read system
 conditions without changing Windows settings. The magenta fallback color and
 opacity probes are isolated QA settings and are not production defaults.
 
+Manual mode subscribes to `DesktopAcrylicController.StateChanged`. Controller
+state changes and both activation messages emit a millisecond local timestamp,
+state, input-active value, theme, fallback ARGB, opacity values, COM identity,
+and monotonically increasing controller generation. The title mirrors the
+current probe, state, input-active value, and full ARGB fallback color so that a
+screenshot-induced focus change remains visible. Event callbacks only observe
+state and update the title; they never reset Acrylic properties or recreate the
+controller.
+
+For call-path evidence, each property mutation is separately logged with its
+source key. `M` intentionally calls `ResetProperties` immediately before setting
+`FallbackColor` to `A=255, R=255, G=0, B=255` (`#FFFF00FF`). `A`, `1`, `2`, and
+`3` also intentionally reset properties before applying their named probe.
+Neither activation handling nor `StateChanged` calls `ResetProperties`.
+
 The test-window class has a null background brush, handles `WM_ERASEBKGND`
 without filling, and performs an empty `BeginPaint`/`EndPaint` validation for
 `WM_PAINT`. Its empty `ContainerVisual` has no SpriteVisual or color brush. The
