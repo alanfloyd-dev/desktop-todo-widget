@@ -110,12 +110,30 @@ From a normal, non-administrator Windows PowerShell on the interactive desktop:
 
 The manual mode never captures the screen and does not time out. Drag the
 foreground window across the red, blue, green, mixed-boundary, grid, and text
-areas. Press `A` for Acrylic ON and `T` to remove the Acrylic target while
-keeping the same HWND and fixture position; press Escape or close a window to
-exit. In transparent mode, grid/text edges should remain sharp. In Acrylic mode,
+areas. All probes retain the same HWND, root visual, and fixture position:
+
+- `T`: detach Acrylic for the sharp transparent negative control;
+- `A`: restore the default Acrylic properties;
+- `M`: set the QA-only fallback color to unmistakable `#FF00FF`;
+- `1`: set `TintOpacity` to zero;
+- `2`: set `LuminosityOpacity` to zero;
+- `3`: set both opacity properties to zero;
+- `S`: print the current controller state, backdrop configuration, transparency
+  setting, high-contrast state, remote-session state, and battery-saver state;
+- Escape: exit.
+
+In transparent mode, grid/text edges should remain sharp. In live Acrylic mode,
 the sampled background color should change with position and the same edges
 must show clear spatial blur rather than a uniform tint, black frame, or plain
-alpha transparency.
+alpha transparency. If the entire client changes to magenta in the `M` probe,
+the controller is displaying `FallbackColor`, not a live Acrylic backdrop.
+`SetTarget` succeeding is lifecycle/API evidence only; the printed controller
+state distinguishes `active`, `fallback`, and `high-contrast` rendering.
+
+The window activation handlers keep `SystemBackdropConfiguration.IsInputActive`
+in sync through `WM_ACTIVATE` and `WM_ACTIVATEAPP`. The diagnostics read system
+conditions without changing Windows settings. The magenta fallback color and
+opacity probes are isolated QA settings and are not production defaults.
 
 The test-window class has a null background brush, handles `WM_ERASEBKGND`
 without filling, and performs an empty `BeginPaint`/`EndPaint` validation for

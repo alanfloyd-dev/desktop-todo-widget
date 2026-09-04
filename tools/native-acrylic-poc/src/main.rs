@@ -12,7 +12,8 @@ mod winappsdk;
 mod windows_poc {
     use crate::winappsdk::Microsoft::UI::{
         Composition::SystemBackdrops::{
-            DesktopAcrylicController, SystemBackdropConfiguration, SystemBackdropTheme,
+            DesktopAcrylicController, SystemBackdropConfiguration, SystemBackdropState,
+            SystemBackdropTheme,
         },
         WindowId,
     };
@@ -63,6 +64,8 @@ mod windows_poc {
                 LibraryLoader::{
                     GetModuleFileNameW, GetModuleHandleW, GetProcAddress, LoadLibraryW,
                 },
+                Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS},
+                Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD},
                 WinRT::{
                     Composition::ICompositorDesktopInterop,
                     CreateDispatcherQueueController,
@@ -74,16 +77,25 @@ mod windows_poc {
                     RoInitialize, DQTAT_COM_ASTA, DQTYPE_THREAD_CURRENT, RO_INIT_SINGLETHREADED,
                 },
             },
-            UI::WindowsAndMessaging::{
-                CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClassLongPtrW, GetMessageW,
-                GetWindowLongPtrW, LoadCursorW, PeekMessageW, PostQuitMessage, RegisterClassW,
-                SetWindowTextW, ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
-                GCLP_HBRBACKGROUND, GWL_EXSTYLE, IDC_ARROW, MSG, PM_REMOVE, SW_SHOW,
-                WINDOW_EX_STYLE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_PAINT, WM_QUIT,
-                WNDCLASSW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+            UI::{
+                Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW},
+                WindowsAndMessaging::{
+                    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClassLongPtrW,
+                    GetMessageW, GetSystemMetrics, GetWindowLongPtrW, LoadCursorW, PeekMessageW,
+                    PostQuitMessage, RegisterClassW, SetWindowTextW, ShowWindow,
+                    SystemParametersInfoW, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
+                    GCLP_HBRBACKGROUND, GWL_EXSTYLE, IDC_ARROW, MSG, PM_REMOVE, SM_REMOTESESSION,
+                    SPI_GETHIGHCONTRAST, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WA_INACTIVE,
+                    WINDOW_EX_STYLE, WM_ACTIVATE, WM_ACTIVATEAPP, WM_DESTROY, WM_ERASEBKGND,
+                    WM_KEYDOWN, WM_PAINT, WM_QUIT, WNDCLASSW, WS_EX_NOREDIRECTIONBITMAP,
+                    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+                },
             },
         },
-        UI::Composition::{Compositor, ContainerVisual, Desktop::DesktopWindowTarget},
+        UI::{
+            Color,
+            Composition::{Compositor, ContainerVisual, Desktop::DesktopWindowTarget},
+        },
     };
 
     const FIXTURE_CLASS: windows::core::PCWSTR = windows::core::w!("AlanAcrylicFixture");
@@ -641,7 +653,7 @@ mod windows_poc {
 
     fn create_controller() -> WinResult<DesktopAcrylicController> {
         let supported = DesktopAcrylicController::IsSupported()?;
-        eprintln!("[poc] desktop_acrylic_supported={supported}");
+        eprintln!("[poc] desktop_acrylic_is_supported={supported}");
         if !supported {
             return Err(windows::core::Error::new(
                 HRESULT(0x80004001_u32 as i32),
@@ -651,6 +663,166 @@ mod windows_poc {
         let controller = DesktopAcrylicController::new()?;
         eprintln!("[poc] desktop_acrylic_controller=created");
         Ok(controller)
+    }
+
+    fn backdrop_state_name(state: SystemBackdropState) -> &'static str {
+        if state == SystemBackdropState::Active {
+            "active"
+        } else if state == SystemBackdropState::Fallback {
+            "fallback"
+        } else if state == SystemBackdropState::HighContrast {
+            "high-contrast"
+        } else {
+            "unknown"
+        }
+    }
+
+    fn log_backdrop_state(state: &PocState) -> WinResult<()> {
+        let controller = state.controller.as_ref().ok_or_else(|| {
+            windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "controller missing")
+        })?;
+        let backdrop_state = controller.State()?;
+        let fallback = controller.FallbackColor()?;
+        eprintln!(
+            "[poc] controller_state={} raw={}",
+            backdrop_state_name(backdrop_state),
+            backdrop_state.0
+        );
+        eprintln!(
+            "[poc] acrylic_properties=fallback:#{:02X}{:02X}{:02X} tint_opacity:{:.3} luminosity_opacity:{:.3}",
+            fallback.R,
+            fallback.G,
+            fallback.B,
+            controller.TintOpacity()?,
+            controller.LuminosityOpacity()?
+        );
+        Ok(())
+    }
+
+    fn apply_default_probe(hwnd: HWND, state: &mut PocState) -> WinResult<()> {
+        let controller = state.controller.as_ref().ok_or_else(|| {
+            windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "controller missing")
+        })?;
+        controller.ResetProperties()?;
+        attach_controller(hwnd, state)?;
+        eprintln!("[poc] acrylic_probe=default");
+        Ok(())
+    }
+
+    fn apply_magenta_fallback_probe(hwnd: HWND, state: &mut PocState) -> WinResult<()> {
+        let controller = state.controller.as_ref().ok_or_else(|| {
+            windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "controller missing")
+        })?;
+        controller.ResetProperties()?;
+        controller.SetFallbackColor(Color {
+            A: 255,
+            R: 255,
+            G: 0,
+            B: 255,
+        })?;
+        attach_controller(hwnd, state)?;
+        eprintln!("[poc] acrylic_probe=fallback-magenta");
+        eprintln!("[poc] fallback_probe_color=#FF00FF");
+        Ok(())
+    }
+
+    fn apply_opacity_probe(
+        hwnd: HWND,
+        state: &mut PocState,
+        tint_zero: bool,
+        luminosity_zero: bool,
+    ) -> WinResult<()> {
+        let controller = state.controller.as_ref().ok_or_else(|| {
+            windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "controller missing")
+        })?;
+        controller.ResetProperties()?;
+        if tint_zero {
+            controller.SetTintOpacity(0.0)?;
+        }
+        if luminosity_zero {
+            controller.SetLuminosityOpacity(0.0)?;
+        }
+        attach_controller(hwnd, state)?;
+        eprintln!("[poc] acrylic_probe=tint-zero:{tint_zero} luminosity-zero:{luminosity_zero}");
+        Ok(())
+    }
+
+    fn set_configuration_active(state: &PocState, active: bool) -> WinResult<()> {
+        let configuration = state.configuration.as_ref().ok_or_else(|| {
+            windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "configuration missing")
+        })?;
+        configuration.SetIsInputActive(active)?;
+        eprintln!("[poc] configuration_is_input_active={active}");
+        Ok(())
+    }
+
+    unsafe fn log_manual_environment(state: &PocState) -> WinResult<()> {
+        let configuration = state.configuration.as_ref().ok_or_else(|| {
+            windows::core::Error::new(HRESULT(0x80004005_u32 as i32), "configuration missing")
+        })?;
+        let theme = configuration.Theme()?;
+        let theme_name = if theme == SystemBackdropTheme::Dark {
+            "dark"
+        } else if theme == SystemBackdropTheme::Light {
+            "light"
+        } else {
+            "default"
+        };
+        eprintln!(
+            "[poc] configuration_is_input_active={} theme={theme_name}",
+            configuration.IsInputActive()?
+        );
+
+        let mut transparency = 0_u32;
+        let mut transparency_size = size_of::<u32>() as u32;
+        let transparency_result = RegGetValueW(
+            HKEY_CURRENT_USER,
+            windows::core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+            windows::core::w!("EnableTransparency"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut transparency as *mut u32).cast()),
+            Some(&mut transparency_size),
+        );
+        if transparency_result.0 == 0 {
+            eprintln!(
+                "[poc] system_transparency_effects={}",
+                if transparency != 0 {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+        } else {
+            eprintln!(
+                "[poc] system_transparency_effects=unknown win32_error={}",
+                transparency_result.0
+            );
+        }
+
+        let mut high_contrast = HIGHCONTRASTW {
+            cbSize: size_of::<HIGHCONTRASTW>() as u32,
+            ..Default::default()
+        };
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            high_contrast.cbSize,
+            Some((&mut high_contrast as *mut HIGHCONTRASTW).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS::default(),
+        )?;
+        eprintln!(
+            "[poc] system_high_contrast={}",
+            (high_contrast.dwFlags & HCF_HIGHCONTRASTON).0 != 0
+        );
+        eprintln!(
+            "[poc] remote_session={}",
+            GetSystemMetrics(SM_REMOTESESSION) != 0
+        );
+
+        let mut power = SYSTEM_POWER_STATUS::default();
+        GetSystemPowerStatus(&mut power)?;
+        eprintln!("[poc] battery_saver={}", power.SystemStatusFlag != 0);
+        Ok(())
     }
 
     fn attach_controller(hwnd: HWND, state: &mut PocState) -> WinResult<()> {
@@ -1147,16 +1319,25 @@ mod windows_poc {
         if qa_manual {
             SetWindowTextW(
                 acrylic,
-                windows::core::w!("Acrylic ON — A: Acrylic, T: Transparent, Esc: Exit"),
+                windows::core::w!(
+                    "Acrylic default — A default, M magenta, 1 tint0, 2 lum0, 3 both, T transparent"
+                ),
             )?;
+            let _ = ShowWindow(acrylic, SW_SHOW);
+            pump_for(Duration::from_millis(500));
             eprintln!("[poc] root_visual=attached");
             eprintln!("[poc] controller=created");
             eprintln!("[poc] configuration=active");
             eprintln!("[poc] set_target=true");
-            eprintln!("[poc] controls=A:Acrylic_ON T:Transparent_OFF Esc:Exit");
+            eprintln!(
+                "[poc] controls=A:default M:fallback-magenta 1:tint0 2:luminosity0 3:both0 T:transparent S:status Esc:exit"
+            );
+            log_manual_environment(&state)?;
+            log_backdrop_state(&state)?;
             eprintln!("[poc] waiting_for_human_visual_verification=true");
+        } else {
+            let _ = ShowWindow(acrylic, SW_SHOW);
         }
-        let _ = ShowWindow(acrylic, SW_SHOW);
         eprintln!("[poc] READY: variant entered message pump; press Escape to exit");
 
         if let Some(path) = capture_path {
@@ -1175,6 +1356,12 @@ mod windows_poc {
 
         if qa_variant_requested {
             pump_for(Duration::from_secs(qa_seconds));
+            if state.configuration.is_some() {
+                log_manual_environment(&state)?;
+            }
+            if state.controller.is_some() {
+                log_backdrop_state(&state)?;
+            }
             eprintln!("[poc] qa_variant_stable_seconds={qa_seconds}");
             state.shutdown();
             return Ok(());
@@ -1182,15 +1369,58 @@ mod windows_poc {
 
         let mut message = MSG::default();
         while GetMessageW(&mut message, None, 0, 0).as_bool() {
+            if qa_manual && message.hwnd == acrylic && message.message == WM_ACTIVATE {
+                let active = message.wParam.0 & 0xffff != WA_INACTIVE as usize;
+                set_configuration_active(&state, active)?;
+            }
+            if qa_manual && message.hwnd == acrylic && message.message == WM_ACTIVATEAPP {
+                set_configuration_active(&state, message.wParam.0 != 0)?;
+            }
             if qa_manual && message.hwnd == acrylic && message.message == WM_KEYDOWN {
                 match message.wParam.0 {
                     0x41 => {
-                        attach_controller(acrylic, &mut state)?;
+                        apply_default_probe(acrylic, &mut state)?;
                         SetWindowTextW(
                             acrylic,
-                            windows::core::w!("Acrylic ON — A: Acrylic, T: Transparent, Esc: Exit"),
+                            windows::core::w!("Acrylic default — press T for transparent"),
                         )?;
-                        eprintln!("[poc] comparison=acrylic-on");
+                        log_backdrop_state(&state)?;
+                        continue;
+                    }
+                    0x4d => {
+                        apply_magenta_fallback_probe(acrylic, &mut state)?;
+                        SetWindowTextW(
+                            acrylic,
+                            windows::core::w!("Acrylic fallback probe — #FF00FF"),
+                        )?;
+                        log_backdrop_state(&state)?;
+                        continue;
+                    }
+                    0x31 => {
+                        apply_opacity_probe(acrylic, &mut state, true, false)?;
+                        SetWindowTextW(
+                            acrylic,
+                            windows::core::w!("Acrylic probe — TintOpacity=0"),
+                        )?;
+                        log_backdrop_state(&state)?;
+                        continue;
+                    }
+                    0x32 => {
+                        apply_opacity_probe(acrylic, &mut state, false, true)?;
+                        SetWindowTextW(
+                            acrylic,
+                            windows::core::w!("Acrylic probe — LuminosityOpacity=0"),
+                        )?;
+                        log_backdrop_state(&state)?;
+                        continue;
+                    }
+                    0x33 => {
+                        apply_opacity_probe(acrylic, &mut state, true, true)?;
+                        SetWindowTextW(
+                            acrylic,
+                            windows::core::w!("Acrylic probe — Tint=0, Luminosity=0"),
+                        )?;
+                        log_backdrop_state(&state)?;
                         continue;
                     }
                     0x54 => {
@@ -1202,6 +1432,11 @@ mod windows_poc {
                             ),
                         )?;
                         eprintln!("[poc] comparison=transparent-acrylic-off");
+                        continue;
+                    }
+                    0x53 => {
+                        log_manual_environment(&state)?;
+                        log_backdrop_state(&state)?;
                         continue;
                     }
                     _ => {}
