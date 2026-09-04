@@ -2,17 +2,16 @@
 
 ## Status and stop gate
 
-Phase 7 remains stopped at **Gate A**. The framework-dependent PoC still cannot
+**Gate A is PASS and Phase 7A is complete.** The framework-dependent PoC still cannot
 initialize the Windows App SDK Framework in the desktop user's package graph:
 `MddBootstrapInitialize` returns `0x80670016`. The official self-contained
 payload loads successfully, and the isolated PoC can create and retain its
 DispatcherQueue, `Compositor`, rooted `DesktopWindowTarget`, configuration, and
 `DesktopAcrylicController`; `SetTarget` returns `true`. Human QA confirms that
 the controller can remain `Active` and that its `Active`/`Fallback` state machine
-and `FallbackColor` are genuine. However, with `WS_EX_NOREDIRECTIONBITMAP=true`,
-the active client remains nearly uniform gray and shows no live fixture pixels
-or spatial blur. Gate A is therefore pending the controlled redirection-surface
-A/B, not passed.
+and `FallbackColor` are genuine. Phone-camera QA confirms live background color
+participation and spatial grid blur while the controller reports `Active`, with
+a sharp transparent negative control. This is real Desktop Acrylic visual proof.
 
 Per the Phase 7 failure boundary, no Tauri Floating, Sidebar, or Desktop
 integration has been attempted. The existing product and data layers remain
@@ -98,7 +97,8 @@ ProductSettings (Glass, Solid, Gradient, Image, WindowsWallpaper)
 ```
 
 This is the target boundary, not a claim that the production refactor has been
-implemented. Gate A must pass before replacing the current implementation.
+implemented. Gate A now permits later production work, but no product integration
+is part of this Phase 7A checkpoint.
 
 ## Window Host
 
@@ -236,9 +236,10 @@ Observed sequence:
 | `DesktopAcrylicController.SetTarget` | Returned `true` |
 | Complete message-pump survival | Stable for 4 seconds, clean shutdown |
 | Human transparent control | Pass: fixture colors and sharp grid are visible |
-| Human Acrylic result with `WS_EX_NOREDIRECTIONBITMAP=true` | `Active`, but uniform gray with no fixture participation or spatial blur |
+| Human Acrylic result with `WS_EX_NOREDIRECTIONBITMAP=true` | Pass: `Active`, background colors participate, fixture grid is spatially blurred |
+| Human Acrylic result with `WS_EX_NOREDIRECTIONBITMAP=false` | Pass: `Active`, background colors participate, fixture grid is spatially blurred |
 | Fallback probe | Pass: `#FFFF00FF` appears only in `Fallback`, not `Active` |
-| Gate A | Pending controlled redirection-surface A/B |
+| Gate A | **PASS: real Desktop Acrylic confirmed by phone-camera A/B** |
 
 The PoC exposes an activation matrix from `runtime-only` through `runtime-full`.
 All nine supported positive variants survived the same four-second message loop
@@ -271,9 +272,11 @@ filling, performs an empty `BeginPaint`/`EndPaint`, and has an empty retained
 `ContainerVisual`. With
 [`WS_EX_NOREDIRECTIONBITMAP`](https://learn.microsoft.com/windows/win32/winmsg/extended-window-styles),
 the `T` negative control now passes: fixture colors and grid are sharply visible.
-The same HWND in `Active` Acrylic remains nearly uniform gray under default,
-`LuminosityOpacity=0`, and both-opacity-zero probes. Tint and luminosity are thus
-eliminated as the current blocker.
+The same HWND in `Active` Acrylic was tested under default,
+`LuminosityOpacity=0`, and both-opacity-zero probes. Later phone-camera review at
+the correct viewing conditions established live fixture color participation and
+spatial grid blur under the default Acrylic probe. Tint and luminosity were not
+the blocker.
 
 The fallback probe also behaves coherently. `FallbackColor` is explicitly set to
 opaque `A=255, R=255, G=0, B=255`; it is hidden while the controller is `Active`,
@@ -281,13 +284,20 @@ appears when a screenshot tool causes `Active -> Fallback`, and disappears after
 returning to `Active`. Real-time diagnostics retain the controller identity and
 generation and log each state/activation event and property snapshot.
 
-The next experiment changes only the test HWND's
-`WS_EX_NOREDIRECTIONBITMAP` bit. `--qa-redirection-on` preserves the current
-`0x00200100` behavior, while `--qa-redirection-off` creates the otherwise
-identical host without that bit (`0x00000100` observed). Both short lifecycle
-runs retain the same successful `SetTarget`, Root, configuration, controller,
-and Acrylic properties. Their pixels must be compared by phone camera while
-both report `Active`.
+The final controlled experiment changed only the test HWND's
+`WS_EX_NOREDIRECTIONBITMAP` bit. `--qa-redirection-on` used `0x00200100`, while
+`--qa-redirection-off` created the otherwise identical host without that bit
+(`0x00000100` observed). Both retained the same successful `SetTarget`, Root,
+configuration, controller, Acrylic properties, and `Active` state. Phone-camera
+QA showed real background participation and spatial blur in both cases.
+
+`WS_EX_NOREDIRECTIONBITMAP` is therefore not required for live Desktop Acrylic
+and was not causal for controller activation. It does affect the non-Acrylic
+client path: with the flag present, `T` exposes the sharp transparent fixture;
+without it, detaching the controller exposes an opaque/white redirected client
+surface. This flag must not be encoded as a universal Acrylic requirement. A
+production Tauri/WebView2 host must select its window styles from its own tested
+composition and detach/transparent semantics.
 
 ## Lifecycle and mode gates
 
@@ -330,21 +340,22 @@ marshalling might need them. Release installer/CI work is intentionally deferred
 
 ## Known limitations and recommendation
 
-- Gate A is pending; no production Acrylic backend exists.
-- Human QA proves controller `Active` is reachable and fallback transitions are
-  real, but live backdrop pixels are not visible with
-  `WS_EX_NOREDIRECTIONBITMAP=true`.
+- Gate A has passed for the isolated top-level Win32 host; no production Acrylic
+  backend has been implemented yet.
+- Human phone-camera QA proves controller `Active`, live backdrop color
+  participation, spatial grid blur, transparent negative control behavior, and
+  real fallback transitions.
 - Automated capture remains unavailable in the current execution desktop and is
   recorded only as an automation limitation.
 - The PoC now uses bindings generated from the official Windows App SDK WinMD;
   the former handwritten controller ABI has been removed.
 - Existing `product_window.rs` and `window_mode.rs` responsibilities remain
-  coupled because changing them after Gate A failed would violate the stop gate.
+  coupled because production integration was intentionally excluded from Phase
+  7A.
 - The current Shell child host remains experimental and untested with
   `DesktopAcrylicController`.
 
-Recommendation: compare the prepared self-contained redirection ON/OFF variants
-on the interactive desktop using a phone camera. Keep the window across the same
-red/blue/green boundaries and require controller state `Active`. Proceed to
-production architecture work only after human evidence visibly proves spatial
-backdrop blur.
+Recommendation: preserve this isolated proof as the Phase 7A baseline. Any later
+Tauri/WebView2 integration must independently validate its host styles,
+redirection surface, transparent detach behavior, Root lifetime, and visual
+backdrop while retaining the same state diagnostics.
