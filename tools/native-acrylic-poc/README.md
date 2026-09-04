@@ -150,6 +150,33 @@ source key. `M` intentionally calls `ResetProperties` immediately before setting
 `3` also intentionally reset properties before applying their named probe.
 Neither activation handling nor `StateChanged` calls `ResetProperties`.
 
+### Redirection-surface A/B
+
+Run both variants from a normal interactive desktop and record them with a
+phone camera. Do not use a screenshot tool because it may move the controller
+from `Active` to `Fallback`:
+
+```powershell
+.\target\qa-redirection\dist\native-acrylic-poc.exe --self-contained --qa-manual --qa-redirection-on
+.\target\qa-redirection\dist\native-acrylic-poc.exe --self-contained --qa-manual --qa-redirection-off
+```
+
+`--qa-redirection-on` creates the test HWND with
+`WS_EX_NOREDIRECTIONBITMAP`; `--qa-redirection-off` omits only that extended
+style. If neither flag is supplied, the current `on` behavior remains the
+default. Supplying both is rejected. The class, null background brush,
+`WM_ERASEBKGND`, empty `WM_PAINT`, retained root, runtime, controller,
+configuration, target order, host-backdrop attribute, position, and Acrylic
+properties are identical between runs. Startup prints the requested result as
+`no_redirection_bitmap`, the actual `exstyle`, current controller state, and
+`set_target` result.
+
+Wait for `state=active`, then place the test window across color boundaries and
+inspect background participation and spatial grid blur. The transparent `T`
+control may behave differently with redirection enabled; record that separately
+instead of treating it as an Acrylic result. Gate A remains pending until live
+backdrop pixels are visually established.
+
 The test-window class has a null background brush, handles `WM_ERASEBKGND`
 without filling, and performs an empty `BeginPaint`/`EndPaint` validation for
 `WM_PAINT`. Its empty `ContainerVisual` has no SpriteVisual or color brush. The

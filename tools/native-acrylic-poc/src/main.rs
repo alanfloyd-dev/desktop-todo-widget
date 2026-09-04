@@ -1341,6 +1341,7 @@ mod windows_poc {
         let mut qa_variant_requested = false;
         let mut qa_seconds = 4_u64;
         let mut qa_manual = false;
+        let mut no_redirection_bitmap_override = None;
         let mut arguments = std::env::args().skip(1);
         while let Some(argument) = arguments.next() {
             match argument.as_str() {
@@ -1349,6 +1350,24 @@ mod windows_poc {
                     qa_manual = true;
                     self_contained = true;
                     qa_variant = QaVariant::Full;
+                }
+                "--qa-redirection-on" => {
+                    if no_redirection_bitmap_override == Some(false) {
+                        return Err(windows::core::Error::new(
+                            HRESULT(0x80070057_u32 as i32),
+                            "--qa-redirection-on conflicts with --qa-redirection-off",
+                        ));
+                    }
+                    no_redirection_bitmap_override = Some(true);
+                }
+                "--qa-redirection-off" => {
+                    if no_redirection_bitmap_override == Some(true) {
+                        return Err(windows::core::Error::new(
+                            HRESULT(0x80070057_u32 as i32),
+                            "--qa-redirection-off conflicts with --qa-redirection-on",
+                        ));
+                    }
+                    no_redirection_bitmap_override = Some(false);
                 }
                 "--qa-capture" => {
                     capture_path = Some(match arguments.next() {
@@ -1394,6 +1413,7 @@ mod windows_poc {
             eprintln!("[poc] visual_qa=manual");
             eprintln!("[poc] runtime=self-contained");
         }
+        let no_redirection_bitmap = no_redirection_bitmap_override.unwrap_or(true);
         eprintln!("[poc] qa_variant={qa_variant:?}");
 
         let _self_contained_runtime;
@@ -1442,8 +1462,13 @@ mod windows_poc {
         )?;
         let _ = ShowWindow(fixture, SW_SHOW);
 
+        let acrylic_exstyle = if no_redirection_bitmap {
+            WS_EX_NOREDIRECTIONBITMAP
+        } else {
+            WINDOW_EX_STYLE::default()
+        };
         let acrylic = CreateWindowExW(
-            WS_EX_NOREDIRECTIONBITMAP,
+            acrylic_exstyle,
             ACRYLIC_CLASS,
             windows::core::w!("DesktopAcrylicController proof"),
             WS_OVERLAPPEDWINDOW,
@@ -1458,10 +1483,13 @@ mod windows_poc {
         )?;
         let class_background = GetClassLongPtrW(acrylic, GCLP_HBRBACKGROUND);
         let ex_style = GetWindowLongPtrW(acrylic, GWL_EXSTYLE) as u32;
+        let actual_no_redirection_bitmap = ex_style & WS_EX_NOREDIRECTIONBITMAP.0 != 0;
         eprintln!("[poc] test_window_class_background_value={class_background:#x}");
+        eprintln!("[poc] no_redirection_bitmap={actual_no_redirection_bitmap}");
+        eprintln!("[poc] exstyle={ex_style:#010x}");
         eprintln!(
             "[poc] test_window_exstyle={ex_style:#010x} no_redirection_bitmap={}",
-            ex_style & WS_EX_NOREDIRECTIONBITMAP.0 != 0
+            actual_no_redirection_bitmap
         );
         eprintln!(
             "[poc] fixture_hwnd={:#x} acrylic_hwnd={:#x} host=top-level",
@@ -1533,6 +1561,7 @@ mod windows_poc {
                 )?)?;
             eprintln!("[poc] configuration_order=target-then-configuration");
         }
+        eprintln!("[poc] set_target={}", state.target_attached);
         if qa_manual {
             SetWindowTextW(
                 acrylic,
@@ -1544,7 +1573,6 @@ mod windows_poc {
             eprintln!("[poc] root_visual=attached");
             eprintln!("[poc] controller=created");
             eprintln!("[poc] configuration=active");
-            eprintln!("[poc] set_target=true");
             eprintln!(
                 "[poc] controls=A:default M:fallback-magenta 1:tint0 2:luminosity0 3:both0 T:transparent S:status Esc:exit"
             );

@@ -5,11 +5,14 @@
 Phase 7 remains stopped at **Gate A**. The framework-dependent PoC still cannot
 initialize the Windows App SDK Framework in the desktop user's package graph:
 `MddBootstrapInitialize` returns `0x80670016`. The official self-contained
-payload now loads successfully, and the isolated PoC can create and retain its
+payload loads successfully, and the isolated PoC can create and retain its
 DispatcherQueue, `Compositor`, rooted `DesktopWindowTarget`, configuration, and
-`DesktopAcrylicController`; `SetTarget` returns `true` and the complete chain is
-stable through a four-second Win32 message pump. This is controller-path proof,
-not visual Acrylic proof. No acceptable screenshot exists yet.
+`DesktopAcrylicController`; `SetTarget` returns `true`. Human QA confirms that
+the controller can remain `Active` and that its `Active`/`Fallback` state machine
+and `FallbackColor` are genuine. However, with `WS_EX_NOREDIRECTIONBITMAP=true`,
+the active client remains nearly uniform gray and shows no live fixture pixels
+or spatial blur. Gate A is therefore pending the controlled redirection-surface
+A/B, not passed.
 
 Per the Phase 7 failure boundary, no Tauri Floating, Sidebar, or Desktop
 integration has been attempted. The existing product and data layers remain
@@ -232,7 +235,10 @@ Observed sequence:
 | `SystemBackdropConfiguration` (active, dark) | Set and retained |
 | `DesktopAcrylicController.SetTarget` | Returned `true` |
 | Complete message-pump survival | Stable for 4 seconds, clean shutdown |
-| Screenshot/visual result | Not available; Gate A remains failed |
+| Human transparent control | Pass: fixture colors and sharp grid are visible |
+| Human Acrylic result with `WS_EX_NOREDIRECTIONBITMAP=true` | `Active`, but uniform gray with no fixture participation or spatial blur |
+| Fallback probe | Pass: `#FFFF00FF` appears only in `Fallback`, not `Active` |
+| Gate A | Pending controlled redirection-surface A/B |
 
 The PoC exposes an activation matrix from `runtime-only` through `runtime-full`.
 All nine supported positive variants survived the same four-second message loop
@@ -251,29 +257,37 @@ vtable or temporary projected-object lifetime failure. No native debugger is
 installed in this environment, so the nested stowed HRESULT was not recovered;
 the fail-fast was not swallowed.
 
-The remaining blocker is capture, not runtime/controller stability. The host
-has no valid screen DC for `BitBlt`, and the official Windows Graphics Capture
-`CreateForWindow` path returns `0x80070424` because its capture service is not
-available in this execution environment. Only an interactive-desktop screenshot
-showing fixture colors and spatially blurred grid/text through the Acrylic HWND
-can pass Gate A.
+Automated capture is unavailable in the current host: it has no valid screen DC
+for `BitBlt`, and the official Windows Graphics Capture `CreateForWindow` path
+returns `0x80070424` because its capture service is unavailable in this execution
+environment. This is only a QA automation limitation and is not evidence of an
+Acrylic failure. Current visual evidence instead comes from direct human QA and
+phone video; screenshot tools are avoided because they can move this controller
+from `Active` to `Fallback`.
 
 The first human A/B run found that target removal exposed an opaque white client
-surface, so that negative control was invalid and Gate A remained pending. The
-fixture class was not responsible: only it owns a paint brush and colored GDI
-painting. The Acrylic class already had a null `hbrBackground`, and its retained
-Root is an empty `ContainerVisual` with no SpriteVisual or ColorBrush. The actual
-gap was the test HWND's ordinary DWM redirection surface plus default message
-handling. The corrected Composition host now uses
+surface. The corrected test HWND uses a null class background, disables erase
+filling, performs an empty `BeginPaint`/`EndPaint`, and has an empty retained
+`ContainerVisual`. With
 [`WS_EX_NOREDIRECTIONBITMAP`](https://learn.microsoft.com/windows/win32/winmsg/extended-window-styles),
-explicitly handles
-[`WM_ERASEBKGND`](https://learn.microsoft.com/windows/win32/winmsg/wm-erasebkgnd)
-without a fill, and validates `WM_PAINT` with an empty `BeginPaint`/`EndPaint`
-pair. Runtime diagnostics confirmed class background `0x0`, extended style
-`0x00200100` with the no-redirection flag present, and an empty rooted target;
-the complete chain again survived four seconds and shut down cleanly. Human
-verification that T is now sharp transparency is still required before Acrylic
-can be assessed.
+the `T` negative control now passes: fixture colors and grid are sharply visible.
+The same HWND in `Active` Acrylic remains nearly uniform gray under default,
+`LuminosityOpacity=0`, and both-opacity-zero probes. Tint and luminosity are thus
+eliminated as the current blocker.
+
+The fallback probe also behaves coherently. `FallbackColor` is explicitly set to
+opaque `A=255, R=255, G=0, B=255`; it is hidden while the controller is `Active`,
+appears when a screenshot tool causes `Active -> Fallback`, and disappears after
+returning to `Active`. Real-time diagnostics retain the controller identity and
+generation and log each state/activation event and property snapshot.
+
+The next experiment changes only the test HWND's
+`WS_EX_NOREDIRECTIONBITMAP` bit. `--qa-redirection-on` preserves the current
+`0x00200100` behavior, while `--qa-redirection-off` creates the otherwise
+identical host without that bit (`0x00000100` observed). Both short lifecycle
+runs retain the same successful `SetTarget`, Root, configuration, controller,
+and Acrylic properties. Their pixels must be compared by phone camera while
+both report `Active`.
 
 ## Lifecycle and mode gates
 
@@ -316,9 +330,12 @@ marshalling might need them. Release installer/CI work is intentionally deferred
 
 ## Known limitations and recommendation
 
-- Gate A is unresolved; no production Acrylic backend exists.
-- No visual screenshot can be accepted from this run; capture is unavailable in
-  the current execution desktop.
+- Gate A is pending; no production Acrylic backend exists.
+- Human QA proves controller `Active` is reachable and fallback transitions are
+  real, but live backdrop pixels are not visible with
+  `WS_EX_NOREDIRECTIONBITMAP=true`.
+- Automated capture remains unavailable in the current execution desktop and is
+  recorded only as an automation limitation.
 - The PoC now uses bindings generated from the official Windows App SDK WinMD;
   the former handwritten controller ABI has been removed.
 - Existing `product_window.rs` and `window_mode.rs` responsibilities remain
@@ -326,7 +343,8 @@ marshalling might need them. Release installer/CI work is intentionally deferred
 - The current Shell child host remains experimental and untested with
   `DesktopAcrylicController`.
 
-Recommendation: run the already prepared self-contained `runtime-full` PoC on
-the interactive desktop and capture red, blue, and mixed-boundary positions plus
-the transparent A/B control. Proceed to production architecture work only after
-those images visibly prove spatial backdrop blur.
+Recommendation: compare the prepared self-contained redirection ON/OFF variants
+on the interactive desktop using a phone camera. Keep the window across the same
+red/blue/green boundaries and require controller state `Active`. Proceed to
+production architecture work only after human evidence visibly proves spatial
+backdrop blur.
