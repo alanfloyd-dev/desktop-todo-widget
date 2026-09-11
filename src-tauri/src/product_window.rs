@@ -472,6 +472,28 @@ fn window_drag_allowed(settings: &ProductSettings) -> bool {
     settings.mode == ProductWindowMode::Floating && !settings.locked
 }
 
+/// Whether the product window should expose a user-grabbable sizing border.
+///
+/// Sidebar is resizable because its window width **is** the product's
+/// `sidebarWidth` setting: `handle_window_event` already clamps and persists the
+/// width from the `Resized` event. On a frameless window, though, omitting
+/// `WS_SIZEBOX` leaves no edge to grab, which silently froze that setting at
+/// whatever value had last been stored. Floating in its collapsed Orb
+/// presentation and the Desktop widget stay fixed-size.
+///
+/// Sidebar ignores `locked` deliberately: the lock guards free repositioning,
+/// while the sidebar is always anchored to a screen edge and the Resized handler
+/// persists its width regardless of lock state.
+fn product_window_resizable(mode: ProductWindowMode, settings: &ProductSettings) -> bool {
+    match mode {
+        ProductWindowMode::Sidebar => true,
+        ProductWindowMode::Floating => {
+            settings.floating_presentation == FloatingPresentation::Expanded && !settings.locked
+        }
+        ProductWindowMode::Desktop => false,
+    }
+}
+
 #[tauri::command]
 pub fn open_shortcut(state: tauri::State<'_, AppState>, id: &str) -> Result<(), String> {
     let shortcut = state
@@ -646,11 +668,8 @@ pub fn apply_product_mode(
                 .map_err(|error| error.to_string())?;
         }
     }
-    let resizable = mode == ProductWindowMode::Floating
-        && settings.floating_presentation == FloatingPresentation::Expanded
-        && !settings.locked;
     window
-        .set_resizable(resizable)
+        .set_resizable(product_window_resizable(mode, &settings))
         .map_err(|error| error.to_string())?;
     app_state.update(|stored| {
         stored.mode = mode;
@@ -1309,11 +1328,11 @@ fn validated_shortcut_url(url: &str) -> bool {
 mod tests {
     use super::{
         desktop_request_from_settings, logical_bounds_to_physical, migrate_geometry_values_to_dip,
-        orb_rect, physical_bounds_to_logical, select_work_area, smart_expanded_rect, snap_side,
-        validate_window_rect, validated_shortcut_url, window_drag_allowed, WindowRect, WorkArea,
-        ORB_SIZE_DIP,
+        orb_rect, physical_bounds_to_logical, product_window_resizable, select_work_area,
+        smart_expanded_rect, snap_side, validate_window_rect, validated_shortcut_url,
+        window_drag_allowed, WindowRect, WorkArea, ORB_SIZE_DIP,
     };
-    use crate::settings::{ProductSettings, ProductWindowMode, SidebarSide};
+    use crate::settings::{FloatingPresentation, ProductSettings, ProductWindowMode, SidebarSide};
     use crate::window_mode::DesktopBounds;
     use tauri::PhysicalPosition;
 
@@ -1325,6 +1344,49 @@ mod tests {
         height: 1040,
         scale_factor: 1.0,
     };
+
+    /// Regression guard for RC-0: the sidebar's width *is* the persisted
+    /// `sidebarWidth`, so the window must expose a sizing border in Sidebar mode.
+    /// It previously reported `false` there, which left the frameless window with
+    /// no grabbable edge and froze the setting at its last stored value.
+    #[test]
+    fn sidebar_is_resizable_and_other_presentations_stay_fixed() {
+        let expanded = ProductSettings {
+            floating_presentation: FloatingPresentation::Expanded,
+            locked: false,
+            ..ProductSettings::default()
+        };
+        assert!(product_window_resizable(
+            ProductWindowMode::Sidebar,
+            &expanded
+        ));
+
+        // The lock guards free repositioning, not the edge-anchored width.
+        let locked = ProductSettings {
+            locked: true,
+            ..expanded.clone()
+        };
+        assert!(product_window_resizable(ProductWindowMode::Sidebar, &locked));
+
+        assert!(product_window_resizable(
+            ProductWindowMode::Floating,
+            &expanded
+        ));
+        assert!(!product_window_resizable(
+            ProductWindowMode::Floating,
+            &locked
+        ));
+
+        let collapsed = ProductSettings {
+            floating_presentation: FloatingPresentation::Collapsed,
+            ..expanded
+        };
+        assert!(!product_window_resizable(
+            ProductWindowMode::Floating,
+            &collapsed
+        ));
+        assert!(!product_window_resizable(ProductWindowMode::Desktop, &collapsed));
+    }
 
     #[test]
     fn preserves_visible_saved_rect() {
