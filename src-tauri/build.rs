@@ -14,9 +14,12 @@ const REQUIRED_PAYLOAD_FILES: [&str; 3] = [
 
 fn main() {
     // Re-run when the staged payload changes so a freshly staged runtime is
-    // always copied next to the executable.
+    // always copied next to the executable. The selector file is watched
+    // explicitly so switching runtimes re-runs this script even when the
+    // versioned payload directories already exist.
     println!("cargo:rerun-if-changed=app.manifest");
     println!("cargo:rerun-if-changed=../tools/windows-app-sdk/runtime");
+    println!("cargo:rerun-if-changed=../tools/windows-app-sdk/runtime/active-runtime.txt");
 
     #[cfg(target_os = "windows")]
     {
@@ -256,15 +259,55 @@ fn manifest_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Staged payload root produced by `tools/windows-app-sdk/prepare-runtime-payload.ps1`.
+/// Root of the staged runtime payload area produced by
+/// `tools/windows-app-sdk/prepare-runtime-payload.ps1`.
 #[cfg(target_os = "windows")]
-fn payload_dir(manifest_dir: &Path) -> PathBuf {
+fn runtime_root(manifest_dir: &Path) -> PathBuf {
     manifest_dir
         .join("..")
         .join("tools")
         .join("windows-app-sdk")
         .join("runtime")
-        .join(PAYLOAD_ARCHITECTURE)
+}
+
+/// Staged payload directory for the *selected* runtime.
+///
+/// Payloads live in per-runtime directories so two Windows App SDK versions can
+/// coexist for A/B comparison and rollback:
+///
+/// ```text
+/// tools/windows-app-sdk/runtime/
+///   active-runtime.txt        <- selector, e.g. "2.x"
+///   1.8/x64/                  <- Windows App SDK 1.8 payload
+///   2.x/x64/                  <- Windows App SDK 2.x payload
+/// ```
+///
+/// The selector is written by the stager (and toggleable with `-NoActivate`), so
+/// switching runtimes is a one-line change with no code edit. To roll back,
+/// restage or re-point the selector at the previous runtime; staging a new
+/// runtime never deletes the old payload.
+#[cfg(target_os = "windows")]
+fn payload_dir(manifest_dir: &Path) -> PathBuf {
+    let root = runtime_root(manifest_dir);
+    match selected_runtime(&root) {
+        Some(runtime) => root.join(runtime).join(PAYLOAD_ARCHITECTURE),
+        None => root.join(PAYLOAD_ARCHITECTURE),
+    }
+}
+
+/// Reads the stager's runtime selector.
+///
+/// Returns `None` when the selector is absent or malformed (no payload staged
+/// yet), in which case the caller falls back to the legacy unversioned path so
+/// the resulting error still names something the developer can act on.
+#[cfg(target_os = "windows")]
+fn selected_runtime(runtime_root: &Path) -> Option<String> {
+    let value = fs::read_to_string(runtime_root.join("active-runtime.txt")).ok()?;
+    let value = value.trim();
+    if value.is_empty() || value.contains(['/', '\\']) || value.contains("..") {
+        return None;
+    }
+    Some(value.to_string())
 }
 
 /// Payload architecture. Only x64 is staged today; adding arm64 means staging a

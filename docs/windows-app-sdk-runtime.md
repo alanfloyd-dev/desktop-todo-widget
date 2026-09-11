@@ -39,36 +39,62 @@ runtime binary is committed to the repository. The payload is downloaded and
 verified on demand by:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools/windows-app-sdk/prepare-runtime-payload.ps1
+# list the pinned payload sets
+powershell -ExecutionPolicy Bypass -File tools/windows-app-sdk/prepare-runtime-payload.ps1 -ListRuntimes
+
+# stage one of them (writes the active-runtime selector build.rs reads)
+powershell -ExecutionPolicy Bypass -File tools/windows-app-sdk/prepare-runtime-payload.ps1 -Runtime 2.x
 ```
 
-The stager pins two official Microsoft component packages by exact version **and**
-SHA256, from `api.nuget.org`:
+The stager holds a **pinned runtime-set table**. Each set names the official
+Microsoft component packages by exact version **and** SHA256, from `api.nuget.org`.
+The active set is **`2.x`** (migrated in Phase 7C.3-B2):
 
-| Component package | Version | SHA256 |
-|---|---|---|
-| `Microsoft.WindowsAppSDK.Foundation` | `1.8.260803002` | `B9232041AFD605B606C6F78F442D92EAD0076453F1F2A3260D2B7F8089BCAB0E` |
-| `Microsoft.WindowsAppSDK.InteractiveExperiences` | `1.8.260708001` | `496EEA92D353B5D3601B67353F06DCADD6D2D9B635575ACEBE6E42587DBFAD76` |
+| Payload set | Component package | Version | SHA256 |
+|---|---|---|---|
+| `2.x` | `Microsoft.WindowsAppSDK.Foundation` | `2.3.9` | `230BC605A3FC9ED689B2117056C5274923BF58B453FA44EDDE18A168BBF628BE` |
+| `2.x` | `Microsoft.WindowsAppSDK.InteractiveExperiences` | `2.1.6` | `DE7B5907C63C8A79606CCC8F0D98943B154A2E62312308187E8CDC3304FF3D0B` |
+| `2.x` | `Microsoft.WindowsAppSDK.Base` | `2.0.4` | `E3E13478C4C80C59ED5F8F89542FE49A2985DAA484753E93A5858E90C2D46A4D` |
+| `2.x` | `Microsoft.WindowsAppSDK` (umbrella) | `2.4.0` | `6EC2EBB6ADD33ECEBAC1F5773AD4CABE934B82FB18D7BEA98E011BB0FC0A37B9` |
+| `1.8` (rollback) | `Microsoft.WindowsAppSDK.Foundation` | `1.8.260803002` | `B9232041AFD605B606C6F78F442D92EAD0076453F1F2A3260D2B7F8089BCAB0E` |
+| `1.8` (rollback) | `Microsoft.WindowsAppSDK.InteractiveExperiences` | `1.8.260708001` | `496EEA92D353B5D3601B67353F06DCADD6D2D9B635575ACEBE6E42587DBFAD76` |
 
-These are the Windows App SDK **1.8.11** component packages; the resolved runtime
-version is **1.8.260804001**.
+These come from the Windows App SDK **2.4.0** stable release (2.x line) and the
+**1.8.11** release respectively. `Base` and the umbrella package carry no native
+payload in this deployment model; they are pinned because the umbrella package
+declares them as dependencies of the runtime, so their versions are part of the
+provenance record.
 
-For each package the stager:
+For each payload component the stager:
 
 1. downloads the `.nupkg` into `tools/windows-app-sdk/cache/` (git-ignored) and
    fails on any SHA256 mismatch;
 2. copies `runtimes-framework/win-x64/native/*` and every `metadata/*.winmd`
-   into `tools/windows-app-sdk/runtime/x64/`;
+   into `tools/windows-app-sdk/runtime/<set>/x64/`;
 3. generates the WinRT activation fragment from the packages' own
    `runtimes-framework/package.appxfragment` files — never hand-maintained;
 4. asserts that every copied `.dll` has a valid Authenticode signature and fails
    otherwise.
 
-Output: 48 files (20 `.dll`, 23 `.winmd`, 2 `.pri`, 1 activation fragment,
-2 `.exe` agent utilities) in `tools/windows-app-sdk/runtime/x64/`, all
-git-ignored. The two `.exe` files (`DeploymentAgent.exe`, `RestartAgent.exe`) are
-not part of this deployment model and are deliberately **not** copied next to the
-product executable.
+Both payload sets produce 48 files (20 `.dll`, 23 `.winmd`, 2 `.pri`, 2 `.exe`
+agent utilities, 1 activation fragment). The two `.exe` files
+(`DeploymentAgent.exe`, `RestartAgent.exe`) are not part of this deployment model
+and are deliberately **not** copied next to the product executable.
+
+## Versioned payload layout and rollback
+
+```text
+tools/windows-app-sdk/runtime/
+  active-runtime.txt          generated selector consumed by build.rs (e.g. "2.x")
+  1.8/x64/                    Windows App SDK 1.8 payload (kept for rollback)
+  2.x/x64/                    Windows App SDK 2.x payload
+```
+
+Staging one runtime never deletes another, so A/B comparison and rollback need no
+re-download. `-NoActivate` stages a payload without switching the selector.
+
+To roll back to 1.8: restage `-Runtime 1.8` (or edit `active-runtime.txt`) and
+rebuild. This path was verified in Phase 7C.3-B2 by rebuilding and launching.
 
 ## Build pipeline
 
@@ -146,42 +172,58 @@ Each release is serviced for **12 months**. The authoritative table is
 
 **Policy for this repository:**
 
-- **We are on an out-of-support runtime.** Windows App SDK **1.8 reached end of
-  servicing on 2026-09-09**. The latest stable line is **2.x** (latest stable
-  **2.4.0**, released 08/13/2026, end of servicing 04/29/2027). Microsoft's own
-  page still labels 1.8 "Maintenance" and still files it under supported
-  downloads, but the published end-of-servicing date has passed; do not treat 1.8
-  as supported.
-- **Do not silently bump the pin.** Self-contained deployment is not serviceable
-  and only the packaged MSBuild flow is documented for version upgrades, so the
-  upgrade is a deliberate, separately verified task (see below).
+- **We are now on a supported runtime.** Phase 7C.3-B2 migrated the payload to the
+  Windows App SDK **2.x** line (umbrella 2.4.0: Foundation `2.3.9`,
+  InteractiveExperiences `2.1.6`, Base `2.0.4`). See
+  `docs/phase-7c3b2-winappsdk-2x-upgrade.md` for the migration evidence, including
+  the Acrylic visual proof that validates the 2.x activation manifest.
+- **1.8 is out of support** (end of servicing 2026-09-09) and is retained only as a
+  staged rollback payload. Do not select it for a release.
+- **Next milestone: 2.x end of servicing is 2027-04-29.** Add it to the maintenance
+  calendar. Each version is serviced for 12 months.
+- **Do not silently bump the pin.** Self-contained deployment is not serviceable and
+  only the packaged MSBuild flow is documented for version upgrades, so an upgrade is
+  a deliberate, separately verified task.
 - The pinned versions, their hashes, and the version table above must be updated
   together; the payload is reproducible from the pins alone.
+- Because the payload is application-owned, every future Windows App SDK servicing
+  fix reaches users only through a new application release. That is the accepted
+  cost of the self-contained model.
 
-### Upgrading to the 2.x line (next task, not done here)
+### Upgrade procedure (validated in Phase 7C.3-B2)
 
-1. Get the exact component package names, versions and SHA256 values for the
-   target Windows App SDK release from nuget.org.
-2. Update `$FoundationPackage` / `$InteractivePackage` / `$ResolvedRuntimeVersion`
-   in `prepare-runtime-payload.ps1` and the table above.
-3. Re-run the stager; confirm the signature check passes and the fragment still
-   contains the `SystemBackdrops` classes.
-4. `cargo build --release` and confirm the release directory is self-consistent.
-5. Re-run the composition smoke test on an interactive desktop, specifically
-   covering the **Glass + Floating-expanded** host, because that is the only
-   combination that creates a `DesktopAcrylicController` and therefore the only
-   one that proves the manifest's Acrylic activation entries resolve.
+1. Confirm the current stable release and its EOS date on the
+   [release channels](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/release-channels) page.
+2. Download the umbrella `Microsoft.WindowsAppSDK` nupkg for that release and read
+   its `.nuspec` to get the **exact component versions** it declares. In 2.x the
+   umbrella and component packages are versioned independently, so the stable
+   component versions will not match the umbrella version number.
+3. Get each component's SHA256 from nuget.org and add a new entry to the
+   `$RuntimeSets` table in `prepare-runtime-payload.ps1`. Do not edit an existing
+   set — add a new one so the previous payload stays available for rollback.
+4. Stage it: `prepare-runtime-payload.ps1 -Runtime <set>`. Confirm the SHA256
+   checks, the Authenticode assertion, the file count, and that the generated
+   fragment still contains the `SystemBackdrops` classes in `wuceffectsi.dll`.
+5. Run the build gates and launch both windowed and composition modes in debug and
+   release.
+6. **Verify Acrylic visually on the Glass + Floating-expanded host.** This is the
+   only product combination that creates a `DesktopAcrylicController`, so it is the
+   only one that proves the new activation manifest is correct. API/state success
+   alone is not sufficient.
+7. Only then repoint the selector and retire the previous payload, if desired.
 
-Microsoft publishes no step-by-step X→Y upgrade guide for unpackaged
-self-contained apps; the 2.0 release notes only advise removing and re-adding the
-package reference, which does not apply to this NuGet-staging approach. Verification
-must therefore come from the steps above.
+Microsoft publishes no step-by-step X→Y upgrade guide for unpackaged self-contained
+apps; the 2.0 release notes only advise removing and re-adding the package reference,
+which does not apply to this NuGet-staging approach. Verification therefore comes
+from the steps above.
 
 ## Known limitations
 
-- Windows App SDK 1.8 is out of support as of 2026-09-09; upgrade to 2.x pending.
-- The payload is x64 only. Adding arm64 means staging a second directory and
-  mapping the build target in `build.rs` (`PAYLOAD_ARCHITECTURE`).
+- `Microsoft.WindowsAppRuntime.dll` reports a file version of `2.0` for the current
+  2.x payload; that is the WinAppSDK platform MajorMinor, not the product version.
+  The payload is identified by package version + SHA256, not by the DLL file version.
+- The payload is x64 only. Adding arm64 means staging a second architecture
+  directory and mapping the build target in `build.rs` (`PAYLOAD_ARCHITECTURE`).
 - The manifest fragment repeats the `winrtv1` namespace declaration on each
   `activatableClass` element. Harmless but verbose; left as generated.
 - The runtime files are copied into the profile output directory by `build.rs`,
