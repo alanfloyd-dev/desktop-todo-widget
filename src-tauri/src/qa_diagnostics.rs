@@ -78,6 +78,17 @@ impl QaDiagnostics {
         self.composition_controller
     }
 
+    /// Records which rendering backend the app decided to host with.
+    ///
+    /// Kept as a dedicated log line because "which controller type did this build
+    /// actually create" is the first question in every hosting investigation, and
+    /// it must be answerable from the log alone.
+    pub fn record_rendering_backend(&self, requested: &str, effective: &str, source: &str) {
+        self.record(format!(
+            "[rendering] requested_backend={requested} effective_backend={effective} selection_source={source}"
+        ));
+    }
+
     pub fn startup_material_bypassed(&self) -> bool {
         self.native_material_off || self.native_material_late || self.window_to_visual
     }
@@ -309,9 +320,35 @@ pub fn qa_frontend_ready(state: tauri::State<'_, QaDiagnostics>) {
 
 #[tauri::command]
 pub fn qa_frontend_input(state: tauri::State<'_, QaDiagnostics>, kind: &str) {
+    // Fixed vocabulary only: this must never carry user-entered text, task
+    // titles, or ids. Unknown values collapse to "other" so the command cannot
+    // be used as a content channel.
+    //
+    // `key:<name>` is the one parametrised form. It carries only the DOM
+    // `KeyboardEvent.key` value — never the input's contents — because the B3
+    // investigation needed to know which key the WebView actually delivered.
+    if let Some(key) = kind.strip_prefix("key:") {
+        state.record(format!("frontend_key_received={key}"));
+        return;
+    }
     let kind = match kind {
         "pointerdown" => "pointerdown",
         "contextmenu" => "contextmenu",
+        // Phase 7C.3-B3 interaction tracing.
+        "add_submit_enter" => "add_submit_enter",
+        "add_submit_click" => "add_submit_click",
+        "add_empty_title" => "add_empty_title",
+        "add_invoke_start" => "add_invoke_start",
+        "add_invoke_ok" => "add_invoke_ok",
+        "add_invoke_err" => "add_invoke_err",
+        "add_reload_ok" => "add_reload_ok",
+        "drag_pointerdown" => "drag_pointerdown",
+        "drag_pointermove" => "drag_pointermove",
+        "drag_pointerup" => "drag_pointerup",
+        "drag_reorder_start" => "drag_reorder_start",
+        "drag_reorder_ok" => "drag_reorder_ok",
+        "drag_reorder_err" => "drag_reorder_err",
+        "drag_pointercancel" => "drag_pointercancel",
         _ => "other",
     };
     state.record(format!("frontend_input_received={kind}"));

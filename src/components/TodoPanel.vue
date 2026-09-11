@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { qaTrace } from "../qa-trace";
 
 type TaskStatus = "pending" | "completed" | "cancelled" | "carried";
 
@@ -92,11 +93,17 @@ async function load() {
 
 async function add() {
   const title = newTitle.value.trim();
-  if (!title) return;
+  if (!title) {
+    qaTrace("add_empty_title");
+    return;
+  }
+  qaTrace("add_invoke_start");
   try {
     if (props.nativeBridgeAvailable) {
       await invoke("add_task", { title, categoryId: newCategoryId.value || null });
+      qaTrace("add_invoke_ok");
       await load();
+      qaTrace("add_reload_ok");
     } else {
       state.value.tasks.push({
         id: browserId("task"),
@@ -115,8 +122,20 @@ async function add() {
     await nextTick();
     addInput.value?.focus();
   } catch (reason) {
+    qaTrace("add_invoke_err");
     emit("error", String(reason));
   }
+}
+
+/** Keyboard submit path; traced separately so a dead key path is visible. */
+async function addSubmitFromKeyboard() {
+  qaTrace("add_submit_enter");
+  await add();
+}
+
+/** Temporary B3 diagnostic: records which key the add input actually received. */
+function traceAddKey(event: KeyboardEvent) {
+  qaTrace(`key:${event.key}`);
 }
 
 function beginEdit(task: Task) {
@@ -266,6 +285,7 @@ function dndLog(message: string) {
 // Tauri window drag region; the database mutation remains the same transaction.
 function dragPointerDown(task: Task, event: PointerEvent) {
   if (event.button !== 0) return;
+  qaTrace("drag_pointerdown");
   draggedId.value = task.id;
   dragTargetId.value = task.id;
   dragPointerId.value = event.pointerId;
@@ -283,7 +303,10 @@ function dragPointerMove(event: PointerEvent) {
   event.preventDefault();
   const targetId = taskAtPointer(event);
   if (!targetId) return;
-  if (targetId !== dragTargetId.value) dndLog(`dragenter target=${targetId}`);
+  if (targetId !== dragTargetId.value) {
+    qaTrace("drag_pointermove");
+    dndLog(`dragenter target=${targetId}`);
+  }
   dragTargetId.value = targetId;
   dndLog(`dragover target=${targetId}`);
 }
@@ -308,6 +331,7 @@ async function dragPointerUp(event: PointerEvent) {
     dragEnd(event);
     return;
   }
+  qaTrace("drag_pointerup");
   dndLog(`drop source=${sourceId} target=${targetId}`);
   const ordered = [...pending.value];
   const from = ordered.findIndex((task) => task.id === sourceId);
@@ -320,7 +344,9 @@ async function dragPointerUp(event: PointerEvent) {
   ordered.splice(to, 0, moved);
   try {
     if (props.nativeBridgeAvailable) {
+      qaTrace("drag_reorder_start");
       await invoke("reorder_tasks", { ids: ordered.map((task) => task.id) });
+      qaTrace("drag_reorder_ok");
       await load();
     } else {
       const historical = state.value.tasks.filter((task) => task.status !== "pending");
@@ -328,6 +354,7 @@ async function dragPointerUp(event: PointerEvent) {
       state.value.tasks = [...ordered, ...historical];
     }
   } catch (reason) {
+    qaTrace("drag_reorder_err");
     emit("error", String(reason));
   } finally {
     dragEnd(event);
@@ -438,7 +465,9 @@ onBeforeUnmount(() => {
         v-model="newTitle"
         aria-label="New task"
         placeholder="Add a task"
-        @keydown.enter.prevent="add"
+        @keydown="traceAddKey"
+        @keydown.enter.prevent="addSubmitFromKeyboard"
+        @click="qaTrace('add_submit_click')"
       />
       <select v-model="newCategoryId" aria-label="New task category">
         <option value="">No category</option>
@@ -447,6 +476,13 @@ onBeforeUnmount(() => {
         </option>
       </select>
       <button type="button" class="category-add" aria-label="Create category" @click="openCategoryComposer">Category +</button>
+      <!--
+        B3: the add form previously had no submit control, so pressing Enter in the
+        field was the only way to create a task. When that keystroke was missed the
+        user had no alternative and no visible affordance. This is a real, labelled
+        submit button; the form's existing @submit handler performs the add.
+      -->
+      <button type="submit" class="category-add add-submit" aria-label="Add task" @click="qaTrace('add_submit_click')">Add</button>
     </form>
 
     <form v-if="categoryComposerOpen" class="category-composer" @submit.prevent="createCategory">

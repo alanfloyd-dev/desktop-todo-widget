@@ -2,6 +2,17 @@ export type ProductWindowMode = "sidebar" | "floating" | "desktop";
 export type SidebarSide = "left" | "right";
 export type TemperatureUnit = "celsius" | "fahrenheit";
 export type FloatingPresentation = "collapsed" | "expanded";
+/**
+ * WebView2 hosting backend.
+ *
+ * `standard` keeps full Windows UI Automation exposure, so screen readers and
+ * automation tools can read the content. `enhanced` enables Acrylic and
+ * transparent hosting but does not expose the WebView content tree to UI
+ * Automation.
+ *
+ * Orthogonal to the window mode, and applied only at startup.
+ */
+export type RenderingBackend = "standard" | "enhanced";
 export type BackgroundType = "glass" | "solid" | "gradient" | "image" | "wallpaper";
 export type TextContrast = "auto" | "light" | "dark";
 export type ResolvedContrast = "light" | "dark";
@@ -85,6 +96,8 @@ export type WeatherCacheStatus = "fresh" | "stale" | "very-stale" | "missing";
 export interface ProductSettings {
   geometryUnitsVersion: number;
   mode: ProductWindowMode;
+  /** Applied only at startup; changing it requires an app restart. */
+  renderingBackend: RenderingBackend;
   x: number | null;
   y: number | null;
   width: number;

@@ -20,6 +20,26 @@ use product_window::ProductWindowRuntime;
 use tauri::Manager;
 use window_mode::NativeWindowState;
 
+/// Application data directory, resolved before Tauri exists.
+///
+/// The rendering backend has to be read from the database before the Tauri
+/// builder creates the config window, but `AppHandle::path()` is only available
+/// afterwards. This reproduces the platform location Tauri uses for the
+/// configured bundle identifier; `setup` asserts the two agree so a future
+/// identifier or platform change cannot silently point the early read at the
+/// wrong file.
+#[cfg(target_os = "windows")]
+fn app_data_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("APPDATA")
+        .map(std::path::PathBuf::from)
+        .map(|roaming| roaming.join("net.alanfloyd.desktop"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn app_data_dir() -> Option<std::path::PathBuf> {
+    None
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let qa_diagnostics = qa_diagnostics::QaDiagnostics::from_process_args();
@@ -30,8 +50,34 @@ pub fn run() {
         qa_diagnostics.startup_material_bypassed(),
         qa_diagnostics.window_to_visual_requested(),
     );
+
+    // --- Rendering backend selection ---------------------------------------
+    // The hosting backend is fixed when the WebView is created, so it must be
+    // resolved before the Tauri builder does that below. The persisted product
+    // setting is the source of truth; the QA flag only exists to force the
+    // composition path in test runs.
+    let early_data_dir = app_data_dir();
+    let persisted_backend = match &early_data_dir {
+        Some(dir) => settings::AppState::read_rendering_backend(dir),
+        None => settings::RenderingBackend::default(),
+    };
+    let qa_forced = qa_diagnostics.composition_controller_requested();
     #[cfg(target_os = "windows")]
-    if qa_diagnostics.composition_controller_requested() {
+    let enhanced_requested = qa_forced || persisted_backend.uses_composition_hosting();
+    #[cfg(not(target_os = "windows"))]
+    let enhanced_requested = false;
+    qa_diagnostics.record_rendering_backend(
+        persisted_backend.as_str(),
+        if enhanced_requested {
+            "enhanced"
+        } else {
+            "standard"
+        },
+        if qa_forced { "qa_override" } else { "persisted_setting" },
+    );
+
+    #[cfg(target_os = "windows")]
+    if enhanced_requested {
         use platform::windows::composition_host;
         // Load the Windows App Runtime before any window/WebView exists: the
         // composition factory later runs inside Wry's WebView creation call
@@ -66,8 +112,20 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            let data_dir = app.path().app_data_dir()?;
-            let database = database::Database::open(data_dir.join("alan-desktop.sqlite3"))
+            let resolved_data_dir = app.path().app_data_dir()?;
+            // The rendering backend was read before the WebView existed, using a
+            // path derived without an AppHandle. Assert the two agree; if they
+            // ever diverge the early read would silently target the wrong file.
+            if let Some(early_dir) = app_data_dir() {
+                if early_dir != resolved_data_dir {
+                    eprintln!(
+                        "[rendering] app_data_dir_mismatch early={} tauri={} — rendering backend was read from the wrong location",
+                        early_dir.display(),
+                        resolved_data_dir.display()
+                    );
+                }
+            }
+            let database = database::Database::open(resolved_data_dir.join("alan-desktop.sqlite3"))
                 .map_err(std::io::Error::other)?;
             app.manage(settings::AppState::load(database).map_err(std::io::Error::other)?);
             product_commands::install_tray(app).map_err(std::io::Error::other)?;

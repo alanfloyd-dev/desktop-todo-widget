@@ -53,6 +53,56 @@ pub enum FloatingPresentation {
     Expanded,
 }
 
+/// WebView2 hosting backend for the product window.
+///
+/// This is a product-level choice, deliberately expressed without naming any
+/// hosting API, and it is **orthogonal to [`ProductWindowMode`]**: Floating,
+/// Sidebar, and Desktop all work on either backend.
+///
+/// * `Standard` — the existing windowed WebView2 controller. Full Windows UI
+///   Automation exposure, so screen readers and automation tools can read the
+///   content. This is the release default.
+/// * `Enhanced` — the CompositionController path that enables Acrylic and
+///   transparent hosting. It currently does **not** expose the WebView content
+///   tree to Windows UI Automation, so it is opt-in.
+///
+/// The choice is read once at startup because the controller type is fixed when
+/// the WebView is created; it cannot be changed without recreating the WebView.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderingBackend {
+    #[default]
+    Standard,
+    Enhanced,
+}
+
+impl RenderingBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Enhanced => "enhanced",
+        }
+    }
+
+    /// True when this backend hosts the WebView through the composition
+    /// controller. The only decision the platform layer needs.
+    pub fn uses_composition_hosting(self) -> bool {
+        matches!(self, Self::Enhanced)
+    }
+}
+
+impl TryFrom<&str> for RenderingBackend {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "standard" => Ok(Self::Standard),
+            "enhanced" => Ok(Self::Enhanced),
+            other => Err(format!("unsupported rendering backend: {other}")),
+        }
+    }
+}
+
 impl TemperatureUnit {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -81,6 +131,12 @@ pub struct ProductSettings {
     #[serde(default = "legacy_geometry_units_version")]
     pub geometry_units_version: u8,
     pub mode: ProductWindowMode,
+    /// Which WebView2 hosting backend the window is created with.
+    ///
+    /// Orthogonal to `mode`: every window mode works on either backend. Chosen
+    /// once at startup because the hosting backend is fixed when the WebView is
+    /// created and cannot be swapped afterwards.
+    pub rendering_backend: RenderingBackend,
     pub x: Option<i32>,
     pub y: Option<i32>,
     pub width: u32,
@@ -120,6 +176,10 @@ impl Default for ProductSettings {
         Self {
             geometry_units_version: 1,
             mode: ProductWindowMode::Floating,
+            // v1 default: the compatibility backend, because it keeps full UI
+            // Automation exposure for screen readers. The Enhanced backend is
+            // opt-in and documented as accessibility-limited.
+            rendering_backend: RenderingBackend::Standard,
             x: None,
             y: None,
             width: 620,
@@ -180,6 +240,29 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Reads the persisted rendering backend without building the full app state.
+    ///
+    /// The hosting backend has to be known *before* Tauri creates the config
+    /// window and its WebView, while `AppState` is only constructed afterwards in
+    /// the setup hook. Reading just this one field early is the smallest way to
+    /// honour that ordering without moving the whole settings load, and it keeps
+    /// a single source of truth: the same `product_settings` row the rest of the
+    /// product already uses.
+    ///
+    /// Returns the default backend when the row is absent or unreadable, so a
+    /// damaged or first-run database can never prevent startup.
+    pub fn read_rendering_backend(data_dir: &std::path::Path) -> RenderingBackend {
+        let Ok(database) = Database::open(data_dir.join("alan-desktop.sqlite3")) else {
+            return RenderingBackend::default();
+        };
+        let Ok(Some(raw)) = database.setting(PRODUCT_SETTINGS_KEY) else {
+            return RenderingBackend::default();
+        };
+        serde_json::from_str::<ProductSettings>(&raw)
+            .map(|settings| settings.rendering_backend)
+            .unwrap_or_default()
+    }
+
     pub fn load(database: Database) -> Result<Self, String> {
         let mut settings = database
             .setting(PRODUCT_SETTINGS_KEY)?
@@ -360,6 +443,51 @@ mod tests {
             .expect("lock");
         assert!(locked.locked);
         assert!(state.snapshot().expect("snapshot").locked);
+    }
+
+    /// Pre-B4 databases have no `renderingBackend` key at all. They must load
+    /// cleanly and land on the compatibility backend, because Enhanced is
+    /// opt-in for v1: silently upgrading existing users to the backend without a
+    /// UI Automation tree would remove screen-reader access on restart.
+    #[test]
+    fn settings_without_rendering_backend_migrate_to_standard() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"mode":"floating","x":null,"y":null,"width":620,"height":720,"monitorIdentity":null,"sidebarSide":"left","sidebarWidth":380,"alwaysOnTop":false,"locked":false,"dayRollover":"04:00","weatherLocation":"","appearance":"geological_observatory"}"#,
+            )
+            .expect("legacy settings");
+        let restored = AppState::load(database)
+            .expect("compatible load")
+            .snapshot()
+            .expect("snapshot");
+        assert_eq!(restored.rendering_backend, super::RenderingBackend::Standard);
+        assert!(!restored.rendering_backend.uses_composition_hosting());
+    }
+
+    #[test]
+    fn rendering_backend_round_trips_and_parses_from_str() {
+        use super::RenderingBackend;
+        assert_eq!(RenderingBackend::default(), RenderingBackend::Standard);
+        assert_eq!(
+            RenderingBackend::try_from("standard").expect("standard"),
+            RenderingBackend::Standard
+        );
+        assert_eq!(
+            RenderingBackend::try_from("enhanced").expect("enhanced"),
+            RenderingBackend::Enhanced
+        );
+        assert!(RenderingBackend::try_from("composition").is_err());
+        assert!(RenderingBackend::Enhanced.uses_composition_hosting());
+        assert!(!RenderingBackend::Standard.uses_composition_hosting());
+
+        let json = serde_json::to_string(&RenderingBackend::Enhanced).expect("serialize");
+        assert_eq!(json, "\"enhanced\"");
+        assert_eq!(
+            serde_json::from_str::<RenderingBackend>("\"standard\"").expect("deserialize"),
+            RenderingBackend::Standard
+        );
     }
 
     #[test]

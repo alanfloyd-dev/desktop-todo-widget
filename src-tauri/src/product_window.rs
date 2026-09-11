@@ -3,8 +3,8 @@ use crate::{
     database::Shortcut,
     platform,
     settings::{
-        AppState, FloatingPresentation, ProductSettings, ProductWindowMode, SidebarSide,
-        TemperatureUnit,
+        AppState, FloatingPresentation, ProductSettings, ProductWindowMode, RenderingBackend,
+        SidebarSide, TemperatureUnit,
     },
     task_day,
     window_mode::{self, NativeWindowState},
@@ -109,6 +109,9 @@ pub struct SettingsPatch {
     display_name: Option<String>,
     homepage_label: Option<String>,
     homepage_url: Option<String>,
+    /// Persisted rendering backend preference. Applied to settings only; the
+    /// hosting backend itself is chosen at startup and needs a restart.
+    rendering_backend: Option<RenderingBackend>,
 }
 
 fn deserialize_nullable_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
@@ -215,6 +218,12 @@ pub fn update_product_settings(
         }
         if let Some(value) = patch.sidebar_width {
             settings.sidebar_width = value.clamp(320, 560);
+        }
+        if let Some(value) = patch.rendering_backend {
+            // Persisted only. The WebView hosting backend is fixed when the
+            // WebView is created, so applying it would require recreating the
+            // WebView; the UI tells the user a restart is required.
+            settings.rendering_backend = value;
         }
         if let Some(value) = patch.display_name {
             settings.display_name = value.trim().to_string();

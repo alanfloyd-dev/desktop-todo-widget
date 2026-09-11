@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { DEFAULT_APPEARANCE, profileInitials, sampleImageLuminance } from "../appearance";
 import type {
@@ -7,6 +7,7 @@ import type {
   AssetPayload,
   LocationCandidate,
   ProductSettings,
+  RenderingBackend,
   TemperatureUnit,
   WeatherViewState,
 } from "../types";
@@ -41,6 +42,7 @@ const emit = defineEmits<{
     avatarAssetId: string | null;
     homepageLabel: string;
     homepageUrl: string;
+    renderingBackend: RenderingBackend;
   }];
 }>();
 
@@ -70,6 +72,17 @@ const provisionalAssets = new Set<string>();
 const homepageLabel = ref(props.settings.homepageLabel);
 const homepageUrl = ref(props.settings.homepageUrl);
 const developerOpen = ref(false);
+/**
+ * Rendering backend draft.
+ *
+ * The hosting backend is fixed when the window's WebView is created, so this
+ * value only takes effect after a restart. That is stated inline on the row
+ * rather than with a modal or a banner.
+ */
+const renderingBackend = ref<RenderingBackend>(props.settings.renderingBackend);
+const renderingBackendChanged = computed(
+  () => renderingBackend.value !== props.settings.renderingBackend,
+);
 
 function save() {
   emit("save", {
@@ -87,6 +100,7 @@ function save() {
     avatarAssetId: avatarAssetId.value,
     homepageLabel: homepageLabel.value,
     homepageUrl: homepageUrl.value,
+    renderingBackend: renderingBackend.value,
   });
 }
 
@@ -319,6 +333,36 @@ onBeforeUnmount(() => {
           <strong id="appearance-settings-heading">APPEARANCE</strong>
           <small>Glass · Graphite Frost</small>
         </div>
+        <div class="settings-row appearance-background-row">
+          <span>
+            <strong>Rendering</strong>
+            <small>
+              {{
+                renderingBackend === "enhanced"
+                  ? "Acrylic and transparent window effects. Screen-reader accessibility is currently limited."
+                  : "Best compatibility and accessibility."
+              }}
+              <template v-if="renderingBackendChanged"> Restart the app to apply this change.</template>
+            </small>
+          </span>
+          <div class="appearance-options" role="group" aria-label="Rendering backend">
+            <button
+              type="button"
+              :class="{ active: renderingBackend === 'standard' }"
+              @click="renderingBackend = 'standard'"
+            >
+              Standard
+            </button>
+            <button
+              type="button"
+              :class="{ active: renderingBackend === 'enhanced' }"
+              @click="renderingBackend = 'enhanced'"
+            >
+              Enhanced transparency
+            </button>
+          </div>
+        </div>
+
         <div class="settings-row appearance-background-row">
           <span><strong>Background</strong><small>Material style</small></span>
           <div class="appearance-options" role="group" aria-label="Background style">
