@@ -28,6 +28,15 @@ pub struct ProductWindowRuntime {
     qa_native_material_permanently_off: bool,
     qa_native_material_bypassed: AtomicBool,
     qa_force_floating_expanded: bool,
+    /// Whether this process actually hosts the WebView through the
+    /// CompositionController.
+    ///
+    /// The native material host sets a `DesktopWindowTarget` on the top-level
+    /// HWND. That is only valid when the WebView is composited into the app's own
+    /// visual tree; driving it while the WebView is windowed (a child HWND)
+    /// replaces the WebView's presented surface and starves it. This flag is what
+    /// keeps the two hosting paths apart.
+    composition_hosting: bool,
     #[cfg(target_os = "windows")]
     native_material: platform::windows::composition_host::NativeWindowContextStore,
 }
@@ -37,12 +46,14 @@ impl ProductWindowRuntime {
         qa_native_material_permanently_off: bool,
         initial_bypass: bool,
         qa_force_floating_expanded: bool,
+        composition_hosting: bool,
     ) -> Self {
         Self {
             applying: AtomicBool::new(false),
             qa_native_material_permanently_off,
             qa_native_material_bypassed: AtomicBool::new(initial_bypass),
             qa_force_floating_expanded,
+            composition_hosting,
             #[cfg(target_os = "windows")]
             native_material: Arc::new(Default::default()),
         }
@@ -304,17 +315,30 @@ fn apply_native_composition(
             .app_handle()
             .state::<crate::qa_diagnostics::QaDiagnostics>()
             .record(format!(
-                "native_material_bypassed=false requested_glass={requested_glass} native_host={native_host:?}"
+                "native_material_bypassed=false requested_glass={requested_glass} native_host={native_host:?} composition_hosting={}",
+                runtime.composition_hosting
             ));
+        // The native material host (DesktopWindowTarget + DesktopAcrylicController)
+        // belongs to the CompositionController hosting path, where the WebView is
+        // composited into the app's own visual tree. Driving it while the WebView
+        // is windowed — the Standard path — puts a composition target on the
+        // parent of the WebView's child HWND: the window then presents only the
+        // acrylic fill (blank frosted glass with a fully mounted Vue app behind
+        // it) and Chromium treats the view as occluded, throttling rendering and
+        // resource loading into multi-second stalls. The Standard path therefore
+        // stays CSS-only, which is what the appearance-composition line below has
+        // always reported.
         if mode == ProductWindowMode::Sidebar
             && appearance.background_type == appearance::BackgroundType::Glass
         {
-            platform::windows::composition_host::apply_material(
-                &runtime.native_material,
-                window,
-                requested_glass,
-                native_host,
-            )?;
+            if runtime.composition_hosting {
+                platform::windows::composition_host::apply_material(
+                    &runtime.native_material,
+                    window,
+                    requested_glass,
+                    native_host,
+                )?;
+            }
             window
                 .set_effects(EffectsBuilder::new().effect(Effect::Acrylic).build())
                 .map_err(|error| error.to_string())?;
@@ -325,12 +349,14 @@ fn apply_native_composition(
             window
                 .set_effects(None)
                 .map_err(|error| error.to_string())?;
-            platform::windows::composition_host::apply_material(
-                &runtime.native_material,
-                window,
-                requested_glass,
-                native_host,
-            )?;
+            if runtime.composition_hosting {
+                platform::windows::composition_host::apply_material(
+                    &runtime.native_material,
+                    window,
+                    requested_glass,
+                    native_host,
+                )?;
+            }
             let fallback = if mode == ProductWindowMode::Desktop
                 && appearance.background_type == appearance::BackgroundType::Glass
             {

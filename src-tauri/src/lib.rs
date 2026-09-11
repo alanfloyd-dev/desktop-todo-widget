@@ -45,11 +45,6 @@ pub fn run() {
     let qa_diagnostics = qa_diagnostics::QaDiagnostics::from_process_args();
     qa_diagnostics.apply_webview_hosting_environment();
     qa_diagnostics::warn_if_release_without_embedded_frontend();
-    let product_runtime = ProductWindowRuntime::new(
-        qa_diagnostics.native_material_off(),
-        qa_diagnostics.startup_material_bypassed(),
-        qa_diagnostics.window_to_visual_requested(),
-    );
 
     // --- Rendering backend selection ---------------------------------------
     // The hosting backend is fixed when the WebView is created, so it must be
@@ -74,6 +69,16 @@ pub fn run() {
             "standard"
         },
         if qa_forced { "qa_override" } else { "persisted_setting" },
+    );
+
+    // The runtime carries the hosting decision: the native material host may only
+    // be driven when the WebView is actually composited into this app's visual
+    // tree (see `apply_native_composition`).
+    let product_runtime = ProductWindowRuntime::new(
+        qa_diagnostics.native_material_off(),
+        qa_diagnostics.startup_material_bypassed(),
+        qa_diagnostics.window_to_visual_requested(),
+        enhanced_requested,
     );
 
     #[cfg(target_os = "windows")]
