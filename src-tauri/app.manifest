@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Base Windows application manifest for the product executable.
+
+  This file owns only what the product itself needs. The Windows App SDK / WinRT
+  activation entries are NOT maintained here: `build.rs` merges in the
+  `composition-host.manifest` produced by
+  `tools/windows-app-sdk/prepare-runtime-payload.ps1`, which is generated from the
+  pinned runtime packages' own `package.appxfragment` files. That keeps the
+  activatable-class list exactly in sync with the runtime that ships beside the exe.
+
+  See docs/windows-app-sdk-runtime.md.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"
+          xmlns:asmv3="urn:schemas-microsoft-com:asm.v3"
+          xmlns:winrtv1="urn:schemas-microsoft-com:winrt.v1">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls"
+                        version="6.0.0.0" processorArchitecture="*"
+                        publicKeyToken="6595b64144ccf1df" language="*" />
+    </dependentAssembly>
+  </dependency>
+</assembly>

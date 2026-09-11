@@ -1,0 +1,484 @@
+use std::{
+    fs::{File, OpenOptions},
+    io::Write,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
+};
+
+use tauri::{Manager, WebviewWindow};
+
+pub struct QaDiagnostics {
+    native_material_off: bool,
+    native_material_late: bool,
+    window_to_visual: bool,
+    composition_controller: bool,
+    log_path: Option<PathBuf>,
+    write_lock: Mutex<()>,
+    frontend_ready: AtomicBool,
+}
+
+impl QaDiagnostics {
+    pub fn from_process_args() -> Self {
+        let native_material_off =
+            std::env::args_os().any(|argument| argument == "--qa-native-material-off");
+        let native_material_late =
+            std::env::args_os().any(|argument| argument == "--qa-native-material-late");
+        let window_to_visual =
+            std::env::args_os().any(|argument| argument == "--qa-window-to-visual");
+        let composition_controller =
+            std::env::args_os().any(|argument| argument == "--qa-composition-controller");
+        let log_name = if native_material_off {
+            "phase7b-qa-material-off.log"
+        } else if window_to_visual {
+            "phase7b-qa-window-to-visual.log"
+        } else if native_material_late {
+            "phase7b-qa-material-late.log"
+        } else {
+            "phase7b-qa-material-on.log"
+        };
+        let log_path = std::env::current_exe()
+            .ok()
+            .and_then(|executable| executable.parent().map(|parent| parent.join(log_name)));
+        if let Some(path) = &log_path {
+            let _ = File::create(path);
+        }
+        let diagnostics = Self {
+            native_material_off,
+            native_material_late,
+            window_to_visual,
+            composition_controller,
+            log_path,
+            write_lock: Mutex::new(()),
+            frontend_ready: AtomicBool::new(false),
+        };
+        diagnostics.record(format!(
+            "qa_session_start=true native_material_off={native_material_off} native_material_late={native_material_late} window_to_visual={window_to_visual} composition_controller={composition_controller} frontend_asset_mode={}",
+            frontend_asset_mode()
+        ));
+        diagnostics.record("webview_created=false webview_navigation_started=false webview_navigation_completed=false frontend_ready=false");
+        diagnostics
+    }
+
+    pub fn native_material_off(&self) -> bool {
+        self.native_material_off
+    }
+
+    pub fn native_material_late(&self) -> bool {
+        self.native_material_late || self.window_to_visual
+    }
+
+    pub fn window_to_visual_requested(&self) -> bool {
+        self.window_to_visual
+    }
+
+    pub fn composition_controller_requested(&self) -> bool {
+        self.composition_controller
+    }
+
+    pub fn startup_material_bypassed(&self) -> bool {
+        self.native_material_off || self.native_material_late || self.window_to_visual
+    }
+
+    pub fn mode_name(&self) -> &'static str {
+        if self.native_material_off {
+            "off"
+        } else if self.native_material_late || self.window_to_visual {
+            "late"
+        } else {
+            "early"
+        }
+    }
+
+    pub fn apply_webview_hosting_environment(&self) {
+        if !self.window_to_visual {
+            return;
+        }
+        self.record("[p7b-wtv] requested=true");
+        std::env::set_var(
+            "COREWEBVIEW2_FORCED_HOSTING_MODE",
+            "COREWEBVIEW2_HOSTING_MODE_WINDOW_TO_VISUAL",
+        );
+        let env_value =
+            std::env::var("COREWEBVIEW2_FORCED_HOSTING_MODE").unwrap_or_else(|_| "<unset>".into());
+        let applied = env_value == "COREWEBVIEW2_HOSTING_MODE_WINDOW_TO_VISUAL";
+        self.record("[p7b-wtv] requested_hosting_mode=window-to-visual");
+        self.record(format!("[p7b-wtv] env_value={env_value}"));
+        self.record(format!("[p7b-wtv] env_applied_before_webview={applied}"));
+    }
+
+    pub fn record(&self, message: impl AsRef<str>) {
+        eprintln!("[phase7b-qa] {}", message.as_ref());
+        let Ok(_guard) = self.write_lock.lock() else {
+            return;
+        };
+        let Some(path) = &self.log_path else {
+            return;
+        };
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{}", message.as_ref());
+        }
+    }
+
+    pub fn record_frontend_ready(&self) {
+        self.frontend_ready.store(true, Ordering::Release);
+        self.record(format!(
+            "frontend_ready=true timestamp_ms={}",
+            timestamp_ms()
+        ));
+    }
+}
+
+pub fn record_webview_state(window: &WebviewWindow, diagnostics: &QaDiagnostics) {
+    let bounds = window.as_ref().bounds();
+    let window_visible = window.is_visible();
+    diagnostics.record(format!(
+        "webview_created=true webview_bounds={} webview_window_visible={}",
+        format_bounds(bounds),
+        format_result(window_visible)
+    ));
+
+    #[cfg(target_os = "windows")]
+    {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            ICoreWebView2CompositionController, ICoreWebView2Controller, ICoreWebView2_2,
+            COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN,
+        };
+        use windows::{core::Interface, Win32::Foundation::RECT};
+        use windows_core::BOOL;
+
+        let app = window.app_handle().clone();
+        let outcome = window.with_webview(move |webview| unsafe {
+            let diagnostics = app.state::<QaDiagnostics>();
+            let controller: ICoreWebView2Controller = webview.controller();
+            let composition_controller = controller
+                .cast::<ICoreWebView2CompositionController>()
+                .is_ok();
+            let mut visible = BOOL(0);
+            let mut controller_bounds = RECT::default();
+            let visible_result = controller.IsVisible(&mut visible);
+            let bounds_result = controller.Bounds(&mut controller_bounds);
+            diagnostics.record(format!(
+                "webview2_controller_exists=true controller_api=ICoreWebView2Controller composition_controller={} webview2_visible={} webview2_bounds={} controller_query_ok={}",
+                composition_controller,
+                visible.0 != 0,
+                format_rect(controller_bounds),
+                visible_result.is_ok() && bounds_result.is_ok()
+            ));
+
+            if diagnostics.window_to_visual_requested() {
+                let env_value = std::env::var("COREWEBVIEW2_FORCED_HOSTING_MODE")
+                    .unwrap_or_else(|_| "<unset>".into());
+                diagnostics.record(format!("[p7b-wtv] env_value_after_webview={env_value}"));
+                diagnostics.record(
+                    "[p7b-wtv] runtime_support_detection=not_available_in_webview2_api",
+                );
+                diagnostics.record("[p7b-wtv] actual_hosting_mode=not_queryable");
+                diagnostics.record("[p7b-wtv] window_to_visual_confirmed=false");
+                diagnostics.record(
+                    "[p7b-wtv] window_to_visual_not_active=not_determinable_from_controller_api",
+                );
+            }
+
+            let core = controller.CoreWebView2();
+            let runtime_version = core
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|core| core.cast::<ICoreWebView2_2>())
+                .and_then(|core| core.Environment())
+                .and_then(|environment| {
+                    let mut version = windows_core::PWSTR::null();
+                    environment.BrowserVersionString(&mut version)?;
+                    Ok(webview2_com::take_pwstr(version))
+                });
+            match runtime_version {
+                Ok(version) => diagnostics.record(format!(
+                    "[p7b-wtv] selected_webview2_runtime=system-selected runtime_version={version}"
+                )),
+                Err(error) => diagnostics.record(format!(
+                    "[p7b-wtv] selected_webview2_runtime=system-selected runtime_version=unavailable hresult=0x{:08X}",
+                    error.code().0 as u32
+                )),
+            }
+            // Phase 7C.3-B1: `completed_url` is what pinned the release blocker —
+            // it showed the release binary navigating to `build.devUrl` instead of
+            // the `tauri://localhost` embedded asset protocol. Kept because a
+            // dev/production URL mix-up is otherwise invisible: navigation simply
+            // fails and the window renders nothing.
+            let callback_app = app.clone();
+            let handler = webview2_com::NavigationCompletedEventHandler::create(
+                Box::new(move |sender, args| {
+                    let diagnostics = callback_app.state::<QaDiagnostics>();
+                    let mut success = BOOL(0);
+                    let mut status = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+                    let query_ok = if let Some(args) = args {
+                        args.IsSuccess(&mut success).is_ok()
+                            && args.WebErrorStatus(&mut status).is_ok()
+                    } else {
+                        false
+                    };
+                    diagnostics.record(format!(
+                        "webview2_navigation_completed=true success={} web_error_status={} status_query_ok={query_ok} completed_url={}",
+                        success.0 != 0,
+                        status.0,
+                        webview_source(sender.as_ref())
+                    ));
+                    Ok(())
+                }),
+            );
+            let mut token = 0;
+            match &core {
+                Ok(core) => match core.add_NavigationCompleted(&handler, &mut token) {
+                    Ok(()) => diagnostics.record("webview2_navigation_status_hook=true"),
+                    Err(error) => diagnostics.record(format!(
+                        "webview2_navigation_status_hook=false hresult=0x{:08X}",
+                        error.code().0 as u32
+                    )),
+                },
+                Err(error) => diagnostics.record(format!(
+                    "webview2_navigation_status_hook=false core_unavailable hresult=0x{:08X}",
+                    error.code().0 as u32
+                )),
+            }
+
+            // Records the navigation target chosen by Tauri and whether any
+            // previously registered NavigationStarting handler cancelled it.
+            // Observation only; it must never call `put_Cancel`.
+            if let Ok(core) = &core {
+                diagnostics.record(format!(
+                    "webview2_source_url_at_setup={}",
+                    webview_source(Some(core))
+                ));
+            }
+            let starting_app = app.clone();
+            let starting_handler = webview2_com::NavigationStartingEventHandler::create(Box::new(
+                move |_sender, args| {
+                    let diagnostics = starting_app.state::<QaDiagnostics>();
+                    let mut cancel = BOOL(0);
+                    let starting_url = args
+                        .as_ref()
+                        .and_then(|args| {
+                            let mut uri = windows_core::PWSTR::null();
+                            args.Uri(&mut uri).ok()?;
+                            Some(webview2_com::take_pwstr(uri))
+                        })
+                        .unwrap_or_else(|| "<unavailable>".into());
+                    if let Some(args) = args.as_ref() {
+                        let _ = args.Cancel(&mut cancel);
+                    }
+                    diagnostics.record(format!(
+                        "webview2_navigation_starting=true starting_url={starting_url} already_cancelled_by_other_handler={}",
+                        cancel.0 != 0
+                    ));
+                    Ok(())
+                },
+            ));
+            let mut starting_token = 0;
+            match &core {
+                Ok(core) => {
+                    match core.add_NavigationStarting(&starting_handler, &mut starting_token) {
+                        Ok(()) => diagnostics.record("webview2_navigation_starting_hook=true"),
+                        Err(error) => diagnostics.record(format!(
+                            "webview2_navigation_starting_hook=false hresult=0x{:08X}",
+                            error.code().0 as u32
+                        )),
+                    }
+                }
+                Err(error) => diagnostics.record(format!(
+                    "webview2_navigation_starting_hook=false core_unavailable hresult=0x{:08X}",
+                    error.code().0 as u32
+                )),
+            }
+        });
+        if let Err(error) = outcome {
+            diagnostics.record(format!(
+                "webview2_controller_query_failed={}",
+                sanitize_error(&error.to_string())
+            ));
+        }
+        record_child_hwnd_structure(window, diagnostics);
+    }
+}
+
+#[tauri::command]
+pub fn qa_frontend_ready(state: tauri::State<'_, QaDiagnostics>) {
+    state.record_frontend_ready();
+}
+
+#[tauri::command]
+pub fn qa_frontend_input(state: tauri::State<'_, QaDiagnostics>, kind: &str) {
+    let kind = match kind {
+        "pointerdown" => "pointerdown",
+        "contextmenu" => "contextmenu",
+        _ => "other",
+    };
+    state.record(format!("frontend_input_received={kind}"));
+}
+
+#[tauri::command]
+pub fn qa_diagnostic_mode(state: tauri::State<'_, QaDiagnostics>) -> &'static str {
+    state.mode_name()
+}
+
+pub fn frontend_asset_mode() -> &'static str {
+    if cfg!(dev) {
+        "dev-server"
+    } else {
+        "embedded"
+    }
+}
+
+/// True when this binary serves the embedded frontend from the `tauri://localhost`
+/// asset protocol rather than navigating to `build.devUrl`.
+///
+/// Tauri derives this from the `custom-protocol` cargo feature at compile time.
+pub fn serves_embedded_frontend() -> bool {
+    !cfg!(dev)
+}
+
+/// Warns when an optimized build will navigate to the dev server.
+///
+/// Tauri decides dev-vs-production from the `custom-protocol` feature, **not** from
+/// the cargo profile: any build without that feature is a dev build even with
+/// `--release`. Such a binary renders nothing whenever the dev server is absent,
+/// which is exactly how a release artifact silently shipped broken once. The
+/// condition is detected here so it is loud instead.
+pub fn warn_if_release_without_embedded_frontend() {
+    if cfg!(debug_assertions) || serves_embedded_frontend() {
+        return;
+    }
+    eprintln!(
+        "[frontend] WARNING release_profile_without_custom_protocol feature=true \
+         frontend_asset_mode=dev-server \
+         this binary will navigate to build.devUrl and render nothing without a dev server; \
+         build with: cargo build --release --features custom-protocol"
+    );
+}
+
+fn format_bounds(bounds: tauri::Result<tauri::Rect>) -> String {
+    match bounds {
+        Ok(bounds) => format!("{:?}", bounds),
+        Err(error) => format!("unavailable({})", sanitize_error(&error.to_string())),
+    }
+}
+
+fn format_result(result: tauri::Result<bool>) -> String {
+    match result {
+        Ok(value) => value.to_string(),
+        Err(error) => format!("unavailable({})", sanitize_error(&error.to_string())),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn format_rect(rect: windows::Win32::Foundation::RECT) -> String {
+    format!(
+        "{},{},{}x{}",
+        rect.left,
+        rect.top,
+        (rect.right - rect.left).max(0),
+        (rect.bottom - rect.top).max(0)
+    )
+}
+
+fn sanitize_error(error: &str) -> String {
+    error.replace(['\r', '\n'], " ")
+}
+
+/// Reads `ICoreWebView2::Source` for navigation diagnostics.
+#[cfg(target_os = "windows")]
+fn webview_source(core: Option<&webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2>) -> String {
+    let Some(core) = core else {
+        return "<unavailable>".into();
+    };
+    let mut source = windows_core::PWSTR::null();
+    match unsafe { core.Source(&mut source) } {
+        Ok(()) => {
+            let value = webview2_com::take_pwstr(source);
+            if value.is_empty() {
+                "<empty>".into()
+            } else {
+                value
+            }
+        }
+        Err(error) => format!("<error 0x{:08X}>", error.code().0 as u32),
+    }
+}
+
+pub fn timestamp_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+fn record_child_hwnd_structure(window: &WebviewWindow, diagnostics: &QaDiagnostics) {
+    use std::ffi::c_void;
+    use windows::Win32::{
+        Foundation::{HWND, LPARAM},
+        UI::WindowsAndMessaging::{
+            EnumChildWindows, GetClassNameW, GetParent, GetWindow, IsWindowVisible, GW_HWNDNEXT,
+            GW_HWNDPREV,
+        },
+    };
+    use windows_core::BOOL;
+
+    unsafe extern "system" fn collect(hwnd: HWND, state: LPARAM) -> BOOL {
+        let children = &mut *(state.0 as *mut Vec<HWND>);
+        children.push(hwnd);
+        BOOL(1)
+    }
+
+    let Ok(root) = window.hwnd() else {
+        diagnostics.record("hwnd_structure_available=false");
+        return;
+    };
+    let root = HWND(root.0);
+    let mut descendants = Vec::new();
+    unsafe {
+        let _ = EnumChildWindows(
+            Some(root),
+            Some(collect),
+            LPARAM((&mut descendants as *mut Vec<HWND>).cast::<c_void>() as isize),
+        );
+    }
+    diagnostics.record(format!(
+        "top_level_hwnd=0x{:X} immediate_child_count={}",
+        root.0 as usize,
+        descendants
+            .iter()
+            .filter(|child| unsafe { GetParent(**child).ok() == Some(root) })
+            .count()
+    ));
+    for (z_index, child) in descendants
+        .into_iter()
+        .filter(|child| unsafe { GetParent(*child).ok() == Some(root) })
+        .enumerate()
+    {
+        let mut class_name = [0_u16; 256];
+        let length = unsafe { GetClassNameW(child, &mut class_name) }.max(0) as usize;
+        let class_name = String::from_utf16_lossy(&class_name[..length]);
+        let previous = unsafe { GetWindow(child, GW_HWNDPREV).ok() };
+        let next = unsafe { GetWindow(child, GW_HWNDNEXT).ok() };
+        diagnostics.record(format!(
+            "child_hwnd=0x{:X} class={} parent=0x{:X} visible={} z_index={} z_previous={} z_next={}",
+            child.0 as usize,
+            class_name,
+            root.0 as usize,
+            unsafe { IsWindowVisible(child).as_bool() },
+            z_index,
+            format_optional_hwnd(previous),
+            format_optional_hwnd(next)
+        ));
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn format_optional_hwnd(hwnd: Option<windows::Win32::Foundation::HWND>) -> String {
+    hwnd.map_or_else(
+        || "none".into(),
+        |value| format!("0x{:X}", value.0 as usize),
+    )
+}

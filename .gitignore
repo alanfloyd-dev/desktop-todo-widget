@@ -14,7 +14,17 @@ native-shell-probe.pdb
 .phase31-target/
 .phase4-target/
 .phase7-target/
+.phase7b-target/
+.phase7b-standalone-target/
+.phase7b-validation-target/
+.phase7b-wtv-target/
+.phase7b-qa-appdata/
 cargo-target-phase7/
+
+# Staged self-contained Windows App SDK payload and its NuGet package cache.
+# Produced by tools/windows-app-sdk/prepare-runtime-payload.ps1; never committed.
+tools/windows-app-sdk/runtime/
+tools/windows-app-sdk/cache/
 
 # Package manager local cache
 .pnpm-store/
