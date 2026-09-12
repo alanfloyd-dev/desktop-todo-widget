@@ -27,7 +27,9 @@ defineEmits<{
 
 const { t, intlLocale } = useI18n();
 
-const dragRegionEnabled = computed(() => props.mode === "floating" && !props.locked);
+const dragRegionEnabled = computed(
+  () => (props.mode === "floating" || props.mode === "desktop") && !props.locked,
+);
 const initials = computed(() => profileInitials(props.displayName));
 
 /**

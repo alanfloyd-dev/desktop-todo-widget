@@ -496,17 +496,26 @@ pub fn request_window_drag(
     window: WebviewWindow,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    if !window_drag_allowed(&state.snapshot()?) {
+    let settings = state.snapshot()?;
+    if !window_drag_allowed(&settings) {
         return Ok(());
     }
+    eprintln!(
+        "[window-drag] requested=true mode={:?} locked={} composition_hosting=true",
+        settings.mode, settings.locked
+    );
     window.start_dragging().map_err(|error| error.to_string())
 }
 
 fn window_drag_allowed(settings: &ProductSettings) -> bool {
-    // Native dragging is a Floating-only capability. Keeping the same guard
+    // Native dragging is a Floating capability. Sidebar is edge-anchored, so it
+    // is never freely repositioned and keeps the guard. Keeping the same guard
     // behind the command prevents future Weather/Appearance DOM changes from
-    // accidentally enabling top-level dragging in Sidebar or Desktop mode.
-    settings.mode == ProductWindowMode::Floating && !settings.locked
+    // accidentally enabling top-level dragging in Sidebar mode.
+    matches!(
+        settings.mode,
+        ProductWindowMode::Floating | ProductWindowMode::Desktop
+    ) && !settings.locked
 }
 
 /// Whether the product window should expose a user-grabbable sizing border.
@@ -516,18 +525,26 @@ fn window_drag_allowed(settings: &ProductSettings) -> bool {
 /// width from the `Resized` event. On a frameless window, though, omitting
 /// `WS_SIZEBOX` leaves no edge to grab, which silently froze that setting at
 /// whatever value had last been stored. Floating in its collapsed Orb
-/// presentation and the Desktop widget stay fixed-size.
+/// presentation stays fixed-size.
+///
+/// Desktop is resizable while unlocked so the widget can be sized by hand. It is
+/// a frameless `WS_CHILD` of `SHELLDLL_DefView`, so it has no native frame: the
+/// sizing border comes from the undecorated resize borders Tauri installs for
+/// frameless resizable windows, and the Desktop child style keeps the
+/// `WS_THICKFRAME` bit those borders test for (`window_mode`). The
+/// `Resized`/`Moved` handlers already persist Desktop geometry, so a resize
+/// reuses the whole existing geometry path instead of adding a second one.
 ///
 /// Sidebar ignores `locked` deliberately: the lock guards free repositioning,
 /// while the sidebar is always anchored to a screen edge and the Resized handler
 /// persists its width regardless of lock state.
-fn product_window_resizable(mode: ProductWindowMode, settings: &ProductSettings) -> bool {
+pub(crate) fn product_window_resizable(mode: ProductWindowMode, settings: &ProductSettings) -> bool {
     match mode {
         ProductWindowMode::Sidebar => true,
         ProductWindowMode::Floating => {
             settings.floating_presentation == FloatingPresentation::Expanded && !settings.locked
         }
-        ProductWindowMode::Desktop => false,
+        ProductWindowMode::Desktop => !settings.locked,
     }
 }
 
@@ -645,8 +662,14 @@ pub fn apply_product_mode(
         .set_decorations(false)
         .map_err(|error| error.to_string())?;
     if mode == ProductWindowMode::Desktop {
+        // Every tao window-flag setter recomputes the whole Win32 style from
+        // tao's flags, so any of them running *after* the Shell reparent would
+        // overwrite the child style `window_mode` just applied (`WS_CHILD` and
+        // the sizing-border bit included). The widget's final style therefore
+        // has to be settled before `apply_adapter_desktop_mode`, and the
+        // generic `set_resizable` pass below is skipped for Desktop.
         window
-            .set_resizable(false)
+            .set_resizable(product_window_resizable(mode, &settings))
             .map_err(|error| error.to_string())?;
     }
 
@@ -655,6 +678,9 @@ pub fn apply_product_mode(
         ProductWindowMode::Desktop => {
             window
                 .set_shadow(false)
+                .map_err(|error| error.to_string())?;
+            window
+                .set_always_on_top(false)
                 .map_err(|error| error.to_string())?;
             apply_minimum_size(window, 360, 500)?;
             let scale_factor =
@@ -672,9 +698,6 @@ pub fn apply_product_mode(
                 normalized_scale_factor(window_mode::desktop_window_scale_factor(window)?);
             applied_desktop_bounds =
                 Some(physical_bounds_to_logical(applied_physical, applied_scale));
-            window
-                .set_always_on_top(false)
-                .map_err(|error| error.to_string())?;
         }
         ProductWindowMode::Floating => {
             window_mode::apply_adapter_mode(window, native_state, "normal")?;
@@ -705,9 +728,13 @@ pub fn apply_product_mode(
                 .map_err(|error| error.to_string())?;
         }
     }
-    window
-        .set_resizable(product_window_resizable(mode, &settings))
-        .map_err(|error| error.to_string())?;
+    if mode != ProductWindowMode::Desktop {
+        // Desktop already settled this before the reparent; re-running it would
+        // clobber the child style. See the ordering note above.
+        window
+            .set_resizable(product_window_resizable(mode, &settings))
+            .map_err(|error| error.to_string())?;
+    }
     app_state.update(|stored| {
         stored.mode = mode;
         if let Some(bounds) = applied_desktop_bounds {
@@ -1422,7 +1449,39 @@ mod tests {
             ProductWindowMode::Floating,
             &collapsed
         ));
-        assert!(!product_window_resizable(ProductWindowMode::Desktop, &collapsed));
+        // The Desktop widget is a frameless child, so it used to be fixed-size.
+        // v1 usability makes it resizable while unlocked, through the same
+        // undecorated resize borders Sidebar uses.
+        assert!(product_window_resizable(
+            ProductWindowMode::Desktop,
+            &collapsed
+        ));
+        let desktop_locked = ProductSettings {
+            mode: ProductWindowMode::Desktop,
+            locked: true,
+            ..ProductSettings::default()
+        };
+        assert!(!product_window_resizable(
+            ProductWindowMode::Desktop,
+            &desktop_locked
+        ));
+    }
+
+    #[test]
+    fn locked_desktop_is_neither_draggable_nor_resizable() {
+        let desktop = ProductSettings {
+            mode: ProductWindowMode::Desktop,
+            ..ProductSettings::default()
+        };
+        assert!(window_drag_allowed(&desktop));
+        assert!(product_window_resizable(ProductWindowMode::Desktop, &desktop));
+
+        let locked = ProductSettings {
+            locked: true,
+            ..desktop
+        };
+        assert!(!window_drag_allowed(&locked));
+        assert!(!product_window_resizable(ProductWindowMode::Desktop, &locked));
     }
 
     #[test]
@@ -1498,7 +1557,7 @@ mod tests {
     }
 
     #[test]
-    fn native_window_drag_is_only_eligible_for_unlocked_floating_mode() {
+    fn native_window_drag_is_eligible_for_unlocked_floating_and_desktop() {
         let mut settings = ProductSettings::default();
         assert!(window_drag_allowed(&settings));
 
@@ -1510,7 +1569,7 @@ mod tests {
         assert!(!window_drag_allowed(&settings));
 
         settings.mode = ProductWindowMode::Desktop;
-        assert!(!window_drag_allowed(&settings));
+        assert!(window_drag_allowed(&settings));
     }
 
     #[test]

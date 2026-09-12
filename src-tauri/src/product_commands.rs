@@ -98,13 +98,12 @@ pub fn dispatch_product_action(
         "lock.toggle" => {
             let locked = !state.snapshot()?.locked;
             let updated = state.update(|settings| settings.locked = locked)?;
-            // Lock guards free positioning. Sidebar is always edge-anchored, and
-            // its window width *is* the persisted `sidebarWidth`, so it stays
-            // resizable regardless of the lock — matching `apply_product_mode`.
-            let resizable = updated.mode == ProductWindowMode::Sidebar
-                || (!locked
-                    && updated.mode == ProductWindowMode::Floating
-                    && updated.floating_presentation == FloatingPresentation::Expanded);
+            // Lock guards free positioning and native resizing. Sidebar is always
+            // edge-anchored, and its window width *is* the persisted
+            // `sidebarWidth`, so it stays resizable regardless of the lock —
+            // matching `apply_product_mode`. Desktop follows Floating: resizable
+            // exactly while unlocked.
+            let resizable = product_window::product_window_resizable(updated.mode, &updated);
             window
                 .set_resizable(resizable)
                 .map_err(|error| error.to_string())?;

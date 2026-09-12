@@ -2298,8 +2298,16 @@ fn frameless_product_child_style(style: isize) -> isize {
     // WS_MAXIMIZEBOX and WS_TABSTOP share the same numeric bit. Once the HWND
     // becomes a child, that bit is the input-critical TABSTOP invariant and
     // must not be cleared with the other top-level frame controls.
-    interactive_child_style(style)
-        & !(win32::WS_CAPTION | win32::WS_THICKFRAME | win32::WS_SYSMENU | win32::WS_MINIMIZEBOX)
+    //
+    // WS_THICKFRAME is deliberately *kept* even though the child is frameless:
+    // it is the sizing-border bit the undecorated resize borders test for
+    // (`TAURI_DRAG_RESIZE_BORDERS` only reports `HT*` when the parent carries
+    // `WS_SIZEBOX`). A child window has no non-client area, so the bit does not
+    // draw a frame — it only makes the resize hit zones reachable, which is what
+    // lets the Desktop widget be resized through the same verified path as
+    // Sidebar instead of a bespoke Win32 sizing loop.
+    (interactive_child_style(style) & !(win32::WS_CAPTION | win32::WS_SYSMENU | win32::WS_MINIMIZEBOX))
+        | win32::WS_THICKFRAME
 }
 
 #[cfg(target_os = "windows")]
@@ -2838,9 +2846,21 @@ mod tests {
         assert_ne!(style & win32::WS_TABSTOP, 0);
         assert_eq!(style & win32::WS_POPUP, 0);
         assert_eq!(style & win32::WS_CAPTION, 0);
-        assert_eq!(style & win32::WS_THICKFRAME, 0);
         assert_eq!(style & win32::WS_SYSMENU, 0);
         assert_eq!(style & win32::WS_MINIMIZEBOX, 0);
+        // Sizing-border bit: retained for the undecorated resize hit zones. It
+        // is not a visible frame on a child window, which has no non-client area.
+        assert_ne!(style & win32::WS_THICKFRAME, 0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn product_desktop_style_adds_the_sizing_bit_even_without_it() {
+        // Desktop is entered from a window whose WS_THICKFRAME may already have
+        // been cleared (unlocked Floating keeps it, locked Floating and Orb do
+        // not), so the resize hit zones must not depend on the incoming style.
+        let style = frameless_product_child_style(win32::WS_POPUP | win32::WS_CAPTION);
+        assert_ne!(style & win32::WS_THICKFRAME, 0);
     }
 
     #[cfg(target_os = "windows")]
