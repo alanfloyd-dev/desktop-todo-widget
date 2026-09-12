@@ -1,4 +1,5 @@
 use crate::{
+    locale,
     product_window::{self, ProductViewState, ProductWindowRuntime},
     settings::{AppState, FloatingPresentation, ProductWindowMode, SidebarSide},
     window_mode::NativeWindowState,
@@ -160,50 +161,54 @@ pub fn refresh_tray_menu(app: &tauri::AppHandle) -> Result<(), String> {
 
 fn build_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>, String> {
     let settings = app.state::<AppState>().snapshot()?;
-    let sidebar = CheckMenuItemBuilder::with_id("mode.sidebar", "Sidebar")
+    let labels = settings
+        .language
+        .resolve(locale::system_locale())
+        .labels();
+    let sidebar = CheckMenuItemBuilder::with_id("mode.sidebar", labels.sidebar)
         .checked(settings.mode == ProductWindowMode::Sidebar)
         .build(app)
         .map_err(|error| error.to_string())?;
-    let floating = CheckMenuItemBuilder::with_id("mode.floating", "Floating")
+    let floating = CheckMenuItemBuilder::with_id("mode.floating", labels.floating)
         .checked(settings.mode == ProductWindowMode::Floating)
         .build(app)
         .map_err(|error| error.to_string())?;
-    let desktop = CheckMenuItemBuilder::with_id("mode.desktop", "Desktop — Experimental")
+    let desktop = CheckMenuItemBuilder::with_id("mode.desktop", labels.desktop_experimental)
         .checked(settings.mode == ProductWindowMode::Desktop)
         .build(app)
         .map_err(|error| error.to_string())?;
-    let mode = SubmenuBuilder::with_id(app, "window-mode", "Window mode")
+    let mode = SubmenuBuilder::with_id(app, "window-mode", labels.window_mode)
         .items(&[&sidebar, &floating, &desktop])
         .build()
         .map_err(|error| error.to_string())?;
 
-    let left = CheckMenuItemBuilder::with_id("side.left", "Left")
+    let left = CheckMenuItemBuilder::with_id("side.left", labels.left)
         .checked(settings.sidebar_side == SidebarSide::Left)
         .build(app)
         .map_err(|error| error.to_string())?;
-    let right = CheckMenuItemBuilder::with_id("side.right", "Right")
+    let right = CheckMenuItemBuilder::with_id("side.right", labels.right)
         .checked(settings.sidebar_side == SidebarSide::Right)
         .build(app)
         .map_err(|error| error.to_string())?;
-    let side = SubmenuBuilder::with_id(app, "sidebar-side", "Side")
+    let side = SubmenuBuilder::with_id(app, "sidebar-side", labels.side)
         .enabled(settings.mode == ProductWindowMode::Sidebar)
         .items(&[&left, &right])
         .build()
         .map_err(|error| error.to_string())?;
 
-    let locked = CheckMenuItemBuilder::with_id("lock.toggle", "Lock position")
+    let locked = CheckMenuItemBuilder::with_id("lock.toggle", labels.lock_position)
         .checked(settings.locked)
         .build(app)
         .map_err(|error| error.to_string())?;
-    let always_on_top = CheckMenuItemBuilder::with_id("always_on_top.toggle", "Always on top")
+    let always_on_top = CheckMenuItemBuilder::with_id("always_on_top.toggle", labels.always_on_top)
         .enabled(settings.mode != ProductWindowMode::Desktop)
         .checked(settings.always_on_top && settings.mode != ProductWindowMode::Desktop)
         .build(app)
         .map_err(|error| error.to_string())?;
     let presentation_label = if settings.floating_presentation == FloatingPresentation::Collapsed {
-        "Expand Floating"
+        labels.expand_floating
     } else {
-        "Collapse to Avatar Orb"
+        labels.collapse_floating
     };
     let presentation_action = if settings.floating_presentation == FloatingPresentation::Collapsed {
         "floating.expand"
@@ -221,8 +226,8 @@ fn build_tray_menu(app: &tauri::AppHandle) -> Result<tauri::menu::Menu<tauri::Wr
         .separator()
         .items(&[&locked, &always_on_top, &presentation])
         .separator()
-        .text("settings", "Settings")
-        .text("quit", "Quit")
+        .text("settings", labels.settings)
+        .text("quit", labels.quit)
         .build()
         .map_err(|error| error.to_string())
 }

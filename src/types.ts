@@ -20,6 +20,13 @@ export type ImageFit = "cover" | "contain" | "stretch";
 export type ImagePosition = "center" | "top" | "bottom";
 export type ReviewPeriod = "daily" | "weekly" | "monthly";
 export type TaskStatus = "pending" | "completed" | "cancelled" | "carried";
+/**
+ * Product UI language preference.
+ *
+ * `system` follows the operating system locale; the other two force a
+ * language. v1 supports English and Simplified Chinese only.
+ */
+export type Language = "system" | "en" | "zh-Hans";
 
 export interface ReviewCounts {
   planned: number;
@@ -123,6 +130,7 @@ export interface ProductSettings {
   weatherCountry: string;
   weatherAdmin1: string;
   temperatureUnit: TemperatureUnit;
+  language: Language;
   appearance: string;
   appearanceSettings: AppearanceSettings;
   displayName: string;
@@ -177,6 +185,11 @@ export interface ProductViewState {
   settings: ProductSettings;
   desktopExperimental: boolean;
   databasePath: string;
+  /**
+   * Raw operating system locale, used to resolve the `system` language
+   * preference. Empty when the platform value could not be read.
+   */
+  systemLocale: string;
 }
 
 export interface DesktopDiagnostics {

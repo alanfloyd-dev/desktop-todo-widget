@@ -1,6 +1,7 @@
 use crate::{
     appearance::{self, AppearanceSettings},
     database::{Database, Shortcut},
+    locale::Language,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -163,6 +164,9 @@ pub struct ProductSettings {
     pub weather_country: String,
     pub weather_admin1: String,
     pub temperature_unit: TemperatureUnit,
+    /// Product UI language. `System` follows the operating system locale; see
+    /// [`crate::locale`] for the (deliberately small) resolution rules.
+    pub language: Language,
     pub appearance: String,
     pub appearance_settings: AppearanceSettings,
     pub display_name: String,
@@ -205,6 +209,9 @@ impl Default for ProductSettings {
             weather_country: String::new(),
             weather_admin1: String::new(),
             temperature_unit: TemperatureUnit::Celsius,
+            // Localized UI is opt-in-by-detection: "System" is the default, so a
+            // first run matches the operating system language.
+            language: Language::System,
             appearance: "geological_observatory".into(),
             appearance_settings: AppearanceSettings::default(),
             display_name: "Your Name".into(),
@@ -488,6 +495,61 @@ mod tests {
             serde_json::from_str::<RenderingBackend>("\"standard\"").expect("deserialize"),
             RenderingBackend::Standard
         );
+    }
+
+    /// The language choice has to survive a restart, and a settings document
+    /// written before the key existed has to keep loading.
+    #[test]
+    fn language_round_trips_and_legacy_documents_default_to_system() {
+        use crate::locale::Language;
+
+        let state = AppState::load(Database::in_memory().expect("database")).expect("state");
+        assert_eq!(state.snapshot().expect("snapshot").language, Language::System);
+        let stored = state
+            .database
+            .setting("product_settings")
+            .expect("stored")
+            .expect("value");
+        assert!(stored.contains("\"language\":\"system\""));
+
+        state
+            .update(|settings| settings.language = Language::SimplifiedChinese)
+            .expect("persist language");
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "alan-desktop-language-{}-{suffix}.sqlite3",
+            std::process::id()
+        ));
+        {
+            let file_state =
+                AppState::load(Database::open(&path).expect("database")).expect("state");
+            file_state
+                .update(|settings| settings.language = Language::SimplifiedChinese)
+                .expect("persist language");
+        }
+        let reopened =
+            AppState::load(Database::open(&path).expect("database")).expect("reopened state");
+        assert_eq!(
+            reopened.snapshot().expect("snapshot").language,
+            Language::SimplifiedChinese
+        );
+
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"mode":"floating","dayRollover":"04:00","appearance":"geological_observatory"}"#,
+            )
+            .expect("legacy settings");
+        let legacy = AppState::load(database)
+            .expect("compatible load")
+            .snapshot()
+            .expect("snapshot");
+        assert_eq!(legacy.language, Language::System);
     }
 
     #[test]

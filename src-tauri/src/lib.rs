@@ -1,6 +1,7 @@
 mod appearance;
 mod database;
 mod diagnostics;
+mod locale;
 mod platform;
 mod product_commands;
 mod product_window;

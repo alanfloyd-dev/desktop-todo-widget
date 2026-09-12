@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { useI18n } from "../i18n";
 import type {
   ReviewCounts,
   ReviewPeriod,
@@ -10,6 +11,7 @@ import type {
 
 const props = defineProps<{ nativeBridgeAvailable: boolean }>();
 const emit = defineEmits<{ close: []; error: [message: string] }>();
+const { t, intlLocale } = useI18n();
 
 const period = ref<ReviewPeriod>("daily");
 const anchorDate = ref<string | null>(null);
@@ -17,26 +19,20 @@ const report = ref<ReviewReport | null>(null);
 const loading = ref(true);
 const closeButton = ref<HTMLButtonElement>();
 
-const periods: Array<{ value: ReviewPeriod; label: string }> = [
-  { value: "daily", label: "Daily" },
-  { value: "weekly", label: "Weekly" },
-  { value: "monthly", label: "Monthly" },
+const periods: Array<{ value: ReviewPeriod; labelKey: string }> = [
+  { value: "daily", labelKey: "review.period.daily" },
+  { value: "weekly", labelKey: "review.period.weekly" },
+  { value: "monthly", labelKey: "review.period.monthly" },
 ];
-const countRows: Array<{ key: keyof ReviewCounts; label: string }> = [
-  { key: "planned", label: "Planned" },
-  { key: "completed", label: "Completed" },
-  { key: "carried", label: "Carried" },
-  { key: "cancelled", label: "Cancelled" },
-  { key: "pending", label: "Pending" },
+const countRows: Array<{ key: keyof ReviewCounts; labelKey: string }> = [
+  { key: "planned", labelKey: "review.count.planned" },
+  { key: "completed", labelKey: "review.count.completed" },
+  { key: "carried", labelKey: "review.count.carried" },
+  { key: "cancelled", labelKey: "review.count.cancelled" },
+  { key: "pending", labelKey: "review.count.pending" },
 ];
-const shortMonths = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
-const longMonths = [
-  "JANUARY", "FEBRUARY", "MARCH", "APRIL", "MAY", "JUNE",
-  "JULY", "AUGUST", "SEPTEMBER", "OCTOBER", "NOVEMBER", "DECEMBER",
-];
-const weekdays = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
 
-const title = computed(() => `${period.value.toUpperCase()} REVIEW`);
+const title = computed(() => t(`review.title.${period.value}`));
 const activeDays = computed(() => report.value?.days.filter((day) => day.counts.planned > 0) ?? []);
 const canMoveForward = computed(
   () => !!report.value && report.value.periodEnd < report.value.currentTaskDay,
@@ -52,47 +48,58 @@ function isoDate(value: Date) {
 }
 
 function longDate(value: string) {
-  const date = utcDate(value);
-  return `${String(date.getUTCDate()).padStart(2, "0")} ${shortMonths[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
+  return new Intl.DateTimeFormat(intlLocale.value, {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(utcDate(value));
 }
 
 function shortDate(value: string) {
-  const date = utcDate(value);
-  return `${weekdays[date.getUTCDay()]} ${String(date.getUTCDate()).padStart(2, "0")} ${shortMonths[date.getUTCMonth()]}`;
+  return new Intl.DateTimeFormat(intlLocale.value, {
+    weekday: "short",
+    day: "2-digit",
+    month: "short",
+    timeZone: "UTC",
+  }).format(utcDate(value));
 }
 
 function periodLabel(value: ReviewReport) {
   if (value.period === "daily") return longDate(value.anchorDate);
   if (value.period === "monthly") {
-    const date = utcDate(value.periodStart);
-    return `${longMonths[date.getUTCMonth()]} ${date.getUTCFullYear()}`;
+    return new Intl.DateTimeFormat(intlLocale.value, {
+      month: "long",
+      year: "numeric",
+      timeZone: "UTC",
+    }).format(utcDate(value.periodStart));
   }
   return `${longDate(value.periodStart)} — ${longDate(value.periodEnd)}`;
 }
 
 function statusFacts(counts: ReviewCounts) {
   const facts: string[] = [];
-  if (counts.completed) facts.push(`${counts.completed} completed`);
-  if (counts.carried) facts.push(`${counts.carried} carried`);
-  if (counts.cancelled) facts.push(`${counts.cancelled} cancelled`);
-  if (counts.pending) facts.push(`${counts.pending} pending`);
-  return facts.length ? facts.join(" · ") : "No tasks planned";
+  if (counts.completed) facts.push(t("review.fact.completed", { count: counts.completed }));
+  if (counts.carried) facts.push(t("review.fact.carried", { count: counts.carried }));
+  if (counts.cancelled) facts.push(t("review.fact.cancelled", { count: counts.cancelled }));
+  if (counts.pending) facts.push(t("review.fact.pending", { count: counts.pending }));
+  return facts.length ? facts.join(" · ") : t("review.noTasksPlanned");
 }
 
-function taskStatus(task: ReviewTask) {
-  return task.status.charAt(0).toUpperCase() + task.status.slice(1);
+function taskStatus(status: ReviewTask["status"]) {
+  return t(`task.status.${status}`);
 }
 
 function taskFacts(task: ReviewTask) {
-  const facts = [taskStatus(task)];
+  const facts = [taskStatus(task.status)];
   if (task.completedAt !== null) {
-    facts.push(new Intl.DateTimeFormat(undefined, {
+    facts.push(new Intl.DateTimeFormat(intlLocale.value, {
       hour: "2-digit",
       minute: "2-digit",
     }).format(new Date(task.completedAt * 1000)));
   }
   if (task.categoryName) facts.push(task.categoryName);
-  if (task.carriedFrom) facts.push("Carried forward");
+  if (task.carriedFrom) facts.push(t("review.carriedForward"));
   return facts.join(" · ");
 }
 
@@ -203,13 +210,18 @@ onMounted(async () => {
   <section class="review-panel" role="dialog" aria-modal="true" aria-labelledby="review-title">
     <header class="review-header">
       <div>
-        <p>REVIEW / REPORTS</p>
+        <p>{{ t("review.eyebrow") }}</p>
         <h2 id="review-title">{{ title }}</h2>
       </div>
-      <button ref="closeButton" type="button" aria-label="Close review" @click="emit('close')">Close</button>
+      <button
+        ref="closeButton"
+        type="button"
+        :aria-label="t('review.closeAriaLabel')"
+        @click="emit('close')"
+      >{{ t("review.close") }}</button>
     </header>
 
-    <nav class="review-periods" aria-label="Review period">
+    <nav class="review-periods" :aria-label="t('review.periodAriaLabel')">
       <button
         v-for="item in periods"
         :key="item.value"
@@ -218,27 +230,32 @@ onMounted(async () => {
         :aria-pressed="period === item.value"
         @click="selectPeriod(item.value)"
       >
-        {{ item.label }}
+        {{ t(item.labelKey) }}
       </button>
     </nav>
 
     <div v-if="report" class="review-body" :aria-busy="loading">
       <div class="review-date-navigation">
-        <button type="button" aria-label="Previous review period" @click="move(-1)">←</button>
+        <button type="button" :aria-label="t('review.previousPeriod')" @click="move(-1)">←</button>
         <p>{{ periodLabel(report) }}</p>
-        <button type="button" aria-label="Next review period" :disabled="!canMoveForward" @click="move(1)">→</button>
+        <button
+          type="button"
+          :aria-label="t('review.nextPeriod')"
+          :disabled="!canMoveForward"
+          @click="move(1)"
+        >→</button>
       </div>
 
       <dl class="review-totals">
         <div v-for="row in countRows" :key="row.key">
-          <dt>{{ row.label }}</dt>
+          <dt>{{ t(row.labelKey) }}</dt>
           <dd>{{ report.totals[row.key] }}</dd>
         </div>
       </dl>
 
       <section v-if="period === 'daily'" class="review-detail" aria-labelledby="review-task-heading">
-        <h3 id="review-task-heading">TASK FACTS</h3>
-        <p v-if="!report.tasks.length" class="review-empty">No tasks planned for this task day.</p>
+        <h3 id="review-task-heading">{{ t("review.taskFactsHeading") }}</h3>
+        <p v-if="!report.tasks.length" class="review-empty">{{ t("review.noTasksForDay") }}</p>
         <ol v-else class="review-task-list">
           <li v-for="task in report.tasks" :key="task.id">
             <span class="review-status-mark" :data-status="task.status" aria-hidden="true"></span>
@@ -252,30 +269,30 @@ onMounted(async () => {
 
       <template v-else>
         <section class="review-detail" aria-labelledby="review-days-heading">
-          <h3 id="review-days-heading">BY TASK DAY</h3>
-          <p v-if="!activeDays.length" class="review-empty">No tasks planned in this period.</p>
+          <h3 id="review-days-heading">{{ t("review.byTaskDayHeading") }}</h3>
+          <p v-if="!activeDays.length" class="review-empty">{{ t("review.noTasksInPeriod") }}</p>
           <ol v-else class="review-fact-list">
             <li v-for="day in activeDays" :key="day.date">
               <strong>{{ shortDate(day.date) }}</strong>
-              <span>{{ day.counts.planned }} planned</span>
+              <span>{{ t("review.plannedCount", { count: day.counts.planned }) }}</span>
               <small>{{ statusFacts(day.counts) }}</small>
             </li>
           </ol>
         </section>
 
         <section class="review-detail" aria-labelledby="review-category-heading">
-          <h3 id="review-category-heading">BY CATEGORY</h3>
-          <p v-if="!report.categories.length" class="review-empty">No categories represented in this period.</p>
+          <h3 id="review-category-heading">{{ t("review.byCategoryHeading") }}</h3>
+          <p v-if="!report.categories.length" class="review-empty">{{ t("review.noCategories") }}</p>
           <ol v-else class="review-fact-list">
             <li v-for="category in report.categories" :key="category.categoryId ?? 'uncategorized'">
               <strong>{{ category.label }}</strong>
-              <span>{{ category.counts.planned }} planned</span>
+              <span>{{ t("review.plannedCount", { count: category.counts.planned }) }}</span>
               <small>{{ statusFacts(category.counts) }}</small>
             </li>
           </ol>
         </section>
       </template>
     </div>
-    <p v-else-if="loading" class="review-loading" role="status">Loading review…</p>
+    <p v-else-if="loading" class="review-loading" role="status">{{ t("review.loading") }}</p>
   </section>
 </template>

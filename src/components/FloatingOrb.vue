@@ -2,6 +2,9 @@
 import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { profileInitials } from "../appearance";
+import { useI18n } from "../i18n";
+
+const { t } = useI18n();
 
 const props = defineProps<{
   avatarUrl: string;
@@ -52,8 +55,8 @@ function pointerCancel() {
   <button
     type="button"
     class="floating-orb"
-    aria-label="Open Alan Desktop"
-    title="Open Alan Desktop"
+    :aria-label="t('orb.open')"
+    :title="t('orb.open')"
     @pointerdown="pointerDown"
     @pointermove="pointerMove"
     @pointerup="pointerUp"

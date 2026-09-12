@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import ContextMenu from "./components/ContextMenu.vue";
@@ -13,10 +13,12 @@ import {
   browserResolvedContrast,
   sampleImageLuminance,
 } from "./appearance";
+import { createI18n, normalizeLanguage, provideI18n } from "./i18n";
 import type {
   AppearanceSettings,
   AssetPayload,
   ContrastResult,
+  Language,
   ProductSettings,
   ProductViewState,
   ResolvedContrast,
@@ -31,7 +33,13 @@ const settingsOpen = ref(false);
 const reviewOpen = ref(false);
 const weatherSettingsRequested = ref(false);
 const weather = ref<WeatherViewState>(browserWeatherState());
-const weatherMessage = ref("");
+/** Weather status as a translation key, so it re-renders on language change. */
+const weatherMessageKey = ref<{ key: string; params?: Record<string, string | number> } | null>(
+  null,
+);
+const weatherMessage = computed(() =>
+  weatherMessageKey.value ? t(weatherMessageKey.value.key, weatherMessageKey.value.params) : "",
+);
 const imageAsset = ref<AssetPayload>(emptyAsset());
 const wallpaperAsset = ref<AssetPayload>(emptyAsset());
 const avatarAsset = ref<AssetPayload>(emptyAsset());
@@ -39,6 +47,31 @@ const resolvedContrast = ref<ResolvedContrast>("light");
 const menu = ref<{ open: boolean; x: number; y: number }>({ open: false, x: 0, y: 0 });
 let unlistenSettings: UnlistenFn | undefined;
 let weatherTimer: number | undefined;
+
+/**
+ * The app owns the single i18n instance and provides it to every child, so
+ * there is exactly one reactive locale for the whole product surface.
+ */
+const i18n = provideI18n(
+  createI18n(normalizeLanguage(state.value.settings.language), state.value.systemLocale),
+);
+const t = i18n.t;
+
+watch(
+  () => state.value.settings.language,
+  (language) => i18n.setLanguage(normalizeLanguage(language)),
+);
+watch(
+  () => state.value.systemLocale,
+  (systemLocale) => i18n.setSystemLocale(systemLocale ?? ""),
+);
+watch(
+  i18n.locale,
+  (locale) => {
+    document.documentElement.lang = locale;
+  },
+  { immediate: true },
+);
 
 const modeClass = computed(() => `mode-${state.value.settings.mode}`);
 const presentationClass = computed(
@@ -97,6 +130,7 @@ function browserState(): ProductViewState {
       weatherCountry: "",
       weatherAdmin1: "",
       temperatureUnit: "celsius",
+      language: "system",
       appearance: "geological_observatory",
       appearanceSettings: {
         backgroundType,
@@ -122,6 +156,9 @@ function browserState(): ProductViewState {
     },
     desktopExperimental: true,
     databasePath: "browser preview · app-data/alan-desktop.sqlite3",
+    // In the browser preview the navigator locale stands in for the OS locale
+    // that the native build reads from the registry.
+    systemLocale: navigator.language ?? "",
   };
 }
 
@@ -237,21 +274,21 @@ function weatherErrorLabel(reason: unknown) {
   const kind = typeof reason === "object" && reason && "kind" in reason
     ? String((reason as { kind: unknown }).kind)
     : String(reason);
-  if (kind.includes("Cooldown")) return "Please wait before refreshing again.";
-  if (kind.includes("InProgress")) return "Weather refresh is already running.";
-  if (kind.includes("Timeout")) return "Weather request timed out. Cached data is unchanged.";
-  return "Weather could not refresh. Cached data is unchanged.";
+  if (kind.includes("Cooldown")) return { key: "error.weatherRefreshCooldown" };
+  if (kind.includes("InProgress")) return { key: "error.weatherRefreshInProgress" };
+  if (kind.includes("Timeout")) return { key: "error.weatherRefreshTimeout" };
+  return { key: "error.weatherRefreshGeneric" };
 }
 
 async function refreshWeather(manual = false) {
   if (!nativeBridgeAvailable || weather.value.refreshing) return;
-  weatherMessage.value = "";
+  weatherMessageKey.value = null;
   weather.value.refreshing = true;
   try {
     weather.value = await invoke<WeatherViewState>("refresh_weather", { manual });
-    if (manual) weatherMessage.value = "Weather updated.";
+    if (manual) weatherMessageKey.value = { key: "status.weatherUpdated" };
   } catch (reason) {
-    if (manual) weatherMessage.value = weatherErrorLabel(reason);
+    if (manual) weatherMessageKey.value = weatherErrorLabel(reason);
     await loadWeather();
   }
 }
@@ -340,6 +377,7 @@ async function saveSettings(patch: {
   weatherCountry: string;
   weatherAdmin1: string;
   temperatureUnit: TemperatureUnit;
+  language: Language;
   appearance: string;
   appearanceSettings: AppearanceSettings;
   displayName: string;

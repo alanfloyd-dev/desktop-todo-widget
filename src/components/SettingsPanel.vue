@@ -2,6 +2,7 @@
 import { nextTick, onBeforeUnmount, onMounted, ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { DEFAULT_APPEARANCE, profileInitials, sampleImageLuminance } from "../appearance";
+import { languageOptionLabel, normalizeLanguage, useI18n, type Language } from "../i18n";
 import type {
   AppearanceSettings,
   AssetPayload,
@@ -36,6 +37,7 @@ const emit = defineEmits<{
     weatherCountry: string;
     weatherAdmin1: string;
     temperatureUnit: TemperatureUnit;
+    language: Language;
     appearance: string;
     appearanceSettings: AppearanceSettings;
     displayName: string;
@@ -45,6 +47,20 @@ const emit = defineEmits<{
     renderingBackend: RenderingBackend;
   }];
 }>();
+
+const i18n = useI18n();
+const { t } = i18n;
+
+/**
+ * True once this panel has handed a language choice to the parent's Save path.
+ *
+ * Language previews immediately (below), so a preview that is not saved has to
+ * be rolled back when the panel goes away — but only for a save that was never
+ * attempted. A save that failed leaves this flag `true`, which keeps the preview
+ * on screen: the parent shows the error, and silently snapping the language back
+ * would hide the fact that the click did something.
+ */
+let languageSaved = false;
 
 const dayRollover = ref(props.settings.dayRollover);
 const weatherLocationLabel = ref(props.settings.weatherLocationLabel);
@@ -84,7 +100,27 @@ const renderingBackendChanged = computed(
   () => renderingBackend.value !== props.settings.renderingBackend,
 );
 
+/**
+ * Language draft.
+ *
+ * Changing the selection previews immediately (the app-level i18n instance is
+ * updated here, not on save) because a language picker that does not show its
+ * own effect is unusable on a panel this long. The persisted value is still
+ * written by Save, together with every other setting on this panel, and an
+ * unsaved preview is reverted in `onBeforeUnmount`.
+ */
+const language = ref<Language>(normalizeLanguage(props.settings.language));
+const effectiveLanguage = computed(() =>
+  languageOptionLabel(i18n.locale.value, t),
+);
+
+function selectLanguage(value: Language) {
+  language.value = value;
+  i18n.setLanguage(value);
+}
+
 function save() {
+  languageSaved = true;
   emit("save", {
     dayRollover: dayRollover.value,
     weatherLocationLabel: weatherLocationLabel.value,
@@ -94,6 +130,7 @@ function save() {
     weatherCountry: weatherCountry.value,
     weatherAdmin1: weatherAdmin1.value,
     temperatureUnit: temperatureUnit.value,
+    language: language.value,
     appearance: appearance.value,
     appearanceSettings: appearanceSettings.value,
     displayName: displayName.value,
@@ -116,7 +153,7 @@ async function discard(assetId: string) {
 async function chooseAsset(kind: "background" | "avatar") {
   assetMessage.value = "";
   if (!("__TAURI_INTERNALS__" in window)) {
-    assetMessage.value = "Local file selection is available in the Windows app.";
+    assetMessage.value = t("settings.error.localFilePicker");
     return;
   }
   try {
@@ -160,9 +197,9 @@ function weatherErrorLabel(reason: unknown) {
   const kind = typeof reason === "object" && reason && "kind" in reason
     ? String((reason as { kind: unknown }).kind)
     : String(reason);
-  if (kind.includes("Timeout")) return "Location search timed out.";
-  if (kind.includes("InvalidResponse")) return "The provider returned an invalid response.";
-  return "Location search is unavailable.";
+  if (kind.includes("Timeout")) return t("settings.error.locationTimeout");
+  if (kind.includes("InvalidResponse")) return t("settings.error.locationInvalidResponse");
+  return t("settings.error.locationUnavailable");
 }
 
 async function searchLocation() {
@@ -170,13 +207,13 @@ async function searchLocation() {
   locationError.value = "";
   candidates.value = [];
   if (query.length < 2) {
-    locationError.value = "Enter at least two characters.";
+    locationError.value = t("settings.error.locationQueryTooShort");
     return;
   }
   locationSearching.value = true;
   try {
     candidates.value = await invoke<LocationCandidate[]>("search_weather_locations", { query });
-    if (!candidates.value.length) locationError.value = "No matching locations.";
+    if (!candidates.value.length) locationError.value = t("settings.error.locationNoMatch");
   } catch (reason) {
     locationError.value = weatherErrorLabel(reason);
   } finally {
@@ -204,7 +241,7 @@ async function openAttribution() {
   try {
     await invoke("open_weather_attribution");
   } catch {
-    locationError.value = "Could not open Open-Meteo.";
+    locationError.value = t("settings.error.openAttribution");
   }
 }
 
@@ -216,6 +253,13 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  // Revert an unsaved language preview.
+  //
+  // `props.settings` still holds the persisted value here: the parent closes this
+  // panel before it replaces the state with the command's response, so a saved
+  // change is never rolled back to the value it just replaced.
+  if (!languageSaved) i18n.setLanguage(normalizeLanguage(props.settings.language));
+
   for (const assetId of provisionalAssets) {
     const saved =
       props.settings.avatarAssetId === assetId ||
@@ -226,50 +270,79 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <aside class="settings-panel" aria-label="Settings">
+  <aside class="settings-panel" :aria-label="t('settings.panelAriaLabel')">
     <header>
       <div>
-        <p>SETTINGS</p>
-        <h2>Alan Desktop</h2>
+        <p>{{ t("settings.title") }}</p>
+        <h2>{{ t("app.name") }}</h2>
       </div>
-      <button type="button" aria-label="Close settings" @click="$emit('close')">Close</button>
+      <button
+        type="button"
+        :aria-label="t('settings.closeAriaLabel')"
+        @click="$emit('close')"
+      >{{ t("settings.close") }}</button>
     </header>
 
     <div class="settings-group">
-      <div class="settings-section-heading settings-major-heading"><strong>PROFILE</strong></div>
+      <div class="settings-section-heading settings-major-heading">
+        <strong>{{ t("settings.languageHeading") }}</strong>
+      </div>
+      <div class="settings-row">
+        <span>
+          <strong>{{ t("settings.language.label") }}</strong>
+          <small>
+            {{ t("settings.language.hint") }}<template v-if="language === 'system'"> · {{ t("settings.language.effective", { language: effectiveLanguage }) }}</template>
+            · {{ t("settings.language.restartHint") }}
+          </small>
+        </span>
+        <div class="appearance-options" role="group" :aria-label="t('settings.language.label')">
+          <button
+            v-for="option in (['system', 'en', 'zh-Hans'] as const)"
+            :key="option"
+            type="button"
+            :class="{ active: language === option }"
+            :aria-pressed="language === option"
+            @click="selectLanguage(option)"
+          >
+            {{ languageOptionLabel(option, t) }}
+          </button>
+        </div>
+      </div>
+
+      <div class="settings-section-heading settings-major-heading"><strong>{{ t("settings.profileHeading") }}</strong></div>
       <label class="settings-row">
-        <span><strong>Display name</strong><small>Footer profile</small></span>
-        <input v-model="displayName" type="text" placeholder="Your Name" />
+        <span><strong>{{ t("settings.displayName") }}</strong><small>{{ t("settings.displayNameHint") }}</small></span>
+        <input v-model="displayName" type="text" :placeholder="t('settings.displayNamePlaceholder')" />
       </label>
       <div class="settings-row avatar-settings-row">
-        <span><strong>Avatar</strong><small>Local managed copy</small></span>
+        <span><strong>{{ t("settings.avatar") }}</strong><small>{{ t("settings.avatarHint") }}</small></span>
         <div class="avatar-settings-control">
-          <span class="settings-avatar-preview">
+          <span class="settings-avatar-preview" :aria-label="t('settings.avatarAriaLabel')">
             <img v-if="avatarPreviewAvailable" :src="avatarPreviewUrl" alt="" />
             <span v-else>{{ profileInitials(displayName) }}</span>
           </span>
-          <button type="button" @click="chooseAsset('avatar')">Choose image</button>
-          <button type="button" :disabled="!avatarAssetId" @click="removeAvatar">Remove avatar</button>
+          <button type="button" @click="chooseAsset('avatar')">{{ t("settings.chooseImage") }}</button>
+          <button type="button" :disabled="!avatarAssetId" @click="removeAvatar">{{ t("settings.removeAvatar") }}</button>
         </div>
       </div>
       <label class="settings-row">
-        <span><strong>Homepage label</strong><small>Footer shortcut text</small></span>
-        <input v-model="homepageLabel" type="text" placeholder="Homepage" />
+        <span><strong>{{ t("settings.homepageLabel") }}</strong><small>{{ t("settings.homepageLabelHint") }}</small></span>
+        <input v-model="homepageLabel" type="text" :placeholder="t('settings.homepageLabelPlaceholder')" />
       </label>
       <label class="settings-row">
-        <span><strong>Homepage URL</strong><small>Optional http(s) shortcut</small></span>
+        <span><strong>{{ t("settings.homepageUrl") }}</strong><small>{{ t("settings.homepageUrlHint") }}</small></span>
         <input v-model="homepageUrl" type="url" placeholder="https://example.com/" />
       </label>
       <label class="settings-row">
-        <span><strong>Day rollover</strong><small>New day begins at</small></span>
+        <span><strong>{{ t("settings.dayRollover") }}</strong><small>{{ t("settings.dayRolloverHint") }}</small></span>
         <input v-model="dayRollover" type="time" />
       </label>
-      <div class="settings-section-heading settings-major-heading"><strong>WEATHER</strong></div>
+      <div class="settings-section-heading settings-major-heading"><strong>{{ t("settings.weatherHeading") }}</strong></div>
       <section ref="weatherSection" class="weather-settings" aria-labelledby="weather-settings-heading">
         <div class="settings-section-heading">
           <span>
-            <strong id="weather-settings-heading">Weather location</strong>
-            <small>Search, then explicitly select a result</small>
+            <strong id="weather-settings-heading">{{ t("settings.weatherLocation") }}</strong>
+            <small>{{ t("settings.weatherLocationHint") }}</small>
           </span>
         </div>
         <div class="weather-search-row">
@@ -277,16 +350,16 @@ onBeforeUnmount(() => {
             ref="locationInput"
             v-model="locationQuery"
             type="search"
-            placeholder="Search location"
+            :placeholder="t('settings.weatherSearchPlaceholder')"
             autocomplete="off"
             @keydown.enter.prevent="searchLocation"
           />
           <button type="button" :disabled="locationSearching" @click="searchLocation">
-            {{ locationSearching ? "Searching…" : "Search" }}
+            {{ locationSearching ? t("settings.weatherSearching") : t("settings.weatherSearch") }}
           </button>
         </div>
         <p v-if="locationError" class="settings-error" role="status">{{ locationError }}</p>
-        <div v-if="candidates.length" class="weather-candidates" aria-label="Location results">
+        <div v-if="candidates.length" class="weather-candidates" :aria-label="t('settings.weatherResultsAriaLabel')">
           <button
             v-for="candidate in candidates"
             :key="`${candidate.latitude}:${candidate.longitude}:${candidate.timezone}`"
@@ -298,23 +371,23 @@ onBeforeUnmount(() => {
           </button>
         </div>
         <div class="settings-row weather-selected">
-          <span><strong>Selected</strong><small>Forecasts use saved coordinates and timezone</small></span>
+          <span><strong>{{ t("settings.weatherSelected") }}</strong><small>{{ t("settings.weatherSelectedHint") }}</small></span>
           <span class="selected-location">
-            <strong>{{ weatherLocationLabel || "Not configured" }}</strong>
+            <strong>{{ weatherLocationLabel || t("settings.weatherNotConfigured") }}</strong>
             <small v-if="weatherLocationLabel">
               {{ [weatherAdmin1, weatherCountry].filter(Boolean).join(", ") || weatherTimezone }}
             </small>
           </span>
         </div>
         <label class="settings-row">
-          <span><strong>Temperature</strong><small>Forecast and cache unit</small></span>
+          <span><strong>{{ t("settings.temperature") }}</strong><small>{{ t("settings.temperatureHint") }}</small></span>
           <select v-model="temperatureUnit">
-            <option value="celsius">Celsius · °C</option>
-            <option value="fahrenheit">Fahrenheit · °F</option>
+            <option value="celsius">{{ t("settings.celsius") }}</option>
+            <option value="fahrenheit">{{ t("settings.fahrenheit") }}</option>
           </select>
         </label>
         <div class="settings-row weather-provider-row">
-          <span><strong>Weather data</strong><small>CC BY 4.0 attribution</small></span>
+          <span><strong>{{ t("settings.weatherData") }}</strong><small>{{ t("settings.weatherAttributionHint") }}</small></span>
           <button type="button" @click="openAttribution">Open-Meteo ↗</button>
         </div>
         <div class="weather-refresh-row">
@@ -323,49 +396,49 @@ onBeforeUnmount(() => {
             :disabled="!weather.configured || weather.refreshing"
             @click="$emit('refreshWeather')"
           >
-            {{ weather.refreshing ? "Refreshing…" : "Refresh now" }}
+            {{ weather.refreshing ? t("settings.refreshing") : t("settings.refreshNow") }}
           </button>
           <small v-if="weatherMessage" role="status">{{ weatherMessage }}</small>
         </div>
       </section>
       <section class="appearance-settings" aria-labelledby="appearance-settings-heading">
         <div class="settings-section-heading settings-major-heading">
-          <strong id="appearance-settings-heading">APPEARANCE</strong>
-          <small>Glass · Graphite Frost</small>
+          <strong id="appearance-settings-heading">{{ t("settings.appearanceHeading") }}</strong>
+          <small>{{ t("settings.appearanceMaterial") }}</small>
         </div>
         <div class="settings-row appearance-background-row">
           <span>
-            <strong>Rendering</strong>
+            <strong>{{ t("settings.rendering") }}</strong>
             <small>
               {{
                 renderingBackend === "enhanced"
-                  ? "Acrylic and transparent window effects. Screen-reader accessibility is currently limited."
-                  : "Best compatibility and accessibility."
+                  ? t("settings.renderingEnhancedHint")
+                  : t("settings.renderingStandardHint")
               }}
-              <template v-if="renderingBackendChanged"> Restart the app to apply this change.</template>
+              <template v-if="renderingBackendChanged"> {{ t("settings.renderingRestart") }}</template>
             </small>
           </span>
-          <div class="appearance-options" role="group" aria-label="Rendering backend">
+          <div class="appearance-options" role="group" :aria-label="t('settings.renderingAriaLabel')">
             <button
               type="button"
               :class="{ active: renderingBackend === 'standard' }"
               @click="renderingBackend = 'standard'"
             >
-              Standard
+              {{ t("settings.renderingStandard") }}
             </button>
             <button
               type="button"
               :class="{ active: renderingBackend === 'enhanced' }"
               @click="renderingBackend = 'enhanced'"
             >
-              Enhanced transparency
+              {{ t("settings.renderingEnhanced") }}
             </button>
           </div>
         </div>
 
         <div class="settings-row appearance-background-row">
-          <span><strong>Background</strong><small>Material style</small></span>
-          <div class="appearance-options" role="group" aria-label="Background style">
+          <span><strong>{{ t("settings.background") }}</strong><small>{{ t("settings.backgroundHint") }}</small></span>
+          <div class="appearance-options" role="group" :aria-label="t('settings.backgroundAriaLabel')">
             <button
               v-for="option in ['glass', 'solid', 'gradient', 'image', 'wallpaper'] as const"
               :key="option"
@@ -373,94 +446,94 @@ onBeforeUnmount(() => {
               :class="{ active: appearanceSettings.backgroundType === option }"
               @click="appearanceSettings.backgroundType = option"
             >
-              {{ option[0]?.toUpperCase() + option.slice(1) }}
+              {{ t(`settings.backgroundType.${option}`) }}
             </button>
           </div>
         </div>
 
         <template v-if="appearanceSettings.backgroundType === 'glass'">
           <label class="settings-row">
-            <span><strong>Tint</strong><small>Graphite material color</small></span>
+            <span><strong>{{ t("settings.tint") }}</strong><small>{{ t("settings.tintHint") }}</small></span>
             <div class="color-control"><input v-model="appearanceSettings.glassTintColor" type="color" /><code>{{ appearanceSettings.glassTintColor }}</code></div>
           </label>
           <label class="settings-row">
-            <span><strong>Tint opacity</strong><small>Background layer only</small></span>
+            <span><strong>{{ t("settings.tintOpacity") }}</strong><small>{{ t("settings.tintOpacityHint") }}</small></span>
             <div class="range-control"><input v-model.number="appearanceSettings.glassTintOpacity" type="range" min="0" max="1" step="0.01" /><output>{{ Math.round(appearanceSettings.glassTintOpacity * 100) }}%</output></div>
           </label>
           <label class="settings-row">
-            <span><strong>Blur</strong><small>Bounded for stable rendering</small></span>
+            <span><strong>{{ t("settings.blur") }}</strong><small>{{ t("settings.blurHint") }}</small></span>
             <div class="range-control"><input v-model.number="appearanceSettings.blurPx" type="range" min="0" max="24" step="1" /><output>{{ appearanceSettings.blurPx }}px</output></div>
           </label>
         </template>
 
         <label v-if="appearanceSettings.backgroundType === 'solid'" class="settings-row">
-          <span><strong>Color</strong><small>Solid · Graphite remains available</small></span>
+          <span><strong>{{ t("settings.color") }}</strong><small>{{ t("settings.colorHint") }}</small></span>
           <div class="color-control"><input v-model="appearanceSettings.solidColor" type="color" /><code>{{ appearanceSettings.solidColor }}</code></div>
         </label>
 
         <template v-if="appearanceSettings.backgroundType === 'gradient'">
           <label class="settings-row">
-            <span><strong>Start</strong><small>First gradient color</small></span>
+            <span><strong>{{ t("settings.gradientStart") }}</strong><small>{{ t("settings.gradientStartHint") }}</small></span>
             <div class="color-control"><input v-model="appearanceSettings.gradientStartColor" type="color" /><code>{{ appearanceSettings.gradientStartColor }}</code></div>
           </label>
           <label class="settings-row">
-            <span><strong>End</strong><small>Second gradient color</small></span>
+            <span><strong>{{ t("settings.gradientEnd") }}</strong><small>{{ t("settings.gradientEndHint") }}</small></span>
             <div class="color-control"><input v-model="appearanceSettings.gradientEndColor" type="color" /><code>{{ appearanceSettings.gradientEndColor }}</code></div>
           </label>
           <label class="settings-row">
-            <span><strong>Angle</strong><small>0–360 degrees</small></span>
+            <span><strong>{{ t("settings.angle") }}</strong><small>{{ t("settings.angleHint") }}</small></span>
             <div class="range-control"><input v-model.number="appearanceSettings.gradientAngle" type="range" min="0" max="360" step="1" /><output>{{ appearanceSettings.gradientAngle }}°</output></div>
           </label>
         </template>
 
         <template v-if="appearanceSettings.backgroundType === 'image'">
           <div class="settings-row">
-            <span><strong>Custom image</strong><small>PNG, JPEG, or WebP · local only</small></span>
+            <span><strong>{{ t("settings.customImage") }}</strong><small>{{ t("settings.customImageHint") }}</small></span>
             <div class="asset-actions">
-              <button type="button" @click="chooseAsset('background')">Choose image</button>
-              <small v-if="appearanceSettings.imageAssetId && !imagePreviewAvailable" class="asset-unavailable">Image unavailable · Glass fallback active</small>
+              <button type="button" @click="chooseAsset('background')">{{ t("settings.chooseImage") }}</button>
+              <small v-if="appearanceSettings.imageAssetId && !imagePreviewAvailable" class="asset-unavailable">{{ t("settings.imageUnavailable") }}</small>
             </div>
           </div>
           <label class="settings-row">
-            <span><strong>Fit</strong><small>Image sizing</small></span>
-            <select v-model="appearanceSettings.imageFit"><option value="cover">Cover</option><option value="contain">Contain</option><option value="stretch">Stretch</option></select>
+            <span><strong>{{ t("settings.fit") }}</strong><small>{{ t("settings.fitHint") }}</small></span>
+            <select v-model="appearanceSettings.imageFit"><option value="cover">{{ t("settings.fit.cover") }}</option><option value="contain">{{ t("settings.fit.contain") }}</option><option value="stretch">{{ t("settings.fit.stretch") }}</option></select>
           </label>
           <label class="settings-row">
-            <span><strong>Position</strong><small>Image anchor</small></span>
-            <select v-model="appearanceSettings.imagePosition"><option value="center">Center</option><option value="top">Top</option><option value="bottom">Bottom</option></select>
+            <span><strong>{{ t("settings.position") }}</strong><small>{{ t("settings.positionHint") }}</small></span>
+            <select v-model="appearanceSettings.imagePosition"><option value="center">{{ t("settings.position.center") }}</option><option value="top">{{ t("settings.position.top") }}</option><option value="bottom">{{ t("settings.position.bottom") }}</option></select>
           </label>
         </template>
 
         <div v-if="appearanceSettings.backgroundType === 'wallpaper'" class="settings-row">
-          <span><strong>Desktop wallpaper</strong><small>Read current Windows wallpaper once</small></span>
-          <span class="asset-status">{{ wallpaperAvailable ? "Available" : "Unavailable · Glass fallback active" }}</span>
+          <span><strong>{{ t("settings.desktopWallpaper") }}</strong><small>{{ t("settings.desktopWallpaperHint") }}</small></span>
+          <span class="asset-status">{{ wallpaperAvailable ? t("settings.wallpaperAvailable") : t("settings.wallpaperUnavailable") }}</span>
         </div>
 
         <label class="settings-row">
-          <span><strong>Background opacity</strong><small>Content remains 100% opaque</small></span>
+          <span><strong>{{ t("settings.backgroundOpacity") }}</strong><small>{{ t("settings.backgroundOpacityHint") }}</small></span>
           <div class="range-control"><input v-model.number="appearanceSettings.backgroundOpacity" type="range" min="0" max="1" step="0.01" /><output>{{ Math.round(appearanceSettings.backgroundOpacity * 100) }}%</output></div>
         </label>
         <label class="settings-row">
-          <span><strong>Overlay</strong><small>Readability protection</small></span>
+          <span><strong>{{ t("settings.overlay") }}</strong><small>{{ t("settings.overlayHint") }}</small></span>
           <div class="range-control"><input v-model.number="appearanceSettings.overlayStrength" type="range" min="0" max="0.72" step="0.01" /><output>{{ Math.round(appearanceSettings.overlayStrength * 100) }}%</output></div>
         </label>
         <label class="settings-row">
-          <span><strong>Text contrast</strong><small>Auto can be overridden</small></span>
-          <select v-model="appearanceSettings.textContrast"><option value="auto">Auto</option><option value="light">Light</option><option value="dark">Dark</option></select>
+          <span><strong>{{ t("settings.textContrast") }}</strong><small>{{ t("settings.textContrastHint") }}</small></span>
+          <select v-model="appearanceSettings.textContrast"><option value="auto">{{ t("settings.textContrast.auto") }}</option><option value="light">{{ t("settings.textContrast.light") }}</option><option value="dark">{{ t("settings.textContrast.dark") }}</option></select>
         </label>
-        <button type="button" class="reset-appearance" @click="resetAppearance">↻ Reset appearance</button>
+        <button type="button" class="reset-appearance" @click="resetAppearance">{{ t("settings.resetAppearance") }}</button>
       </section>
       <p v-if="assetMessage" class="settings-error" role="status">{{ assetMessage }}</p>
     </div>
 
-    <button type="button" class="save-settings" @click="save">Save settings</button>
+    <button type="button" class="save-settings" @click="save">{{ t("settings.save") }}</button>
 
     <section class="developer-section">
       <button type="button" class="developer-toggle" @click="developerOpen = !developerOpen">
-        <span>Developer</span><span>{{ developerOpen ? "−" : "+" }}</span>
+        <span>{{ t("settings.developer") }}</span><span>{{ developerOpen ? "−" : "+" }}</span>
       </button>
       <div v-if="developerOpen" class="developer-content">
-        <p class="database-path">SQLite · {{ databasePath }}</p>
+        <p class="database-path">{{ t("settings.developer.databasePath", { path: databasePath }) }}</p>
         <DeveloperDiagnostics />
       </div>
     </section>

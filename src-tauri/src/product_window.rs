@@ -123,6 +123,8 @@ pub struct SettingsPatch {
     /// Persisted rendering backend preference. Applied to settings only; the
     /// hosting backend itself is chosen at startup and needs a restart.
     rendering_backend: Option<RenderingBackend>,
+    /// Persisted UI language preference. Applied immediately on the frontend.
+    language: Option<crate::locale::Language>,
 }
 
 fn deserialize_nullable_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
@@ -139,6 +141,9 @@ pub struct ProductViewState {
     settings: ProductSettings,
     desktop_experimental: bool,
     database_path: String,
+    /// Raw operating system locale, used by the frontend to resolve the
+    /// `System` language choice with the same rule as the native menus.
+    system_locale: String,
 }
 
 impl ProductViewState {
@@ -147,6 +152,7 @@ impl ProductViewState {
             settings,
             desktop_experimental: true,
             database_path: state.database.path().display().to_string(),
+            system_locale: crate::locale::system_locale_hint().to_string(),
         }
     }
 }
@@ -235,6 +241,11 @@ pub fn update_product_settings(
             // WebView is created, so applying it would require recreating the
             // WebView; the UI tells the user a restart is required.
             settings.rendering_backend = value;
+        }
+        if let Some(value) = patch.language {
+            // Persisted for the frontend, which re-renders immediately, and for
+            // the native menus, which the next tray refresh rebuilds.
+            settings.language = value;
         }
         if let Some(value) = patch.display_name {
             settings.display_name = value.trim().to_string();
