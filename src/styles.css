@@ -411,12 +411,30 @@ button {
   font-size: 9px;
 }
 
+/*
+ * The `＋` submit control. It inherits the shared button reset above through the
+ * `.category-add` selector so its hover/focus treatment stays identical, and only
+ * its role as a clickable glyph is new.
+ */
+.add-submit {
+  padding: 2px 0;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  text-align: center;
+}
+
 .review-row button:hover,
 .review-row button:focus-visible,
 .task-actions button:hover,
 .task-actions button:focus-visible,
 .category-add:hover,
 .category-add:focus-visible,
+.add-submit:hover,
+.add-submit:focus-visible,
 .category-composer button:hover,
 .category-composer button:focus-visible {
   color: var(--mineral);

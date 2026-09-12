@@ -240,7 +240,7 @@ pub fn run() {
             window_mode::start_win_d_trace
         ])
         .build(tauri::generate_context!())
-        .expect("error while building Alan Desktop")
+        .expect("error while building desktop-todo-widget")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
                 app.state::<ProductWindowRuntime>()

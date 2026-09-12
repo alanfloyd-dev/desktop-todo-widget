@@ -215,7 +215,10 @@ impl ReqwestTransport {
     fn new() -> Result<Self, WeatherError> {
         reqwest::blocking::Client::builder()
             .timeout(REQUEST_TIMEOUT)
-            .user_agent(concat!("Alan-Desktop/", env!("CARGO_PKG_VERSION")))
+            // Public HTTP identity: the product name, so Open-Meteo sees the same
+            // identifier the release ships under. Identity only; request shape,
+            // retries, caching and timeouts are unchanged.
+            .user_agent(concat!("desktop-todo-widget/", env!("CARGO_PKG_VERSION")))
             .build()
             .map(|client| Self { client })
             .map_err(|_| WeatherError::Network)

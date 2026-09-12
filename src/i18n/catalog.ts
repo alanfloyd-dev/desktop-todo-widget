@@ -21,7 +21,10 @@ export type Locale = "en" | "zh-Hans";
 export const FALLBACK_LOCALE: Locale = "en";
 
 export const en: Record<string, string> = {
-  "app.name": "Alan Desktop",
+  // Headline of the Settings panel. Deliberately the surface's own name rather
+  // than the product's: ordinary widget UI does not repeat the product identity,
+  // which lives in the tray/context-menu heading and the release metadata.
+  "app.name": "Settings",
 
   // --- Product error / status surface ---------------------------------------
   "error.weatherRefreshCooldown": "Please wait before refreshing again.",
@@ -54,7 +57,7 @@ export const en: Record<string, string> = {
   "menu.github": "GitHub ↗",
 
   // --- Floating orb ---------------------------------------------------------
-  "orb.open": "Open Alan Desktop",
+  "orb.open": "Open widget",
 
   // --- Observation header and footer ---------------------------------------
   "camera.label": "CAMERA",
@@ -91,7 +94,8 @@ export const en: Record<string, string> = {
   "today.previousCancel": "Cancel",
   "task.addPlaceholder": "Add a task",
   "task.addAriaLabel": "New task",
-  "task.addSubmit": "Add",
+  // Accessible name of the `＋` submit control. The glyph cannot carry meaning on
+  // its own, so this is also its tooltip.
   "task.addSubmitAriaLabel": "Add task",
   "task.dragHandle": "Reorder task",
   "task.dragHandleTitle": "Drag to reorder",
@@ -331,7 +335,8 @@ export const en: Record<string, string> = {
 };
 
 export const zhHans: Record<string, string> = {
-  "app.name": "Alan Desktop",
+  // 与英文一致：这里是「设置」这个界面自己的标题，而不是产品名。
+  "app.name": "设置",
 
   "error.weatherRefreshCooldown": "请稍后再试。",
   "error.weatherRefreshInProgress": "天气正在刷新中。",
@@ -356,7 +361,7 @@ export const zhHans: Record<string, string> = {
   "menu.productName": "desktop-todo-widget",
   "menu.github": "GitHub ↗",
 
-  "orb.open": "打开 Alan Desktop",
+  "orb.open": "打开组件",
 
   "camera.label": "相机",
   "footer.collapseToOrb": "收起到头像球",
@@ -390,7 +395,6 @@ export const zhHans: Record<string, string> = {
   "today.previousCancel": "取消",
   "task.addPlaceholder": "添加任务",
   "task.addAriaLabel": "新任务",
-  "task.addSubmit": "添加",
   "task.addSubmitAriaLabel": "添加任务",
   "task.dragHandle": "调整任务顺序",
   "task.dragHandleTitle": "拖动以调整顺序",

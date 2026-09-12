@@ -62,7 +62,9 @@ struct DiagnosticInput {
 
 fn render_diagnostics(settings: &ProductSettings, input: &DiagnosticInput) -> String {
     format!(
-        "Alan Desktop diagnostics\n\
+        // Public product identity, matching the bundle/repo name. This text is
+        // copied out of the app into issues, so it must not carry a personal name.
+        "desktop-todo-widget diagnostics\n\
          App version: {}\n\
          Windows: {}\n\
          WebView2: {}\n\

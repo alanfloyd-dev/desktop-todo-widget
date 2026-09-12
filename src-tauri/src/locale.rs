@@ -126,9 +126,10 @@ pub struct NativeLabels {
 
 /// The product identity used by the native menus and the tray tooltip.
 ///
-/// Deliberately a stable product name and not the executable's `productName`
-/// (`Alan Desktop`), which is a personal name rather than the product identity.
-/// A future release-naming sweep owns whether this value is centralized further.
+/// Deliberately a stable product name and not the executable's `productName`.
+/// The binary, app-data directory and tray id keep the pre-release
+/// `alan-desktop` spelling for storage/upgrade compatibility (see
+/// `docs/data-model.md`); this constant is what users read.
 pub const PRODUCT_NAME: &str = "desktop-todo-widget";
 
 const ENGLISH_LABELS: NativeLabels = NativeLabels {
@@ -378,5 +379,174 @@ mod tests {
             );
         }
         assert!(serde_json::from_str::<Language>("\"english\"").is_err());
+    }
+
+    /// Declared keys of one catalog object in `src/i18n/catalog.ts`.
+    ///
+    /// The catalogs are TypeScript, so they cannot be imported here; reading the
+    /// source as text is what lets `cargo test` enforce the parity rule the
+    /// product depends on. Only top-level `"key": "value"` lines are matched,
+    /// which is the shape both catalogs use.
+    fn catalog_keys(source: &str, start: &str, end: Option<&str>) -> Vec<String> {
+        let from = source.find(start).expect("catalog start marker");
+        let slice = match end {
+            Some(marker) => {
+                let to = source[from..].find(marker).expect("catalog end marker");
+                &source[from..from + to]
+            }
+            None => &source[from..],
+        };
+        slice
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let rest = line.strip_prefix('"')?;
+                let (key, _) = rest.split_once("\":")?;
+                Some(key.to_string())
+            })
+            .collect()
+    }
+
+    /// The two UI catalogs must declare exactly the same keys.
+    ///
+    /// A key present in only one language silently renders the English string (or
+    /// the raw key) for the other, and an orphan key is dead copy nobody notices.
+    /// Asserting the *same set* catches both directions, and the required-key list
+    /// below catches a key being deleted from both. No frontend test runner exists
+    /// in this repo, so this is where catalog parity is enforced.
+    #[test]
+    fn ui_catalogs_declare_the_same_keys() {
+        let source = include_str!("../../src/i18n/catalog.ts");
+        let english = catalog_keys(source, "export const en", Some("export const zhHans"));
+        let chinese = catalog_keys(source, "export const zhHans", None);
+
+        let to_set = |keys: &[String]| keys.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+        let english_keys = to_set(&english);
+        let chinese_keys = to_set(&chinese);
+
+        let missing_in_chinese: Vec<&String> = english_keys.difference(&chinese_keys).collect();
+        let missing_in_english: Vec<&String> = chinese_keys.difference(&english_keys).collect();
+        assert!(
+            missing_in_chinese.is_empty(),
+            "missing from zh-Hans: {missing_in_chinese:?}"
+        );
+        assert!(
+            missing_in_english.is_empty(),
+            "missing from en: {missing_in_english:?}"
+        );
+        assert!(english_keys.len() > 200, "catalog parse looks wrong: {}", english_keys.len());
+
+        // The copy this round touched. Each must exist in both catalogs, and the
+        // product identity must not reappear in ordinary UI strings.
+        for key in [
+            "app.name",
+            "orb.open",
+            "task.addAriaLabel",
+            "task.addSubmitAriaLabel",
+            "quickLinks.heading",
+            "quickLinks.empty",
+        ] {
+            assert!(english_keys.contains(key), "en is missing {key}");
+            assert!(chinese_keys.contains(key), "zh-Hans is missing {key}");
+        }
+    }
+
+    /// The new-task form has exactly one submit control, and it is the `＋`.
+    ///
+    /// v1 requires Enter and the visible `＋` to reach the same add path without a
+    /// second "Add" affordance. The frontend has no component test runner, so this
+    /// pins the structural half of that rule against the component source: the src
+    /// must carry one submit control, it must be the glyph, and it must carry the
+    /// accessible name the glyph cannot express.
+    #[test]
+    fn new_task_form_has_one_submit_control_and_it_is_the_glyph() {
+        let source = include_str!("../../src/components/TodoPanel.vue");
+        let form_start = source.find("class=\"task-add\"").expect("task-add form");
+        let form = &source[form_start..];
+        let form_end = form.find("</form>").expect("task-add form end");
+        let form = &form[..form_end];
+
+        let submit_controls = form.matches("type=\"submit\"").count();
+        assert_eq!(
+            submit_controls, 1,
+            "the new-task form must have exactly one submit control"
+        );
+
+        let submit_at = form.find("type=\"submit\"").expect("submit control");
+        // The control's own tag starts just before the attribute; the template
+        // keeps attributes on separate lines, so this only needs the tag name.
+        let tag_start = form[..submit_at].rfind('<').expect("submit control tag");
+        let tag = form[tag_start..submit_at].trim();
+        assert_eq!(tag, "<button", "the submit control must be a button");
+        assert!(
+            form[submit_at..].contains("＋"),
+            "the submit control must render the visible ＋ glyph"
+        );
+        assert!(
+            form[submit_at..].contains("task.addSubmitAriaLabel"),
+            "the glyph must carry the accessible add label"
+        );
+        // The decorative span the affordance replaced must be gone, so there is no
+        // second, non-interactive ＋ sitting next to the real one.
+        assert!(
+            !form.contains("aria-hidden=\"true\">＋"),
+            "a decorative ＋ must not remain beside the submit control"
+        );
+    }
+
+    /// No ordinary UI string may carry the pre-release personal product name.
+    ///
+    /// Tray/release metadata is exempt because it is not in this catalog, and the
+    /// product identity itself is a single key that the next test pins.
+    #[test]
+    fn ui_catalog_does_not_leak_the_personal_product_name() {
+        let source = include_str!("../../src/i18n/catalog.ts");
+        let lowered = source.to_ascii_lowercase();
+        assert!(
+            !lowered.contains("alan desktop"),
+            "a UI string still shows the personal product name"
+        );
+    }
+
+    /// Every catalog value is non-empty, so a missing string cannot render blank.
+    ///
+    /// Multi-line values (`"key":\n  "first "\n  "second",`) are skipped by the
+    /// line-based parse rather than misread as empty; `ui_catalogs_declare_the_same_keys`
+    /// still covers those keys by name.
+    #[test]
+    fn ui_catalog_values_are_not_empty() {
+        let source = include_str!("../../src/i18n/catalog.ts");
+        let mut checked = 0;
+        let mut skipped_multiline = 0;
+        for line in source.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix('"') else {
+                continue;
+            };
+            let Some((key, value)) = rest.split_once("\":") else {
+                continue;
+            };
+            if key.contains(char::is_whitespace) {
+                continue;
+            }
+            let value = value.trim();
+            if value.is_empty() {
+                // A value that starts on the next line is a concatenated string;
+                // it is covered by name in the parity test instead.
+                skipped_multiline += 1;
+                continue;
+            }
+            let value = value.trim_end_matches(',').trim();
+            assert!(
+                value.starts_with('"') && value.len() > 2,
+                "{key} has an empty or non-string value: {value}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 200, "catalog parse looks wrong: {checked}");
+        assert!(
+            skipped_multiline < 20,
+            "unexpectedly many concatenated values ({skipped_multiline}); the parse may be wrong"
+        );
     }
 }

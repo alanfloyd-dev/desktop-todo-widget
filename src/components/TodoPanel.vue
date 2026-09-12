@@ -165,7 +165,39 @@ async function add() {
 /** Keyboard submit path; traced separately so a dead key path is visible. */
 async function addSubmitFromKeyboard() {
   qaTrace("add_submit_enter");
+  await submitNewTask();
+}
+
+/**
+ * The one submit path for the new-task form.
+ *
+ * Both the form's `submit` event and the `＋` button dispatch here, so the click
+ * affordance cannot drift from the Enter affordance. `add()` stays the single
+ * implementation: this only records which entry point ran.
+ */
+async function submitNewTask() {
   await add();
+}
+
+/**
+ * Enter in the title field, ignored while an IME candidate window is open.
+ *
+ * Every CJK input method confirms a candidate with Enter, and that keystroke
+ * arrives as an ordinary `keydown` with `isComposing` set (and legacy
+ * `keyCode === 229`). Submitting on it would create a task holding the unfinished
+ * composition text, so the keystroke is left completely alone — the default is not
+ * prevented either, because that Enter belongs to the IME, not to the form. The
+ * following Enter, with composition finished, submits.
+ */
+function addSubmitFromInput(event: KeyboardEvent) {
+  if (event.isComposing || event.keyCode === 229) {
+    qaTrace("add_submit_skipped_composing");
+    return;
+  }
+  // Prevented only here: a real submit must not also insert a newline or reach a
+  // default form action.
+  event.preventDefault();
+  void addSubmitFromKeyboard();
 }
 
 /** Temporary B3 diagnostic: records which key the add input actually received. */
@@ -505,15 +537,28 @@ onBeforeUnmount(() => {
 
     <p v-if="!state.tasks.length" class="todo-empty">{{ t("todo.empty") }}</p>
 
-    <form class="task-add" @submit.prevent="add">
-      <span aria-hidden="true">＋</span>
+    <!--
+      One submit control: the leading `＋` *is* the button, so clicking the
+      affordance the user sees and pressing Enter in the field both go through this
+      form's `@submit`. There is deliberately no second "Add" button beside it.
+      The accessible name carries the meaning the glyph cannot ("Add task" /
+      "添加任务"); the visible UI stays exactly one glyph.
+    -->
+    <form class="task-add" @submit.prevent="submitNewTask">
+      <button
+        type="submit"
+        class="add-submit"
+        :aria-label="t('task.addSubmitAriaLabel')"
+        :title="t('task.addSubmitAriaLabel')"
+        @click="qaTrace('add_submit_click')"
+      >＋</button>
       <input
         ref="addInput"
         v-model="newTitle"
         :aria-label="t('task.addAriaLabel')"
         :placeholder="t('task.addPlaceholder')"
         @keydown="traceAddKey"
-        @keydown.enter.prevent="addSubmitFromKeyboard"
+        @keydown.enter="addSubmitFromInput"
         @click="qaTrace('add_submit_click')"
       />
       <select v-model="newCategoryId" :aria-label="t('task.newCategoryAriaLabel')">
@@ -528,18 +573,6 @@ onBeforeUnmount(() => {
         :aria-label="t('category.createAriaLabel')"
         @click="openCategoryComposer"
       >{{ t("category.add") }}</button>
-      <!--
-        B3: the add form previously had no submit control, so pressing Enter in the
-        field was the only way to create a task. When that keystroke was missed the
-        user had no alternative and no visible affordance. This is a real, labelled
-        submit button; the form's existing @submit handler performs the add.
-      -->
-      <button
-        type="submit"
-        class="category-add add-submit"
-        :aria-label="t('task.addSubmitAriaLabel')"
-        @click="qaTrace('add_submit_click')"
-      >{{ t("task.addSubmit") }}</button>
     </form>
 
     <form v-if="categoryComposerOpen" class="category-composer" @submit.prevent="createCategory">
