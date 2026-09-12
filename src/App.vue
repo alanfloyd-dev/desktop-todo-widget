@@ -46,6 +46,7 @@ const avatarAsset = ref<AssetPayload>(emptyAsset());
 const resolvedContrast = ref<ResolvedContrast>("light");
 const menu = ref<{ open: boolean; x: number; y: number }>({ open: false, x: 0, y: 0 });
 let unlistenSettings: UnlistenFn | undefined;
+let unlistenProductState: UnlistenFn | undefined;
 let weatherTimer: number | undefined;
 
 /**
@@ -459,6 +460,15 @@ onMounted(async () => {
       reviewOpen.value = false;
       menu.value.open = false;
     });
+    // The backend publishes the authoritative product state after every product
+    // action. Native menus (the tray and the Orb's context menu) cannot return
+    // that result to us, so this event is the only way a natively triggered mode
+    // or presentation change reaches the DOM: without it the layout keeps
+    // rendering the previous mode inside the new mode's window geometry.
+    unlistenProductState = await listen<ProductViewState>("product-state", (event) => {
+      state.value = event.payload;
+      menu.value.open = false;
+    });
   }
 });
 
@@ -467,6 +477,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("blur", closeMenu);
   window.removeEventListener("keydown", handleKey);
   unlistenSettings?.();
+  unlistenProductState?.();
   if (weatherTimer !== undefined) window.clearInterval(weatherTimer);
 });
 </script>

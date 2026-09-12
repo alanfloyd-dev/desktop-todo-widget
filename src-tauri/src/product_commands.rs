@@ -12,6 +12,22 @@ use tauri::{
 
 const TRAY_ID: &str = "alan-desktop-tray";
 
+/// Event name for the authoritative product-state broadcast.
+///
+/// Native menus — the tray menu and the Orb's context menu, which share
+/// `build_tray_menu` — run a product action on the backend and hand *nothing*
+/// back to the frontend: the popup command resolves with `()` and the tray
+/// handler ignores the dispatch result. Without a publication step the DOM keeps
+/// rendering the mode it last fetched (an Orb inside a Sidebar-sized window, for
+/// example). Every action dispatched through [`dispatch_product_action`]
+/// therefore publishes the resulting `ProductViewState` under this name, and the
+/// product window replaces its reactive state with exactly that payload.
+///
+/// The backend stays the single source of truth: the payload is the same
+/// `ProductViewState` the `product_state` command returns, so a native action and
+/// a frontend-initiated one cannot produce different views.
+pub const PRODUCT_STATE_EVENT: &str = "product-state";
+
 #[tauri::command]
 pub fn product_action(app: tauri::AppHandle, action: &str) -> Result<ProductViewState, String> {
     dispatch_product_action(&app, action)
@@ -126,7 +142,15 @@ pub fn dispatch_product_action(
 
     refresh_tray_menu(app)?;
     let settings = state.snapshot()?;
-    Ok(ProductViewState::new(&state, settings))
+    let view = ProductViewState::new(&state, settings);
+    // Single publication point for every product action, whichever entry point
+    // ran it: the frontend command, the tray menu, or the Orb's context menu.
+    // The frontend replaces its reactive state with this payload, which is what
+    // keeps a natively triggered mode/presentation change from desyncing the DOM.
+    if let Err(error) = window.emit(PRODUCT_STATE_EVENT, &view) {
+        eprintln!("[product-command] product-state emit failed: {error}");
+    }
+    Ok(view)
 }
 
 #[tauri::command]
