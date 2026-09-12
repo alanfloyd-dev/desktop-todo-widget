@@ -21,6 +21,7 @@
 //! | [`visual`] | DesktopWindowTarget and the shared visual tree |
 //! | [`geometry`] | Raw physical client pixels and DPI/rasterization scale |
 //! | [`input`] | Mouse/wheel translation into `SendMouseInput` |
+//! | [`input_target`] | Keeps the product window reachable for the pointer |
 //! | [`material`] | Pure requested/resolved material policy |
 //! | [`material_backend`] | DesktopAcrylicController and DWM host backdrop |
 //! | [`lifecycle`] | Focus/exit glue and release ordering |
@@ -40,6 +41,7 @@
 pub(crate) mod geometry;
 mod host;
 pub(crate) mod input;
+mod input_target;
 mod lifecycle;
 mod material;
 mod material_backend;
@@ -120,6 +122,17 @@ pub(crate) fn attach_controller(
     window: &tauri::WebviewWindow,
 ) -> Result<(), String> {
     store.attach_controller(window)
+}
+
+/// Re-synchronises who owns mouse input for the current host.
+///
+/// In Desktop mode the product window is reparented under `SHELLDLL_DefView`, so
+/// it drops below every top-level window — including the Win32 window WebView2
+/// keeps for a composition-hosted WebView. Without this call that window wins the
+/// hit test and the widget stops receiving pointer input entirely; see
+/// [`input_target`].
+pub(crate) fn sync_input_target(store: &ContextStore, desktop: bool) -> Result<(), String> {
+    store.sync_input_target(desktop)
 }
 
 pub(crate) fn apply_material(

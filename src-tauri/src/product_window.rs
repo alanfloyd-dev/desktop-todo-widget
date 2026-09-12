@@ -753,6 +753,19 @@ pub fn apply_product_mode(
             &settings.appearance_settings,
         )?;
     }
+    // A Desktop widget is a child of `SHELLDLL_DefView`, so it sits below every
+    // top-level window — including the Win32 window WebView2 keeps for a
+    // composition-hosted WebView, which would otherwise win the mouse hit test and
+    // leave the visible widget completely inert. This runs last, after every
+    // style/frame change of the transition, because each of them lets WebView2
+    // re-apply its own bounds and visibility.
+    #[cfg(target_os = "windows")]
+    if runtime.composition_hosting {
+        platform::windows::composition_host::sync_input_target(
+            &runtime.native_material,
+            mode == ProductWindowMode::Desktop,
+        )?;
+    }
     Ok(())
 }
 
@@ -1334,6 +1347,16 @@ pub fn handle_window_event(window: &tauri::Window, event: &WindowEvent) {
                 });
             } else if settings.mode == ProductWindowMode::Desktop {
                 let _ = save_current_desktop_rect(&webview, &state);
+                // WebView2 positions its own window from the parent window's client
+                // origin, so a move — including the lifecycle recovery write that
+                // bypasses `apply_product_mode` — can put it back over the widget.
+                #[cfg(target_os = "windows")]
+                if runtime.composition_hosting {
+                    let _ = platform::windows::composition_host::sync_input_target(
+                        &runtime.native_material,
+                        true,
+                    );
+                }
             }
         }
         WindowEvent::Resized(size) => {

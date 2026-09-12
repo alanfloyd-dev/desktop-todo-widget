@@ -13,6 +13,8 @@
 //! `ICoreWebView2Controller` retains the normal focus path, confirmed by human QA
 //! with a real Chinese IME.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2CompositionController, ICoreWebView2Controller,
     COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_DOWN, COREWEBVIEW2_MOUSE_EVENT_KIND_LEFT_BUTTON_UP,
@@ -32,6 +34,10 @@ use windows::Win32::{
         },
     },
 };
+
+/// Counts forwarded `WM_MOUSEMOVE` messages so hover traffic can be reported
+/// without flooding the trace with one line per pixel.
+static FORWARDED_MOVES: AtomicU64 = AtomicU64::new(0);
 
 /// True when `message` is a mouse message this bridge forwards.
 pub(crate) fn is_forwarded_message(message: u32) -> bool {
@@ -89,10 +95,49 @@ pub(crate) unsafe fn forward_mouse_input(
         0
     };
     let keys = COREWEBVIEW2_MOUSE_EVENT_VIRTUAL_KEYS((wparam.0 & 0xffff) as i32);
-    let _ = composition.SendMouseInput(kind, keys, mouse_data, point);
+    let sent = composition.SendMouseInput(kind, keys, mouse_data, point);
+    trace_forward(message, point, hwnd, &sent);
 
     if message == WM_LBUTTONUP || message == WM_RBUTTONUP {
         let _ = ReleaseCapture();
+    }
+}
+
+/// Reports one forwarded message and the `SendMouseInput` result.
+///
+/// Hover traffic is sampled: one line per 256 moves, because "does the pointer
+/// reach the bridge at all" is the question this answers, not the path taken.
+/// The result text is built only for the messages that are actually logged, so
+/// the hot move path allocates nothing.
+fn trace_forward(message: u32, point: POINT, hwnd: HWND, sent: &windows::core::Result<()>) {
+    if message == WM_MOUSEMOVE {
+        let count = FORWARDED_MOVES.fetch_add(1, Ordering::Relaxed) + 1;
+        if count != 1 && count % 256 != 0 {
+            return;
+        }
+        eprintln!(
+            "[input-bridge] forward=move count={count} client={},{} hwnd={:#x} {}",
+            point.x,
+            point.y,
+            hwnd.0 as usize,
+            sent_outcome(sent)
+        );
+        return;
+    }
+    eprintln!(
+        "[input-bridge] forward=message:0x{message:04X} client={},{} hwnd={:#x} {}",
+        point.x,
+        point.y,
+        hwnd.0 as usize,
+        sent_outcome(sent)
+    );
+}
+
+/// `SendMouseInput` result rendered for a trace line.
+fn sent_outcome(sent: &windows::core::Result<()>) -> String {
+    match sent {
+        Ok(()) => "ok".to_string(),
+        Err(error) => format!("hresult=0x{:08X}", error.code().0 as u32),
     }
 }
 

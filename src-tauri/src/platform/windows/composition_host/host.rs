@@ -64,6 +64,16 @@ struct WindowContext {
     apartment: Option<ApartmentLifetime>,
     runtime: Option<RuntimeLifetime>,
     controller_generation: u64,
+    /// True while the product window is a Desktop child.
+    ///
+    /// The Desktop host reparents the product window under `SHELLDLL_DefView`, so
+    /// it sits inside the desktop's top-level band, below every other top-level
+    /// window. WebView2 keeps its own top-level window for a composition-hosted
+    /// WebView, which then wins the mouse hit test and starves the input bridge.
+    /// This flag records that the repair in [`super::input_target`] is required, so
+    /// every later geometry update can re-assert it without the product layer
+    /// having to ask again.
+    desktop_input: bool,
 }
 
 impl WindowContext {
@@ -130,6 +140,7 @@ impl WindowContext {
             apartment: Some(apartment),
             runtime,
             controller_generation: 0,
+            desktop_input: false,
         })
     }
 
@@ -163,6 +174,31 @@ impl WindowContext {
     fn next_generation(&mut self) -> u64 {
         self.controller_generation += 1;
         self.controller_generation
+    }
+
+    /// Clears WebView2's own window off the product client rect so the product
+    /// window is the mouse target again. See [`super::input_target`].
+    fn repair_input_target(&self) {
+        // SAFETY: the context only exists for a live product HWND on this thread,
+        // which `assert_owner_thread` verified before every caller got here.
+        let report = unsafe { super::input_target::clear_covering_webview_windows(self.hwnd()) };
+        eprintln!(
+            "[input-bridge] input_target=product-window desktop=true candidate_webview_windows={} relocated={} classes={} result={}",
+            report.candidates,
+            report.relocated,
+            if report.classes.is_empty() {
+                "none".to_string()
+            } else {
+                report.classes.join("+")
+            },
+            if report.is_clear() {
+                "already-clear"
+            } else if report.relocated == report.candidates {
+                "repaired"
+            } else {
+                "partial"
+            }
+        );
     }
 
     fn disable_material(&mut self) {
@@ -270,7 +306,14 @@ impl ContextStore {
         let Some(visual) = context.visual.as_mut() else {
             return Ok(());
         };
-        visual.resize(ClientSize::of(visual.native_hwnd())?)
+        visual.resize(ClientSize::of(visual.native_hwnd())?)?;
+        // A resize is what makes WebView2 re-apply its own bounds, which can put
+        // its runtime window back in front of a Desktop widget: re-assert the
+        // input target while that host is active.
+        if context.desktop_input {
+            context.repair_input_target();
+        }
+        Ok(())
     }
 
     /// Applies the post-WebView controller settings that need a live controller.
@@ -288,6 +331,10 @@ impl ContextStore {
             return Ok(());
         };
         let hwnd = visual.hwnd();
+        let desktop_input = context
+            .as_ref()
+            .is_some_and(|context| context.desktop_input);
+        drop(context);
 
         let outcome = std::sync::Arc::new(Mutex::new(Ok(())));
         let callback_outcome = std::sync::Arc::clone(&outcome);
@@ -326,6 +373,35 @@ impl ContextStore {
         eprintln!(
             "[phase7c2] webview_composition_controller_created=true root_visual_target_set=true input_bridge=mouse-wheel-focus"
         );
+        // Controller setup re-applies bounds and visibility, so a Desktop widget
+        // must re-claim the mouse hit test once that has happened.
+        if desktop_input {
+            self.sync_input_target(true)?;
+        }
+        Ok(())
+    }
+
+    /// Re-synchronises mouse-input ownership for the current host.
+    ///
+    /// `desktop` is the product-level fact "the window is a Desktop child". Only
+    /// that host needs the repair; every other host keeps the ordinary top-level
+    /// stacking, where the product window is already hit-tested first.
+    pub fn sync_input_target(&self, desktop: bool) -> Result<(), String> {
+        let mut context = self
+            .context
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(context) = context.as_mut() else {
+            // The WebView is not composition-hosted: nothing can intercept.
+            return Ok(());
+        };
+        context.assert_owner_thread()?;
+        context.desktop_input = desktop;
+        if desktop {
+            context.repair_input_target();
+        } else {
+            eprintln!("[input-bridge] input_target=product-window desktop=false result=unchanged");
+        }
         Ok(())
     }
 
