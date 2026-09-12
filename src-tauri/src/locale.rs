@@ -126,10 +126,12 @@ pub struct NativeLabels {
 
 /// The product identity used by the native menus and the tray tooltip.
 ///
-/// Deliberately a stable product name and not the executable's `productName`.
-/// The binary, app-data directory and tray id keep the pre-release
-/// `alan-desktop` spelling for storage/upgrade compatibility (see
-/// `docs/data-model.md`); this constant is what users read.
+/// This is the public product name, and it matches `tauri.conf.json`'s
+/// `productName`. It is deliberately **not** derived from the executable or the
+/// app-data directory: the crate/binary name, the app-data folder
+/// (`net.alanfloyd.desktop`) and the tray id keep their pre-release
+/// `alan-desktop` spelling for storage and upgrade compatibility, which is why
+/// this constant exists rather than reading a path. See `docs/data-model.md`.
 pub const PRODUCT_NAME: &str = "desktop-todo-widget";
 
 const ENGLISH_LABELS: NativeLabels = NativeLabels {
@@ -146,7 +148,7 @@ const ENGLISH_LABELS: NativeLabels = NativeLabels {
     lock_position: "Lock position",
     always_on_top: "Always on top",
     expand_floating: "Expand Floating",
-    collapse_floating: "Collapse to Avatar Orb",
+    collapse_floating: "Collapse to Orb",
     settings: "Settings",
     quit: "Quit",
 };
@@ -165,7 +167,7 @@ const SIMPLIFIED_CHINESE_LABELS: NativeLabels = NativeLabels {
     lock_position: "锁定位置",
     always_on_top: "始终置顶",
     expand_floating: "展开悬浮窗",
-    collapse_floating: "收起到头像球",
+    collapse_floating: "折叠为悬浮球",
     settings: "设置",
     quit: "退出",
 };

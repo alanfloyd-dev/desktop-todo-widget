@@ -157,7 +157,9 @@ function browserState(): ProductViewState {
       language: "system",
       appearance: "geological_observatory",
       appearanceProfiles,
-      displayName: "Your Name",
+      // Browser preview only. The native default comes from `ProductSettings`;
+      // both are the same neutral placeholder, never a personal identity.
+      displayName: "User",
       avatarAssetId: null,
       quickLinks: [],
     },

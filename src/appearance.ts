@@ -79,13 +79,29 @@ function withAlpha(color: string, alpha: number): string {
   return `rgba(${channels.join(", ")}, ${alpha})`;
 }
 
+/**
+ * Up to two initials derived from the user's display name.
+ *
+ * Rules, in order:
+ * - two or more words: first letter of the first word + first letter of the last
+ *   word (`Alan Floyd` -> `AF`);
+ * - one word: that word's first letter only (`User` -> `U`). Taking its first two
+ *   letters would render the neutral placeholder as `US`, which reads as a
+ *   different identity rather than as an initial;
+ * - empty or whitespace-only: no initials at all.
+ *
+ * Purely derived, and deliberately with no fallback identity: this function can
+ * never invent a profile the user did not configure. The neutral default comes
+ * from the persisted display name itself, not from a literal here — that is what
+ * keeps the two in step when the user edits the name.
+ */
 export function profileInitials(displayName: string) {
   const words = displayName.trim().split(/\s+/).filter(Boolean);
-  if (!words.length || displayName.trim().toLowerCase() === "your name") return "AD";
+  if (!words.length) return "";
   const first = words[0]?.[0] ?? "";
-  const last = words.length > 1 ? words[words.length - 1]?.[0] ?? "" : words[0]?.[1] ?? "";
-  const initials = `${first}${last}`.toLocaleUpperCase();
-  return initials || "AD";
+  if (words.length === 1) return first.toLocaleUpperCase();
+  const last = words[words.length - 1]?.[0] ?? "";
+  return `${first}${last}`.toLocaleUpperCase();
 }
 
 export async function sampleImageLuminance(dataUrl: string): Promise<number | null> {

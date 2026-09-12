@@ -12,7 +12,7 @@ Supported background types are Glass, Solid, two-stop Gradient, managed Image, a
 
 The Windows wallpaper path is read from `HKCU\\Control Panel\\Desktop\\WallPaper` only when requested. Alan Desktop does not change wallpaper, poll the Registry, capture the screen, accept remote image URLs, or upload/analyze images remotely. Rust returns validated data URLs to the WebView, never native paths. Missing, oversized, unreadable, or corrupt data returns an unavailable result and the UI shows the fallback.
 
-Profile avatars use the same managed-copy boundary with a lower size limit. No-avatar fallback derives up to two Unicode initials from the configured display name; an empty/unusable name gets a generic local `AD` mark. Reset Appearance intentionally leaves avatar, profile, Weather, Todo, task-day, modes, and geometry unchanged.
+Profile avatars use the same managed-copy boundary with a lower size limit. No-avatar fallback derives up to two Unicode initials from the configured display name, and only from that name: the shipped default is the neutral placeholder `User` (so a fresh install shows `U`), an empty or whitespace-only name yields no initials at all rather than a built-in mark, and no personal identity ships as a default. Reset Appearance intentionally leaves avatar, profile, Weather, Todo, task-day, modes, and geometry unchanged.
 
 ## Contrast and performance
 

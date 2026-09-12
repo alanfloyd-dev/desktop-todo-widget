@@ -32,6 +32,18 @@ const dragRegionEnabled = computed(
 const initials = computed(() => profileInitials(props.displayName));
 
 /**
+ * Whether there is any user profile content to render.
+ *
+ * Either half is enough: an avatar with no name still shows the picture, and a
+ * name with no avatar shows derived initials. Neither present means the identity
+ * block is absent — no placeholder label, no invented initials. `displayName` is
+ * compared trimmed so a whitespace-only value counts as absent.
+ */
+const hasIdentity = computed(
+  () => props.avatarAvailable || props.displayName.trim().length > 0,
+);
+
+/**
  * Computed rather than a module-level constant: the date line has to re-render
  * in the new language when the UI language changes.
  */
@@ -89,27 +101,49 @@ const dateLabel = computed(() =>
       </ul>
     </section>
 
+    <!--
+      The profile identity is user content, not a product fixture. With neither a
+      display name nor an avatar there is nothing to show, so no identity block and
+      no fallback content is rendered — a cleared display name stays semantically
+      empty.
+
+      Collapsing is a window action, not profile content, so it is decoupled from
+      the identity: in Floating the control is always present. With identity the
+      existing affordance (whole block clickable) is preserved; without it a
+      standalone control takes its place rather than a fake placeholder. Both emit
+      the same `collapse` event, so there is one collapse path.
+    -->
     <footer class="signature">
-      <button
-        v-if="mode === 'floating'"
-        type="button"
-        class="profile-identity collapse-affordance"
-        :aria-label="t('footer.collapseToOrb')"
-        :title="t('footer.collapseToOrb')"
-        @click="$emit('collapse')"
-      >
+      <template v-if="mode === 'floating'">
+        <button
+          v-if="hasIdentity"
+          type="button"
+          class="profile-identity collapse-affordance"
+          :aria-label="t('footer.collapseToOrb')"
+          :title="t('footer.collapseToOrb')"
+          @click="$emit('collapse')"
+        >
+          <span class="profile-avatar">
+            <img v-if="avatarAvailable" :src="avatarUrl" alt="" />
+            <span v-else>{{ initials }}</span>
+          </span>
+          <span>{{ displayName }}</span>
+        </button>
+        <button
+          v-else
+          type="button"
+          class="collapse-affordance collapse-affordance-standalone"
+          :aria-label="t('footer.collapseToOrb')"
+          :title="t('footer.collapseToOrb')"
+          @click="$emit('collapse')"
+        >{{ t("footer.collapseToOrb") }}</button>
+      </template>
+      <span v-else-if="hasIdentity" class="profile-identity">
         <span class="profile-avatar">
           <img v-if="avatarAvailable" :src="avatarUrl" alt="" />
           <span v-else>{{ initials }}</span>
         </span>
-        <span>{{ displayName || t("footer.defaultDisplayName") }}</span>
-      </button>
-      <span v-else class="profile-identity">
-        <span class="profile-avatar">
-          <img v-if="avatarAvailable" :src="avatarUrl" alt="" />
-          <span v-else>{{ initials }}</span>
-        </span>
-        <span>{{ displayName || t("footer.defaultDisplayName") }}</span>
+        <span>{{ displayName }}</span>
       </span>
     </footer>
   </div>

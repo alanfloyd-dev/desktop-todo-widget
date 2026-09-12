@@ -47,7 +47,7 @@ export const en: Record<string, string> = {
   "menu.lockPosition": "Lock position",
   "menu.alwaysOnTop": "Always on top",
   "menu.expandFloating": "Expand Floating",
-  "menu.collapseFloating": "Collapse to Avatar Orb",
+  "menu.collapseFloating": "Collapse to Orb",
   "menu.settings": "Settings",
   "menu.quit": "Quit",
   // The product identity and project link. `menu.productName` is the product name,
@@ -61,8 +61,10 @@ export const en: Record<string, string> = {
 
   // --- Observation header and footer ---------------------------------------
   "camera.label": "CAMERA",
-  "footer.collapseToOrb": "Collapse to Avatar Orb",
-  "footer.defaultDisplayName": "Your Name",
+  // Accessible name and tooltip of the Floating collapse control. Used by both
+  // forms of that control: the clickable identity block and the standalone
+  // control shown when there is no identity content.
+  "footer.collapseToOrb": "Collapse to Orb",
 
   // --- Weather --------------------------------------------------------------
   "weather.empty": "WEATHER —",
@@ -177,7 +179,7 @@ export const en: Record<string, string> = {
   "settings.profileHeading": "PROFILE",
   "settings.displayName": "Display name",
   "settings.displayNameHint": "Footer profile",
-  "settings.displayNamePlaceholder": "Your Name",
+  "settings.displayNamePlaceholder": "User",
   "settings.avatar": "Avatar",
   "settings.avatarHint": "Local managed copy",
   "settings.chooseImage": "Choose image",
@@ -355,7 +357,7 @@ export const zhHans: Record<string, string> = {
   "menu.lockPosition": "锁定位置",
   "menu.alwaysOnTop": "始终置顶",
   "menu.expandFloating": "展开悬浮窗",
-  "menu.collapseFloating": "收起到头像球",
+  "menu.collapseFloating": "折叠为悬浮球",
   "menu.settings": "设置",
   "menu.quit": "退出",
   "menu.productName": "desktop-todo-widget",
@@ -364,8 +366,7 @@ export const zhHans: Record<string, string> = {
   "orb.open": "打开组件",
 
   "camera.label": "相机",
-  "footer.collapseToOrb": "收起到头像球",
-  "footer.defaultDisplayName": "你的名字",
+  "footer.collapseToOrb": "折叠为悬浮球",
 
   "weather.empty": "天气 —",
   "weather.setLocation": "设置地点",
@@ -474,7 +475,7 @@ export const zhHans: Record<string, string> = {
   "settings.profileHeading": "个人资料",
   "settings.displayName": "显示名称",
   "settings.displayNameHint": "页脚个人信息",
-  "settings.displayNamePlaceholder": "你的名字",
+  "settings.displayNamePlaceholder": "用户",
   "settings.avatar": "头像",
   "settings.avatarHint": "本地托管副本",
   "settings.chooseImage": "选择图片",

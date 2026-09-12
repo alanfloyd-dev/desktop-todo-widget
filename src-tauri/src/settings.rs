@@ -291,7 +291,11 @@ impl Default for ProductSettings {
             appearance: "geological_observatory".into(),
             appearance_profiles: AppearanceProfiles::default(),
             legacy_appearance_settings: None,
-            display_name: "Your Name".into(),
+            // Neutral, non-personal default. The footer/Orb identity derives its
+            // initials from this value (`User` -> `U`), so the affordance is
+            // discoverable on a fresh install without shipping anyone's identity.
+            // `default_profile_identity_is_neutral` asserts it.
+            display_name: "User".into(),
             avatar_asset_id: None,
             // Neutral by default: the open-source build ships no personal site and
             // no pre-seeded links. `default_configuration_has_no_personal_runtime_dependency`
@@ -719,7 +723,7 @@ mod tests {
             .expect("compatible load")
             .snapshot()
             .expect("snapshot");
-        assert_eq!(restored.display_name, "Your Name");
+        assert_eq!(restored.display_name, "User");
         // A pre-Quick-Links document with no homepage configured yields an empty
         // list: there is nothing to migrate. The legacy pair is no longer part of
         // the document, so absent keys resolve to empty here rather than to the
@@ -913,13 +917,22 @@ mod tests {
         let settings = super::ProductSettings::default();
         let serialized = serde_json::to_string(&settings).expect("serialize");
         assert!(!serialized.to_ascii_lowercase().contains("alanfloyd.net"));
+        // Nor any personal profile identity: no name, no initials, no avatar.
+        let lowered = serialized.to_ascii_lowercase();
+        for personal in ["alan", "floyd", "your name"] {
+            assert!(
+                !lowered.contains(personal),
+                "the default document still ships {personal:?}"
+            );
+        }
         assert!(settings.weather_location_label.is_empty());
         assert!(settings.weather_latitude.is_none());
         // v1 ships no Quick Links: the product section is hidden until the user
         // adds one, and the open-source default stays neutral.
         assert!(settings.quick_links.is_empty());
         assert!(settings.homepage_url.is_empty());
-        assert_eq!(settings.display_name, "Your Name");
+        assert_eq!(settings.display_name, "User");
+        assert!(settings.avatar_asset_id.is_none());
         assert_eq!(
             settings.floating_presentation,
             FloatingPresentation::Collapsed
@@ -928,6 +941,150 @@ mod tests {
             settings.appearance_profiles.floating.background_type,
             BackgroundType::Glass
         );
+    }
+
+    /// Initials are derived from the display name, with no built-in identity.
+    ///
+    /// The dangerous regression is a shipped fallback mark (the removed `AD`) that
+    /// reappears whenever the name is empty, so an unconfigured user silently gets
+    /// someone else's initials. This pins the empty-input rule against the source.
+    /// The non-empty rules (`User` -> `U`, `Alan Floyd` -> `AF`, CJK, multi-word)
+    /// are verified by running the real function — see
+    /// `scripts/rc0-qa/profile-initials.mjs`.
+    #[test]
+    fn profile_initials_have_no_builtin_fallback_identity() {
+        let source = include_str!("../../src/appearance.ts");
+        let start = source
+            .find("export function profileInitials")
+            .expect("profileInitials");
+        let body = &source[start..];
+        let end = body.find("\n}").expect("profileInitials end");
+        let body = &body[..end];
+
+        assert!(
+            body.contains("if (!words.length) return \"\";"),
+            "an empty display name must yield no initials, not a shipped mark"
+        );
+        // No non-empty string literal may be returned as a fallback: every returned
+        // value has to be derived from the name the user typed.
+        for line in body.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("return ") else {
+                continue;
+            };
+            let literal = rest.trim_end_matches(';').trim();
+            let is_derived = literal.contains("first") || literal.contains("last");
+            assert!(
+                is_derived || literal == "\"\"",
+                "profileInitials returns a literal identity: {literal}"
+            );
+        }
+    }
+
+    /// The footer identity is user content: absent when unconfigured, while the
+    /// Floating collapse control stays reachable regardless.
+    ///
+    /// Pins the rules that are easy to regress by "helpfully" filling a blank: the
+    /// identity block is gated on having an identity at all, no fallback label or
+    /// invented initials may be rendered when there is none, and collapsing — a
+    /// window action, not profile content — is still offered when the identity is
+    /// absent, through the same event.
+    #[test]
+    fn footer_identity_is_gated_and_collapse_stays_reachable() {
+        let source = include_str!("../../src/components/ProductContent.vue");
+        let start = source
+            .find("const hasIdentity")
+            .expect("hasIdentity computed");
+        let condition = &source[start..start + 200];
+        assert!(
+            condition.contains("avatarAvailable") && condition.contains("displayName.trim().length > 0"),
+            "the identity block must require an avatar or a non-blank name"
+        );
+
+        let footer_start = source.find("<footer class=\"signature\">").expect("footer");
+        let footer = &source[footer_start..];
+        assert!(
+            footer.contains("<span v-else-if=\"hasIdentity\" class=\"profile-identity\">"),
+            "the non-Floating identity must be gated on hasIdentity"
+        );
+        assert!(
+            !footer.contains("footer.defaultDisplayName"),
+            "the footer must not fall back to a default display name"
+        );
+
+        // Floating always offers collapse: the identity button when there is an
+        // identity, a standalone control when there is not.
+        assert!(
+            footer.contains("class=\"profile-identity collapse-affordance\""),
+            "the clickable identity block must stay the collapse affordance"
+        );
+        assert!(
+            footer.contains("class=\"collapse-affordance collapse-affordance-standalone\""),
+            "a standalone collapse control must exist for the no-identity case"
+        );
+        assert_eq!(
+            footer.matches("@click=\"$emit('collapse')\"").count(),
+            2,
+            "both collapse controls must emit the one collapse event"
+        );
+
+        // The fallback key is gone from the catalogs as well: it must not come back
+        // in one language only.
+        let catalog = include_str!("../../src/i18n/catalog.ts");
+        assert!(
+            !catalog.contains("footer.defaultDisplayName"),
+            "the defensive display-name fallback should not be declared"
+        );
+    }
+
+    /// The collapse label is the one the product asks for, in both languages.
+    ///
+    /// The label lives in four places (frontend footer + menu catalog, native
+    /// menu), and a rename that misses one would leave two names for one action.
+    #[test]
+    fn collapse_label_is_collapse_to_orb_everywhere() {
+        let catalog = include_str!("../../src/i18n/catalog.ts");
+        assert!(catalog.contains("\"footer.collapseToOrb\": \"Collapse to Orb\""));
+        assert!(catalog.contains("\"menu.collapseFloating\": \"Collapse to Orb\""));
+        assert!(catalog.contains("\"footer.collapseToOrb\": \"折叠为悬浮球\""));
+        assert!(catalog.contains("\"menu.collapseFloating\": \"折叠为悬浮球\""));
+        assert!(
+            !catalog.contains("Collapse to Avatar Orb") && !catalog.contains("收起到头像球"),
+            "the old collapse wording must not remain"
+        );
+
+        let native = include_str!("locale.rs");
+        assert!(native.contains("collapse_floating: \"Collapse to Orb\""));
+        assert!(native.contains("collapse_floating: \"折叠为悬浮球\""));
+    }
+
+    /// The shipped profile identity is a neutral placeholder, not a person.
+    ///
+    /// The frontend derives its initials from this value, so the default name is
+    /// the only place the neutral `U` comes from; a personal literal here would
+    /// ship as every new user's profile.
+    #[test]
+    fn default_profile_identity_is_neutral() {
+        let settings = super::ProductSettings::default();
+        assert_eq!(settings.display_name, "User");
+        assert!(settings.avatar_asset_id.is_none());
+
+        // A user's own name survives load and normalize untouched.
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting("product_settings", r#"{"displayName":"Alan Floyd"}"#)
+            .expect("settings");
+        let restored = AppState::load(database).expect("load").snapshot().expect("snapshot");
+        assert_eq!(restored.display_name, "Alan Floyd");
+
+        // An explicitly empty name is preserved as empty, so a user who clears the
+        // field is not silently handed the placeholder back.
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting("product_settings", r#"{"displayName":"   "}"#)
+            .expect("settings");
+        let restored = AppState::load(database).expect("load").snapshot().expect("snapshot");
+        assert!(restored.display_name.is_empty());
     }
 
     #[test]

@@ -659,6 +659,24 @@ button.profile-identity {
   cursor: pointer;
 }
 
+/*
+ * The standalone collapse control, used in Floating when there is no profile
+ * identity to click. It is a quiet text action in the footer's own rhythm, not a
+ * profile label: smaller and fainter than the identity, brightening on hover.
+ */
+.collapse-affordance-standalone {
+  margin-left: auto;
+  padding: 4px 0;
+  border: 0;
+  color: var(--faint);
+  background: transparent;
+  cursor: pointer;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
 .profile-avatar,
 .settings-avatar-preview {
   display: grid;
