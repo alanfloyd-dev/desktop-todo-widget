@@ -18,6 +18,8 @@ function run(action: string) {
     :aria-label="t('menu.ariaLabel')"
     @pointerdown.stop
   >
+    <p class="menu-heading menu-identity">{{ t("menu.productName") }}</p>
+    <div class="menu-divider"></div>
     <p class="menu-heading">{{ t("menu.windowMode") }}</p>
     <button type="button" @click="run('mode.sidebar')">
       <span>{{ settings.mode === "sidebar" ? "✓" : "" }}</span>{{ t("menu.mode.sidebar") }}
@@ -26,8 +28,7 @@ function run(action: string) {
       <span>{{ settings.mode === "floating" ? "✓" : "" }}</span>{{ t("menu.mode.floating") }}
     </button>
     <button type="button" @click="run('mode.desktop')">
-      <span>{{ settings.mode === "desktop" ? "✓" : "" }}</span>
-      <span>{{ t("menu.mode.desktop") }} <small>{{ t("menu.desktopExperimental") }}</small></span>
+      <span>{{ settings.mode === "desktop" ? "✓" : "" }}</span>{{ t("menu.mode.desktop") }}
     </button>
 
     <template v-if="settings.mode === 'sidebar'">
@@ -66,7 +67,17 @@ function run(action: string) {
       }}
     </button>
     <div class="menu-divider"></div>
+    <button type="button" @click="run('github')">
+      <span></span>{{ t("menu.github") }}
+    </button>
     <button type="button" @click="run('settings')"><span></span>{{ t("menu.settings") }}</button>
     <button type="button" @click="run('quit')"><span></span>{{ t("menu.quit") }}</button>
   </nav>
 </template>
+
+<style scoped>
+.menu-identity {
+  color: var(--text-primary, inherit);
+  font-weight: 600;
+}
+</style>

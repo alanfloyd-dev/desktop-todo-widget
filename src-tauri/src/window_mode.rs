@@ -219,6 +219,9 @@ pub struct ModeReport {
     attachment_valid: bool,
     recovery_count: u32,
     recovery_reason: String,
+    /// Widget window semantics: the taskbar/Alt+Tab membership of the product
+    /// window. Must report `taskbarEligible: false` in every window mode.
+    widget_frame: WidgetFrameFacts,
     win_d_trace: WinDTraceReport,
     detach: DetachDiagnostics,
     attach: AttachDiagnostics,
@@ -303,10 +306,36 @@ struct NativeDiagnostics {
     attachment_valid: bool,
     recovery_count: u32,
     recovery_reason: String,
+    /// Widget window semantics, verifiable from the report instead of inferred
+    /// from a raw style dump. See `platform::windows::widget_frame`.
+    widget_frame: WidgetFrameFacts,
     x: i32,
     y: i32,
     width: u32,
     height: u32,
+}
+
+/// Taskbar / Alt+Tab membership of the product HWND.
+///
+/// `taskbar_eligible` is the documented Shell placement rule evaluated against
+/// the live window, so `false` is the widget contract holding. Alt+Tab is listed
+/// separately because on Windows the two are decided by the same
+/// `WS_EX_TOOLWINDOW` test but are otherwise unrelated mechanisms: a window can
+/// be off the taskbar (owned, or `ITaskbarList`-removed) and still appear in
+/// Alt+Tab.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WidgetFrameFacts {
+    /// `WS_EX_TOOLWINDOW` is present, the Win32 "not an application window" bit.
+    tool_window: bool,
+    /// `WS_EX_APPWINDOW` is absent, the bit that forces a taskbar button.
+    app_window_cleared: bool,
+    taskbar_eligible: bool,
+    /// Windows lists exactly the taskbar-eligible top-level windows in Alt+Tab,
+    /// so this is the Alt+Tab answer for this window.
+    alt_tab_eligible: bool,
+    /// Window mode the facts were captured in, so a gate can assert per mode.
+    mode: WindowMode,
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -333,6 +362,7 @@ impl NativeDiagnostics {
             attachment_valid: false,
             recovery_count: 0,
             recovery_reason: "unsupported".into(),
+            widget_frame: WidgetFrameFacts::default(),
             x: 0,
             y: 0,
             width: 0,
@@ -859,6 +889,10 @@ fn build_report(window: &WebviewWindow, state: &StoredNativeState) -> Result<Mod
         attachment_valid: native_diagnostics.attachment_valid,
         recovery_count: native_diagnostics.recovery_count,
         recovery_reason: native_diagnostics.recovery_reason,
+        widget_frame: WidgetFrameFacts {
+            mode: state.mode,
+            ..native_diagnostics.widget_frame
+        },
         win_d_trace: win_d_trace_report(),
         detach: state.last_detach.clone(),
         attach: state.last_attach.clone(),
@@ -933,6 +967,9 @@ mod win32 {
     pub const WS_MINIMIZEBOX: isize = 0x0002_0000;
     pub const WS_EX_TOPMOST: isize = 0x0000_0008;
     pub const WS_EX_TRANSPARENT: isize = 0x0000_0020;
+    /// Win32 "this is not an application window": no taskbar button, no Alt+Tab
+    /// entry. Applied to every product window mode by `widget_frame`.
+    pub const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
     pub const WS_EX_APPWINDOW: isize = 0x0004_0000;
     pub const WS_EX_NOACTIVATE: isize = 0x0800_0000;
     pub const HWND_TOP: Hwnd = 0;
@@ -953,6 +990,7 @@ mod win32 {
     pub const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
     pub const GW_HWNDNEXT: u32 = 2;
     pub const GW_HWNDPREV: u32 = 3;
+    pub const GW_OWNER: u32 = 4;
     pub const WM_TIMER: u32 = 0x0113;
     pub const LIFECYCLE_TIMER_ID: usize = 0xA1A0;
     pub const LIFECYCLE_DEBOUNCE_MS: u32 = 220;
@@ -1480,6 +1518,28 @@ fn windows_diagnostics(window: &WebviewWindow) -> Result<NativeDiagnostics, Stri
         true
     };
 
+    // SAFETY: read-only queries of the live product HWND. The child test uses the
+    // style bit because `GetParent` reports the owner for a top-level window.
+    let (owner, is_child) = unsafe {
+        (
+            win32::GetWindow(hwnd, win32::GW_OWNER),
+            probe.style & win32::WS_CHILD != 0,
+        )
+    };
+    // One rule, one implementation: the widget contract's own taskbar predicate.
+    let taskbar_eligible = crate::platform::windows::widget_frame::taskbar_eligible_from(
+        probe.ex_style,
+        owner != 0,
+        is_child,
+    );
+    let alt_tab_eligible = crate::platform::windows::widget_frame::alt_tab_eligible_from(
+        probe.ex_style,
+        owner != 0,
+        is_child,
+    );
+    let tool_window = probe.ex_style & win32::WS_EX_TOOLWINDOW != 0;
+    let app_window_cleared = probe.ex_style & win32::WS_EX_APPWINDOW == 0;
+
     Ok(NativeDiagnostics {
         hwnd: format_hwnd(hwnd),
         parent_hwnd: format_hwnd(probe.parent),
@@ -1501,6 +1561,13 @@ fn windows_diagnostics(window: &WebviewWindow) -> Result<NativeDiagnostics, Stri
         attachment_valid,
         recovery_count: lifecycle.recovery_count,
         recovery_reason: lifecycle.recovery_reason,
+        widget_frame: WidgetFrameFacts {
+            tool_window,
+            app_window_cleared,
+            taskbar_eligible,
+            alt_tab_eligible,
+            mode: WindowMode::default(),
+        },
         x: probe.rect.left,
         y: probe.rect.top,
         width: (probe.rect.right - probe.rect.left).max(0) as u32,
@@ -2652,9 +2719,6 @@ fn apply_windows_mode(
                 .set_focusable(true)
                 .map_err(|error| error.to_string())?;
             attach_to_desktop(hwnd, native, desktop_placement)?;
-            window
-                .set_skip_taskbar(true)
-                .map_err(|error| error.to_string())?;
             set_desktop_requested(true, hwnd);
             let probe = read_attachment_probe(hwnd);
             update_lifecycle_probe(probe);
@@ -2668,9 +2732,6 @@ fn apply_windows_mode(
             window
                 .set_always_on_top(false)
                 .map_err(|error| error.to_string())?;
-            window
-                .set_skip_taskbar(false)
-                .map_err(|error| error.to_string())?;
             native.shell_strategy = "tauri-normal-window".into();
             native.warning = None;
         }
@@ -2678,9 +2739,6 @@ fn apply_windows_mode(
             set_desktop_requested(false, hwnd);
             window
                 .set_focusable(true)
-                .map_err(|error| error.to_string())?;
-            window
-                .set_skip_taskbar(false)
                 .map_err(|error| error.to_string())?;
             window
                 .set_always_on_top(true)
@@ -2691,6 +2749,21 @@ fn apply_windows_mode(
                     .into(),
             );
         }
+    }
+
+    // Taskbar membership is a property of the *product* (a tray-resident widget),
+    // not of a window mode, so it is enforced once for every mode by
+    // `platform::windows::widget_frame` instead of being toggled here. Tauri's own
+    // `set_skip_taskbar` used to be called in these branches; on Windows tao backs
+    // it with `ITaskbarList::AddTab`/`DeleteTab`, which fights the tool-window
+    // style the widget contract relies on — `AddTab` on a `WS_EX_TOOLWINDOW`
+    // window puts the taskbar button back even though the Win32 style says the
+    // window is not an application window. Re-asserting the frame after every
+    // transition keeps the authoritative style state and the Shell state aligned.
+    #[cfg(target_os = "windows")]
+    if let Err(error) = crate::platform::windows::widget_frame::enforce_on(hwnd) {
+        record_lifecycle_event(format!("widget frame re-assert failed · {error}"));
+        return Err(error);
     }
 
     sync_webview_input(window, true)?;

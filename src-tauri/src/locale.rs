@@ -100,10 +100,19 @@ pub fn is_simplified_chinese_locale(locale: &str) -> bool {
 /// mirror the frontend keys `menu.*`, and the same Simplified Chinese wording is
 /// used in both places.
 pub struct NativeLabels {
+    /// The product identity shown as the tray/context-menu heading. One of the
+    /// few UI surfaces where the product may name itself: the user has to be able
+    /// to tell what is resident in the notification area and find the project.
+    pub product_name: &'static str,
+    /// Opens the project page in the system default browser.
+    pub github: &'static str,
+    /// Restores the widget, which is the only way back once it has no taskbar
+    /// button of its own.
+    pub show_widget: &'static str,
     pub window_mode: &'static str,
     pub sidebar: &'static str,
     pub floating: &'static str,
-    pub desktop_experimental: &'static str,
+    pub desktop: &'static str,
     pub side: &'static str,
     pub left: &'static str,
     pub right: &'static str,
@@ -115,11 +124,21 @@ pub struct NativeLabels {
     pub quit: &'static str,
 }
 
+/// The product identity used by the native menus and the tray tooltip.
+///
+/// Deliberately a stable product name and not the executable's `productName`
+/// (`Alan Desktop`), which is a personal name rather than the product identity.
+/// A future release-naming sweep owns whether this value is centralized further.
+pub const PRODUCT_NAME: &str = "desktop-todo-widget";
+
 const ENGLISH_LABELS: NativeLabels = NativeLabels {
+    product_name: PRODUCT_NAME,
+    github: "GitHub ↗",
+    show_widget: "Show widget",
     window_mode: "Window mode",
     sidebar: "Sidebar",
-    floating: "Floating",
-    desktop_experimental: "Desktop — Experimental",
+    floating: "Floating (Acrylic)",
+    desktop: "Desktop (Acrylic unavailable)",
     side: "Side",
     left: "Left",
     right: "Right",
@@ -132,10 +151,13 @@ const ENGLISH_LABELS: NativeLabels = NativeLabels {
 };
 
 const SIMPLIFIED_CHINESE_LABELS: NativeLabels = NativeLabels {
+    product_name: PRODUCT_NAME,
+    github: "GitHub ↗",
+    show_widget: "显示小组件",
     window_mode: "窗口模式",
     sidebar: "侧边栏",
-    floating: "悬浮",
-    desktop_experimental: "桌面 — 实验性",
+    floating: "悬浮（Acrylic）",
+    desktop: "桌面（暂不支持 Acrylic）",
     side: "停靠方向",
     left: "左侧",
     right: "右侧",

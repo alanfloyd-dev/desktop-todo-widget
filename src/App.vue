@@ -340,6 +340,9 @@ function applyBrowserAction(action: string) {
     settings.floatingPresentation = "expanded";
   } else if (action === "floating.collapse") {
     settings.floatingPresentation = "collapsed";
+  } else if (action === "github") {
+    // The project page is opened by the native shell (`product_action`), which the
+    // browser preview has no equivalent of. Nothing to apply to the preview state.
   }
 }
 

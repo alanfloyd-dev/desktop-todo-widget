@@ -41,6 +41,34 @@ fn app_data_dir() -> Option<std::path::PathBuf> {
     None
 }
 
+/// Puts the product window into widget window semantics on Windows.
+///
+/// The product is a tray-resident widget in every mode (Sidebar, Floating
+/// expanded, Floating collapsed/Orb, Desktop), so the window must never appear in
+/// the taskbar and must not behave like an application window in Alt+Tab. Tauri's
+/// `skip_taskbar` cannot express that: on Windows tao implements it with
+/// `ITaskbarList::DeleteTab`, a Shell request that leaves `WS_EX_APPWINDOW` — the
+/// style Windows documents as forcing a taskbar button — on the window.
+///
+/// `platform::windows::widget_frame` therefore applies the Win32 tool-window
+/// semantics and keeps them applied through the window procedure, which is what
+/// makes them survive the style rewrites each mode transition performs. This
+/// bootstrap is the runtime authority; `tauri.conf.json` declares the matching
+/// `skipTaskbar` baseline so no button can appear before `setup` runs.
+#[cfg(target_os = "windows")]
+fn install_widget_frame(window: &tauri::WebviewWindow) -> Result<(), std::io::Error> {
+    use platform::windows::widget_frame;
+
+    let hwnd = window.hwnd().map_err(std::io::Error::other)?;
+    let report = widget_frame::enforce_on(hwnd.0 as isize).map_err(std::io::Error::other)?;
+    eprintln!("[widget-frame] {}", report.summary());
+    window
+        .app_handle()
+        .state::<qa_diagnostics::QaDiagnostics>()
+        .record(report.summary());
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let qa_diagnostics = qa_diagnostics::QaDiagnostics::from_process_args();
@@ -139,6 +167,14 @@ pub fn run() {
             let window = app
                 .get_webview_window("main")
                 .ok_or_else(|| std::io::Error::other("main window unavailable"))?;
+            // The product is a tray-resident widget: no window mode may carry a
+            // taskbar button or an Alt+Tab entry. Installed here, on the main
+            // thread and before the first mode transition, so every later
+            // Tauri/tao style rewrite is already covered. See
+            // `platform::windows::widget_frame` for why the style has to be
+            // enforced at the window procedure instead of set once.
+            #[cfg(target_os = "windows")]
+            install_widget_frame(&window)?;
             let diagnostics = app.state::<qa_diagnostics::QaDiagnostics>();
             if diagnostics.window_to_visual_requested() {
                 product_window::restore_window_to_visual_qa(

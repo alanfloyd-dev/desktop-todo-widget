@@ -31,12 +31,13 @@ export const en: Record<string, string> = {
   "status.weatherUpdated": "Weather updated.",
 
   // --- Context menu ---------------------------------------------------------
+  // Mirrors the native tray/context menu wording in `locale.rs`; the two menus
+  // render the same commands, so the labels have to stay in step.
   "menu.ariaLabel": "Window menu",
   "menu.windowMode": "Window mode",
   "menu.mode.sidebar": "Sidebar",
-  "menu.mode.floating": "Floating",
-  "menu.mode.desktop": "Desktop",
-  "menu.desktopExperimental": "Experimental",
+  "menu.mode.floating": "Floating (Acrylic)",
+  "menu.mode.desktop": "Desktop (Acrylic unavailable)",
   "menu.side": "Side",
   "menu.side.left": "Left",
   "menu.side.right": "Right",
@@ -46,6 +47,11 @@ export const en: Record<string, string> = {
   "menu.collapseFloating": "Collapse to Avatar Orb",
   "menu.settings": "Settings",
   "menu.quit": "Quit",
+  // The product identity and project link. `menu.productName` is the product name,
+  // not the executable's `productName`: the user has to be able to tell what is
+  // resident in the notification area and find the project.
+  "menu.productName": "desktop-todo-widget",
+  "menu.github": "GitHub ↗",
 
   // --- Floating orb ---------------------------------------------------------
   "orb.open": "Open Alan Desktop",
@@ -320,9 +326,8 @@ export const zhHans: Record<string, string> = {
   "menu.ariaLabel": "窗口菜单",
   "menu.windowMode": "窗口模式",
   "menu.mode.sidebar": "侧边栏",
-  "menu.mode.floating": "悬浮",
-  "menu.mode.desktop": "桌面",
-  "menu.desktopExperimental": "实验性",
+  "menu.mode.floating": "悬浮（Acrylic）",
+  "menu.mode.desktop": "桌面（暂不支持 Acrylic）",
   "menu.side": "停靠方向",
   "menu.side.left": "左侧",
   "menu.side.right": "右侧",
@@ -332,6 +337,8 @@ export const zhHans: Record<string, string> = {
   "menu.collapseFloating": "收起到头像球",
   "menu.settings": "设置",
   "menu.quit": "退出",
+  "menu.productName": "desktop-todo-widget",
+  "menu.github": "GitHub ↗",
 
   "orb.open": "打开 Alan Desktop",
 
