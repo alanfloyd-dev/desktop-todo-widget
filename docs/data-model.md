@@ -48,7 +48,7 @@ Local category identity, name, optional color, ordering, and timestamps.
 - `enabled`
 - creation/update timestamps
 
-The current UI reserves ID `homepage` for the configurable footer shortcut. URLs are validated as HTTP or HTTPS immediately before opening. The table boundary supports future shortcuts, but the product is not a bookmark manager.
+The `shortcuts` table is no longer written by the product. Quick Links live in the settings document (see `quickLinks` below), which is what gives them stable ids, per-link names, and a user-controlled order. The table, its repository methods, and any rows already present in an upgraded database are kept as-is: dropping either would mean a migration that deletes a developer's data to reclaim nothing. A pre-Quick-Links database may still contain a `homepage` row that was the old projection of the footer entry, and the Phase 2 development seed row migration 2 deliberately preserved; neither is read any more, and neither is deleted.
 
 ### weather_cache
 
@@ -71,9 +71,11 @@ Key/value storage for typed JSON settings. The product settings document include
 Profile fields use:
 
 - `display_name`
-- `homepage_label`
-- `homepage_url`
 - optional managed `avatar_asset_id`
+
+Quick Links use `quickLinks`, an ordered array of `{ id, name, url }` (camelCase on the wire, as everywhere else in this document). `id` is the stable identity used by edit/delete/reorder, so an array index is never a durable reference; `name` and `url` are user data and are never localized. Duplicate names and duplicate URLs are allowed, and an empty array is valid: the product section is then hidden and only the Settings manager renders. Each `url` is validated as `http`/`https` with a host, both when the list is saved and again immediately before it is opened; no other scheme is stored.
+
+Pre-Quick-Links documents stored one `homepage_label` / `homepage_url` pair. Both still deserialize, and a document with no `quickLinks` and a usable homepage URL migrates to exactly one link (`id: "legacy-homepage"`, name from the label or `Homepage`, URL unchanged). Neither field is written back, so the migration runs once, and an existing list is never re-seeded from them. A legacy pair with no URL — the old default — migrates to nothing, keeping the open-source default neutral. `docs/data-model.md`'s `shortcuts` section records the table's status after this change.
 
 Floating presentation uses `floating_presentation` (`collapsed` or `expanded`) and independent `floating_orb_x`, `floating_orb_y`, and monitor identity. The 56 DIP Orb never overwrites the saved expanded `width`/`height`.
 

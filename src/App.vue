@@ -25,6 +25,7 @@ import type {
   Language,
   ProductSettings,
   ProductViewState,
+  QuickLink,
   ResolvedContrast,
   TemperatureUnit,
   WeatherViewState,
@@ -158,8 +159,7 @@ function browserState(): ProductViewState {
       appearanceProfiles,
       displayName: "Your Name",
       avatarAssetId: null,
-      homepageLabel: "Homepage",
-      homepageUrl: "",
+      quickLinks: [],
     },
     desktopExperimental: true,
     databasePath: "browser preview · app-data/alan-desktop.sqlite3",
@@ -372,14 +372,17 @@ async function runAction(action: string) {
   }
 }
 
-async function openHomepage() {
-  if (!state.value.settings.homepageUrl) return;
+async function openQuickLink(id: string) {
+  const link = state.value.settings.quickLinks.find((candidate) => candidate.id === id);
+  if (!link) return;
   if (!nativeBridgeAvailable) {
-    window.open(state.value.settings.homepageUrl, "_blank", "noopener,noreferrer");
+    // Browser preview only. The native path hands the URL to the Shell so the
+    // system default browser opens it; this stand-in has no Shell to hand it to.
+    window.open(link.url, "_blank", "noopener,noreferrer");
     return;
   }
   try {
-    await invoke("open_shortcut", { id: "homepage" });
+    await invoke("open_quick_link", { id });
   } catch (reason) {
     error.value = String(reason);
   }
@@ -399,8 +402,7 @@ async function saveSettings(patch: {
   appearanceProfiles: AppearanceProfiles;
   displayName: string;
   avatarAssetId: string | null;
-  homepageLabel: string;
-  homepageUrl: string;
+  quickLinks: QuickLink[];
 }) {
   const active = state.value.settings;
   const weatherIdentityChanged =
@@ -540,11 +542,10 @@ onBeforeUnmount(() => {
         :display-name="state.settings.displayName"
         :avatar-url="avatarAsset.dataUrl || ''"
         :avatar-available="avatarAsset.available"
-        :homepage-label="state.settings.homepageLabel"
-        :homepage-url="state.settings.homepageUrl"
+        :quick-links="state.settings.quickLinks"
         :native-bridge-available="nativeBridgeAvailable"
         :weather="weather"
-        @open-homepage="openHomepage"
+        @open-quick-link="openQuickLink"
         @collapse="runAction('floating.collapse')"
         @configure-weather="openWeatherSettings"
         @open-review="settingsOpen = false; reviewOpen = true"

@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import { profileInitials } from "../appearance";
 import { useI18n } from "../i18n";
-import type { ProductWindowMode, WeatherViewState } from "../types";
+import type { ProductWindowMode, QuickLink, WeatherViewState } from "../types";
 import TodoPanel from "./TodoPanel.vue";
 import WeatherDisplay from "./WeatherDisplay.vue";
 
@@ -12,13 +12,12 @@ const props = defineProps<{
   displayName: string;
   avatarUrl: string;
   avatarAvailable: boolean;
-  homepageLabel: string;
-  homepageUrl: string;
+  quickLinks: QuickLink[];
   nativeBridgeAvailable: boolean;
   weather: WeatherViewState;
 }>();
 defineEmits<{
-  openHomepage: [];
+  openQuickLink: [id: string];
   collapse: [];
   configureWeather: [];
   openReview: [];
@@ -68,6 +67,28 @@ const dateLabel = computed(() =>
       @error="$emit('error', $event)"
     />
 
+    <!--
+      Quick Links is a product section, not a footer affordance: it sits in the
+      same section rhythm as the todo panel above it. With no links configured the
+      whole section is absent rather than rendering an empty block, which is why
+      the heading lives inside the `v-if`.
+    -->
+    <section
+      v-if="quickLinks.length"
+      class="quick-links"
+      :aria-label="t('quickLinks.heading')"
+    >
+      <p class="section-heading">{{ t("quickLinks.heading") }}</p>
+      <ul>
+        <li v-for="link in quickLinks" :key="link.id">
+          <button type="button" :title="link.url" @click="$emit('openQuickLink', link.id)">
+            <span class="quick-link-name">{{ link.name }}</span>
+            <span class="quick-link-arrow" aria-hidden="true">↗</span>
+          </button>
+        </li>
+      </ul>
+    </section>
+
     <footer class="signature">
       <button
         v-if="mode === 'floating'"
@@ -89,12 +110,6 @@ const dateLabel = computed(() =>
           <span v-else>{{ initials }}</span>
         </span>
         <span>{{ displayName || t("footer.defaultDisplayName") }}</span>
-      </span>
-      <button v-if="homepageUrl" type="button" @click="$emit('openHomepage')">
-        {{ homepageLabel || t("footer.defaultHomepageLabel") }} ↗
-      </button>
-      <span v-else class="homepage-placeholder">
-        {{ homepageLabel || t("footer.defaultHomepageLabel") }}
       </span>
     </footer>
   </div>

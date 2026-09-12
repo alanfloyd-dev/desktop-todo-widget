@@ -20,6 +20,8 @@ Phase 6 stops at factual, local Daily/Weekly/Monthly Review. The following work 
   the native desktop context menu stay available outside its HWND
 - Multi-monitor hot-plug validation (recorded as a non-blocking deferred Phase 1 lifecycle gate)
 - Explorer restart, lock/sleep/resume, fullscreen, and broader Windows-version regression coverage
-- Additional configurable shortcuts beyond the current homepage entry
+- Bookmark-manager features on top of Quick Links: favicons, page-title
+  fetching, folders/groups, tags, search, and cloud sync. v1 ships a plain
+  name + URL list only.
 
 The existing `tasks`, `categories`, `shortcuts`, and `app_settings` tables and the Vue/Rust boundaries are the intended foundations. Future phases should add focused repository methods and UI components without moving ordinary presentation/business logic into the Win32 adapter.

@@ -212,7 +212,7 @@ pub fn run() {
             product_window::product_state,
             product_window::update_product_settings,
             product_window::request_window_drag,
-            product_window::open_shortcut,
+            product_window::open_quick_link,
             product_window::quit_app,
             product_commands::product_action,
             product_commands::show_product_context_menu,

@@ -1254,6 +1254,89 @@ button.profile-identity {
   padding: 8px 0 !important;
 }
 
+/* --- Quick Links (settings manager) --------------------------------------- */
+
+/*
+ * The list rows, the inline editor and the Add button reuse `.settings-row` for
+ * the label/field split so the section keeps the same rhythm as the rest of the
+ * panel; only the row content, the action cluster and their stacking below 440px
+ * are new.
+ */
+.quick-links-empty {
+  padding: 4px 0 12px;
+  color: var(--faint);
+  font-size: 11px;
+}
+
+.quick-links-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.quick-link-row {
+  display: flex;
+  min-height: 60px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.quick-link-fields {
+  display: block;
+  min-width: 0;
+}
+
+.quick-link-fields strong {
+  display: block;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.quick-link-fields small {
+  display: block;
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-link-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+}
+
+.quick-link-actions button {
+  min-width: 26px;
+  padding: 4px 6px !important;
+  font-size: 11px;
+}
+
+.quick-link-add {
+  margin-top: 12px;
+  padding: 6px 0 !important;
+}
+
+.quick-link-editor {
+  margin-top: 6px;
+}
+
+.quick-link-editor-actions {
+  display: flex;
+  gap: 18px;
+  padding-top: 12px;
+}
+
+.quick-link-editor-actions button {
+  padding: 4px 0 !important;
+}
+
 .settings-major-heading {
   padding-top: 30px;
   border-bottom: 1px solid var(--line-strong);
@@ -1448,8 +1531,74 @@ button.profile-identity {
   font-size: 10px;
 }
 
-.homepage-placeholder {
-  color: var(--faint) !important;
+/* --- Quick Links (product section) ---------------------------------------- */
+
+/*
+ * Sits between the todo panel and the signature footer, in the same
+ * heading + rule + rows rhythm as the sections above it. The section is only
+ * rendered when the list is non-empty, so no empty-state styling is needed here.
+ */
+.quick-links {
+  margin-top: 26px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.quick-links > .section-heading {
+  margin-bottom: 10px;
+  color: var(--faint);
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.quick-links ul {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.quick-links button {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 5px 2px;
+  border: 0;
+  color: var(--mineral);
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  text-align: left;
+}
+
+.quick-links button:hover,
+.quick-links button:focus-visible {
+  color: #c7e6fa;
+  outline: none;
+}
+
+.quick-link-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-link-arrow {
+  flex: none;
+  color: var(--faint);
+  font-size: 10px;
+}
+
+.quick-links button:hover .quick-link-arrow,
+.quick-links button:focus-visible .quick-link-arrow {
+  color: inherit;
 }
 
 @media (max-width: 440px) {

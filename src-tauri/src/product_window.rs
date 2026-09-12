@@ -1,9 +1,8 @@
 use crate::{
     appearance::{self, AppearanceProfiles, AppearanceSettings},
-    database::Shortcut,
     platform,
     settings::{
-        AppState, FloatingPresentation, ProductSettings, ProductWindowMode, RenderingBackend,
+        self, AppState, FloatingPresentation, ProductSettings, ProductWindowMode, RenderingBackend,
         SidebarSide, TemperatureUnit,
     },
     task_day,
@@ -121,8 +120,14 @@ pub struct SettingsPatch {
     avatar_asset_id: Option<Option<String>>,
     sidebar_width: Option<u32>,
     display_name: Option<String>,
-    homepage_label: Option<String>,
-    homepage_url: Option<String>,
+    /// The complete Quick Links list, in display order.
+    ///
+    /// Replace-not-patch on purpose: add, edit, delete and reorder are all
+    /// "this is the new list", and the ids are assigned by the client that owns
+    /// the draft. A per-operation protocol (add/delete/move commands) would have
+    /// to keep a second implementation of the same ordering rules on the Rust
+    /// side for no benefit at this size.
+    quick_links: Option<Vec<settings::QuickLink>>,
     /// Persisted rendering backend preference. Applied to settings only; the
     /// hosting backend itself is chosen at startup and needs a restart.
     rendering_backend: Option<RenderingBackend>,
@@ -193,14 +198,13 @@ pub fn update_product_settings(
     state: tauri::State<'_, AppState>,
     patch: SettingsPatch,
 ) -> Result<ProductViewState, String> {
-    if let Some(url) = patch.homepage_url.as_deref() {
-        validate_optional_homepage(url)?;
+    if let Some(links) = patch.quick_links.as_deref() {
+        validate_quick_links(links)?;
     }
     if let Some(rollover) = patch.day_rollover.as_deref() {
         task_day::parse_rollover(rollover)?;
     }
     validate_weather_patch(&patch)?;
-    let profile_changed = patch.homepage_label.is_some() || patch.homepage_url.is_some();
     let before = state.snapshot()?;
     let settings = state.update(|settings| {
         if let Some(value) = patch.day_rollover {
@@ -253,11 +257,8 @@ pub fn update_product_settings(
         if let Some(value) = patch.display_name {
             settings.display_name = value.trim().to_string();
         }
-        if let Some(value) = patch.homepage_label {
-            settings.homepage_label = value.trim().to_string();
-        }
-        if let Some(value) = patch.homepage_url {
-            settings.homepage_url = value.trim().to_string();
+        if let Some(value) = patch.quick_links {
+            settings.quick_links = value;
         }
     })?;
     appearance::cleanup_replaced_assets(
@@ -267,15 +268,6 @@ pub fn update_product_settings(
         &settings.appearance_profiles,
         settings.avatar_asset_id.as_deref(),
     );
-    if profile_changed {
-        state.database.upsert_shortcut(&Shortcut {
-            id: "homepage".into(),
-            label: settings.homepage_label.clone(),
-            url: settings.homepage_url.clone(),
-            sort_order: 0,
-            enabled: !settings.homepage_url.is_empty(),
-        })?;
-    }
     let effective_settings = window
         .app_handle()
         .state::<ProductWindowRuntime>()
@@ -554,17 +546,19 @@ pub(crate) fn product_window_resizable(mode: ProductWindowMode, settings: &Produ
 }
 
 #[tauri::command]
-pub fn open_shortcut(state: tauri::State<'_, AppState>, id: &str) -> Result<(), String> {
-    let shortcut = state
-        .database
-        .shortcut(id)?
-        .ok_or_else(|| format!("shortcut not found: {id}"))?;
-    if !validated_shortcut_url(&shortcut.url) {
-        return Err("shortcut URL is not allowed".into());
-    }
+pub fn open_quick_link(state: tauri::State<'_, AppState>, id: &str) -> Result<(), String> {
+    let settings = state.snapshot()?;
+    let link = settings
+        .quick_links
+        .iter()
+        .find(|link| link.id == id)
+        .ok_or_else(|| format!("quick link not found: {id}"))?;
+    // The URL was validated when it was stored; it is validated again here because
+    // the open path must not depend on any other writer having done so.
+    settings::validate_quick_link_url(&link.url)?;
     #[cfg(target_os = "windows")]
     std::process::Command::new("explorer.exe")
-        .arg(&shortcut.url)
+        .arg(&link.url)
         .spawn()
         .map_err(|error| error.to_string())?;
     Ok(())
@@ -1404,18 +1398,22 @@ pub fn handle_window_event(window: &tauri::Window, event: &WindowEvent) {
     }
 }
 
-fn validate_optional_homepage(url: &str) -> Result<(), String> {
-    if url.trim().is_empty() || validated_shortcut_url(url) {
-        Ok(())
-    } else {
-        Err("homepage URL must use http or https".into())
+/// Rejects a Quick Links list this build cannot store.
+///
+/// Names may repeat and URLs may repeat: the user decides what their link list
+/// contains, so the only rejections here are the ones that would produce a row
+/// with no label or a URL that cannot be launched.
+fn validate_quick_links(links: &[settings::QuickLink]) -> Result<(), String> {
+    for link in links {
+        if link.id.trim().is_empty() {
+            return Err("quick link is missing its id".into());
+        }
+        if link.name.trim().is_empty() {
+            return Err("quick link name cannot be empty".into());
+        }
+        settings::validate_quick_link_url(link.url.trim())?;
     }
-}
-
-fn validated_shortcut_url(url: &str) -> bool {
-    url::Url::parse(url)
-        .map(|parsed| matches!(parsed.scheme(), "http" | "https") && parsed.host().is_some())
-        .unwrap_or(false)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1423,7 +1421,7 @@ mod tests {
     use super::{
         desktop_request_from_settings, logical_bounds_to_physical, migrate_geometry_values_to_dip,
         orb_rect, physical_bounds_to_logical, product_window_resizable, select_work_area,
-        smart_expanded_rect, snap_side, validate_window_rect, validated_shortcut_url,
+        smart_expanded_rect, snap_side, validate_quick_links, validate_window_rect,
         window_drag_allowed, WindowRect, WorkArea, ORB_SIZE_DIP,
     };
     use crate::settings::{FloatingPresentation, ProductSettings, ProductWindowMode, SidebarSide};
@@ -1579,11 +1577,24 @@ mod tests {
     }
 
     #[test]
-    fn shortcut_accepts_configurable_http_urls_only() {
-        assert!(validated_shortcut_url("https://example.com/"));
-        assert!(validated_shortcut_url("http://localhost:3000/"));
-        assert!(!validated_shortcut_url("file:///C:/private.txt"));
-        assert!(!validated_shortcut_url("javascript:alert(1)"));
+    fn quick_links_reject_only_unusable_rows() {
+        let link = |id: &str, name: &str, url: &str| crate::settings::QuickLink {
+            id: id.into(),
+            name: name.into(),
+            url: url.into(),
+        };
+        // Duplicate names and duplicate URLs are the user's call, not an error.
+        assert!(validate_quick_links(&[
+            link("a", "Docs", "https://example.com/docs"),
+            link("b", "Docs", "https://example.com/docs"),
+        ])
+        .is_ok());
+        // An empty list is valid: the product section is simply hidden.
+        assert!(validate_quick_links(&[]).is_ok());
+
+        assert!(validate_quick_links(&[link("a", "   ", "https://example.com")]).is_err());
+        assert!(validate_quick_links(&[link(" ", "Docs", "https://example.com")]).is_err());
+        assert!(validate_quick_links(&[link("a", "Docs", "javascript:alert(1)")]).is_err());
     }
 
     #[test]

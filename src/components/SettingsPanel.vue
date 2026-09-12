@@ -15,6 +15,7 @@ import type {
   LocationCandidate,
   ProductSettings,
   ProductWindowMode,
+  QuickLink,
   RenderingBackend,
   TemperatureUnit,
   WeatherViewState,
@@ -49,8 +50,7 @@ const emit = defineEmits<{
     appearanceProfiles: AppearanceProfiles;
     displayName: string;
     avatarAssetId: string | null;
-    homepageLabel: string;
-    homepageUrl: string;
+    quickLinks: QuickLink[];
     renderingBackend: RenderingBackend;
   }];
 }>();
@@ -118,8 +118,120 @@ const editedImageUnavailable = computed(() => {
 });
 const assetMessage = ref("");
 const provisionalAssets = new Set<string>();
-const homepageLabel = ref(props.settings.homepageLabel);
-const homepageUrl = ref(props.settings.homepageUrl);
+
+/**
+ * Quick Links draft.
+ *
+ * The panel owns the whole list while it is open: add, edit, delete and reorder
+ * all mutate this copy, and Save writes the finished list in one patch. That is
+ * why ids are assigned here — the list has to stay addressable across a reorder
+ * before anything is persisted.
+ */
+const quickLinks = ref<QuickLink[]>(props.settings.quickLinks.map((link) => ({ ...link })));
+/** Id of the row being edited, or `null` when no editor is open. */
+const editingLinkId = ref<string | null>(null);
+const draftName = ref("");
+const draftUrl = ref("");
+const quickLinkError = ref("");
+
+/**
+ * Stable id for a new link.
+ *
+ * `crypto.randomUUID` is available in the WebView2 runtime and in every browser
+ * the preview supports; the fallback keeps a non-secure preview origin working
+ * without pulling an id library in for one call site.
+ */
+function newLinkId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `link-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * Client-side URL check, mirroring the Rust validator.
+ *
+ * The backend is still the authority — it re-validates the patch and returns an
+ * error the panel surfaces — but catching it here keeps the message next to the
+ * field instead of a round trip away.
+ */
+function quickLinkUrlError(url: string): string | null {
+  const trimmed = url.trim();
+  if (!trimmed) return t("quickLinks.error.urlRequired");
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return t("quickLinks.error.invalidUrl");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return t("quickLinks.error.invalidUrl");
+  }
+  return null;
+}
+
+function resetEditor() {
+  editingLinkId.value = null;
+  draftName.value = "";
+  draftUrl.value = "";
+  quickLinkError.value = "";
+}
+
+function addLink() {
+  resetEditor();
+  editingLinkId.value = "";
+}
+
+function editLink(link: QuickLink) {
+  editingLinkId.value = link.id;
+  draftName.value = link.name;
+  draftUrl.value = link.url;
+  quickLinkError.value = "";
+}
+
+function commitEditor() {
+  const name = draftName.value.trim();
+  const url = draftUrl.value.trim();
+  if (!name) {
+    quickLinkError.value = t("quickLinks.error.nameRequired");
+    return;
+  }
+  const urlError = quickLinkUrlError(url);
+  if (urlError) {
+    quickLinkError.value = urlError;
+    return;
+  }
+  if (editingLinkId.value) {
+    const existing = quickLinks.value.find((link) => link.id === editingLinkId.value);
+    if (existing) {
+      existing.name = name;
+      existing.url = url;
+    }
+  } else {
+    quickLinks.value.push({ id: newLinkId(), name, url });
+  }
+  resetEditor();
+}
+
+function deleteLink(id: string) {
+  quickLinks.value = quickLinks.value.filter((link) => link.id !== id);
+  if (editingLinkId.value === id) resetEditor();
+}
+
+/**
+ * Moves a link one row up or down.
+ *
+ * In-place swap rather than a splice-and-insert: the identity of every row is its
+ * `id`, so the simplest correct move is the one that only changes positions.
+ */
+function moveLink(id: string, delta: -1 | 1) {
+  const index = quickLinks.value.findIndex((link) => link.id === id);
+  const target = index + delta;
+  if (index < 0 || target < 0 || target >= quickLinks.value.length) return;
+  const list = quickLinks.value;
+  [list[index], list[target]] = [list[target], list[index]];
+}
+
 const developerOpen = ref(false);
 /**
  * Rendering backend draft.
@@ -168,8 +280,7 @@ function save() {
     appearanceProfiles: cloneProfiles(appearanceProfiles.value),
     displayName: displayName.value,
     avatarAssetId: avatarAssetId.value,
-    homepageLabel: homepageLabel.value,
-    homepageUrl: homepageUrl.value,
+    quickLinks: quickLinks.value.map((link) => ({ ...link })),
     renderingBackend: renderingBackend.value,
   });
 }
@@ -378,17 +489,83 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
         </div>
       </div>
       <label class="settings-row">
-        <span><strong>{{ t("settings.homepageLabel") }}</strong><small>{{ t("settings.homepageLabelHint") }}</small></span>
-        <input v-model="homepageLabel" type="text" :placeholder="t('settings.homepageLabelPlaceholder')" />
-      </label>
-      <label class="settings-row">
-        <span><strong>{{ t("settings.homepageUrl") }}</strong><small>{{ t("settings.homepageUrlHint") }}</small></span>
-        <input v-model="homepageUrl" type="url" placeholder="https://example.com/" />
-      </label>
-      <label class="settings-row">
         <span><strong>{{ t("settings.dayRollover") }}</strong><small>{{ t("settings.dayRolloverHint") }}</small></span>
         <input v-model="dayRollover" type="time" />
       </label>
+
+      <div class="settings-section-heading settings-major-heading">
+        <strong>{{ t("quickLinks.heading") }}</strong>
+      </div>
+      <section class="quick-links-settings" :aria-label="t('quickLinks.heading')">
+        <p v-if="!quickLinks.length" class="quick-links-empty">{{ t("quickLinks.empty") }}</p>
+        <ul v-else class="quick-links-rows">
+          <li v-for="(link, index) in quickLinks" :key="link.id" class="quick-link-row">
+            <span class="quick-link-fields">
+              <strong>{{ link.name }}</strong>
+              <small>{{ link.url }}</small>
+            </span>
+            <span class="quick-link-actions">
+              <button
+                type="button"
+                :disabled="index === 0"
+                :title="t('quickLinks.moveUp')"
+                :aria-label="t('quickLinks.moveUpAriaLabel', { name: link.name })"
+                @click="moveLink(link.id, -1)"
+              >↑</button>
+              <button
+                type="button"
+                :disabled="index === quickLinks.length - 1"
+                :title="t('quickLinks.moveDown')"
+                :aria-label="t('quickLinks.moveDownAriaLabel', { name: link.name })"
+                @click="moveLink(link.id, 1)"
+              >↓</button>
+              <button
+                type="button"
+                :aria-label="t('quickLinks.editAriaLabel', { name: link.name })"
+                @click="editLink(link)"
+              >{{ t("quickLinks.edit") }}</button>
+              <button
+                type="button"
+                :aria-label="t('quickLinks.deleteAriaLabel', { name: link.name })"
+                @click="deleteLink(link.id)"
+              >{{ t("quickLinks.delete") }}</button>
+            </span>
+          </li>
+        </ul>
+
+        <!--
+          One inline editor for both Add and Edit: the same two fields and the same
+          validation, so there is no second code path to keep in step.
+        -->
+        <div v-if="editingLinkId !== null" class="quick-link-editor">
+          <label class="settings-row">
+            <span><strong>{{ t("quickLinks.name") }}</strong></span>
+            <input
+              v-model="draftName"
+              type="text"
+              :placeholder="t('quickLinks.namePlaceholder')"
+              @keydown.enter.prevent="commitEditor"
+            />
+          </label>
+          <label class="settings-row">
+            <span><strong>{{ t("quickLinks.url") }}</strong></span>
+            <input
+              v-model="draftUrl"
+              type="url"
+              :placeholder="t('quickLinks.urlPlaceholder')"
+              @keydown.enter.prevent="commitEditor"
+            />
+          </label>
+          <p v-if="quickLinkError" class="settings-error" role="alert">{{ quickLinkError }}</p>
+          <div class="quick-link-editor-actions">
+            <button type="button" @click="commitEditor">{{ t("quickLinks.save") }}</button>
+            <button type="button" @click="resetEditor">{{ t("quickLinks.cancel") }}</button>
+          </div>
+        </div>
+        <button v-else type="button" class="quick-link-add" @click="addLink">
+          {{ t("quickLinks.add") }}
+        </button>
+      </section>
       <div class="settings-section-heading settings-major-heading"><strong>{{ t("settings.weatherHeading") }}</strong></div>
       <section ref="weatherSection" class="weather-settings" aria-labelledby="weather-settings-heading">
         <div class="settings-section-heading">

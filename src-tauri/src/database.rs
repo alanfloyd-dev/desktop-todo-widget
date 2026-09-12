@@ -57,6 +57,13 @@ CREATE TABLE IF NOT EXISTS app_settings (
 // Migration 2 deliberately keeps existing shortcut rows intact. It only adds
 // the query index used by the open-source shortcut boundary, so a Phase 2
 // database can be upgraded without deleting a developer's previous seed.
+//
+// The `shortcuts` table is no longer written by the product: Quick Links are part
+// of the settings document (see `settings::QuickLink`), which is what gives them
+// stable ids, per-link names and a user-controlled order. The table, its
+// repository methods, and any rows already in an upgraded database are kept
+// as-is — dropping either would mean a migration that deletes a developer's data
+// to reclaim nothing. `docs/data-model.md` records this state.
 const MIGRATION_2: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_shortcuts_enabled_sort
   ON shortcuts(enabled, sort_order);

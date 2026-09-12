@@ -1,12 +1,58 @@
 use crate::{
     appearance::{self, AppearanceProfiles, AppearanceSettings},
-    database::{Database, Shortcut},
+    database::Database,
     locale::Language,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
 const PRODUCT_SETTINGS_KEY: &str = "product_settings";
+
+/// Persisted name used when a legacy homepage had no label of its own.
+///
+/// Stable, untranslated data: it is stored in the settings document, so
+/// translating it would rewrite the user's own label on a language change.
+pub const DEFAULT_QUICK_LINK_NAME: &str = "Homepage";
+
+/// Stable identifier the legacy homepage migration reuses.
+///
+/// Deterministic rather than a fresh UUID so the migration is idempotent and
+/// reload-safe: if it ever ran twice, the second run would produce the same id
+/// instead of a duplicate row. [`ProductSettings::migrate_legacy_homepage`] is
+/// also guarded on an empty `quick_links`, so this is belt and braces.
+pub const LEGACY_HOMEPAGE_LINK_ID: &str = "legacy-homepage";
+
+/// One user-managed Quick Link.
+///
+/// `id` is the identity used by edit/delete/reorder. It is deliberately not the
+/// array index: reordering must not re-key anything, and a future sync or import
+/// needs a stable handle. Names and URLs are user data and are never localized.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuickLink {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+}
+
+/// The only URL shapes a Quick Link may hold: `http` or `https` with a host.
+///
+/// One implementation for both the write path (saving settings) and the open path
+/// ([`crate::product_window::open_quick_link`]), so a link that cannot be stored
+/// can never be launched and vice versa. Everything else — `javascript:`,
+/// `file:`, `data:`, `shell:`, a bare host, a relative path — is rejected rather
+/// than normalized, because the product has no legitimate use for those schemes
+/// and guessing would be a security decision made on the user's behalf.
+pub fn validate_quick_link_url(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|_| "link URL must be a valid URL".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("link URL must start with http:// or https://".into());
+    }
+    if parsed.host().is_none() {
+        return Err("link URL must include a host".into());
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -183,7 +229,25 @@ pub struct ProductSettings {
     pub legacy_appearance_settings: Option<AppearanceSettings>,
     pub display_name: String,
     pub avatar_asset_id: Option<String>,
+    /// The product's Quick Links, in display order.
+    ///
+    /// Persisted here rather than in the `shortcuts` table because that table is
+    /// documented as a reserved-ID projection (`docs/data-model.md`) and this list
+    /// needs stable ids, ordering, and per-link names — the settings document is
+    /// the single source of truth for both the product surface and the manager UI.
+    /// An empty list is valid and means the product section is hidden.
+    #[serde(default)]
+    pub quick_links: Vec<QuickLink>,
+    /// Deserialize-only bridge for the single footer homepage.
+    ///
+    /// Documents written before Quick Links stored one label/URL pair. Both still
+    /// parse into these fields, and [`ProductSettings::migrate_legacy_homepage`]
+    /// turns the pair into exactly one Quick Link so an existing user's entry
+    /// survives the upgrade. Neither field is serialized any more, so the
+    /// migration runs once and the written document carries `quickLinks` only.
+    #[serde(default, skip_serializing)]
     pub homepage_label: String,
+    #[serde(default, skip_serializing)]
     pub homepage_url: String,
 }
 
@@ -229,7 +293,11 @@ impl Default for ProductSettings {
             legacy_appearance_settings: None,
             display_name: "Your Name".into(),
             avatar_asset_id: None,
-            homepage_label: "Homepage".into(),
+            // Neutral by default: the open-source build ships no personal site and
+            // no pre-seeded links. `default_configuration_has_no_personal_runtime_dependency`
+            // asserts this.
+            quick_links: Vec::new(),
+            homepage_label: DEFAULT_QUICK_LINK_NAME.into(),
             homepage_url: String::new(),
         }
     }
@@ -252,6 +320,57 @@ impl ProductSettings {
         }
     }
 
+    /// Turns a pre-Quick-Links document's single homepage into one Quick Link.
+    ///
+    /// Runs on load, before the state is persisted, so the upgraded document is
+    /// written with `quickLinks` and without the legacy pair.
+    ///
+    /// Guarded on an empty list: `normalize` may run many times over the life of a
+    /// document, so an unconditional conversion would re-append the homepage to a
+    /// list the user had deliberately emptied. For the same reason a legacy entry
+    /// whose URL is missing or unusable is dropped rather than stored — the open
+    /// path would refuse it anyway, and a Quick Link that cannot be clicked is
+    /// worse than no Quick Link.
+    ///
+    /// A legacy label is preserved verbatim, including its language: it is the
+    /// user's own text, so nothing here renames or translates it.
+    fn migrate_legacy_homepage(&mut self) {
+        let url = self.homepage_url.trim().to_string();
+        if !self.quick_links.is_empty() || url.is_empty() {
+            return;
+        }
+        if validate_quick_link_url(&url).is_err() {
+            return;
+        }
+        let name = self.homepage_label.trim();
+        self.quick_links.push(QuickLink {
+            id: LEGACY_HOMEPAGE_LINK_ID.into(),
+            name: if name.is_empty() {
+                DEFAULT_QUICK_LINK_NAME.into()
+            } else {
+                name.to_string()
+            },
+            url,
+        });
+    }
+
+    /// Drops entries this build cannot render or open.
+    ///
+    /// A link with no name would be an unlabelled row and a link with an
+    /// unusable URL cannot be launched, so neither is kept. Applied on every
+    /// normalize so a hand-edited or future-version document degrades to a valid
+    /// list instead of failing to load.
+    fn normalize_quick_links(&mut self) {
+        self.quick_links.retain_mut(|link| {
+            link.id = link.id.trim().to_string();
+            link.name = link.name.trim().to_string();
+            link.url = link.url.trim().to_string();
+            !link.name.is_empty()
+                && !link.id.is_empty()
+                && validate_quick_link_url(&link.url).is_ok()
+        });
+    }
+
     pub fn normalize(&mut self) {
         self.width = self.width.clamp(360, 1100);
         self.height = self.height.clamp(500, 1200);
@@ -259,11 +378,11 @@ impl ProductSettings {
         self.desktop_height = self.desktop_height.clamp(500, 1200);
         self.sidebar_width = self.sidebar_width.clamp(320, 560);
         self.migrate_legacy_appearance();
+        self.migrate_legacy_homepage();
+        self.normalize_quick_links();
         self.appearance_profiles.normalize();
         appearance::normalize_avatar_asset_id(&mut self.avatar_asset_id);
         self.display_name = self.display_name.trim().to_string();
-        self.homepage_label = self.homepage_label.trim().to_string();
-        self.homepage_url = self.homepage_url.trim().to_string();
     }
 }
 
@@ -313,16 +432,6 @@ impl AppState {
             settings: Mutex::new(settings),
         };
         state.persist()?;
-        let profile = state.snapshot()?;
-        if !profile.homepage_url.is_empty() {
-            state.database.upsert_shortcut(&Shortcut {
-                id: "homepage".into(),
-                label: profile.homepage_label,
-                url: profile.homepage_url,
-                sort_order: 0,
-                enabled: true,
-            })?;
-        }
         Ok(state)
     }
 
@@ -361,7 +470,7 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, FloatingPresentation, ProductWindowMode, SidebarSide};
+    use super::{AppState, FloatingPresentation, ProductWindowMode, QuickLink, SidebarSide};
     use crate::appearance::BackgroundType;
     use crate::database::Database;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -420,8 +529,18 @@ mod tests {
                     settings.always_on_top = true;
                     settings.locked = true;
                     settings.display_name = "Example Person".into();
-                    settings.homepage_label = "Example Site".into();
-                    settings.homepage_url = "https://example.com/".into();
+                    settings.quick_links = vec![
+                        QuickLink {
+                            id: "link-a".into(),
+                            name: "Example Site".into(),
+                            url: "https://example.com/".into(),
+                        },
+                        QuickLink {
+                            id: "link-b".into(),
+                            name: "Example Site".into(),
+                            url: "https://example.com/".into(),
+                        },
+                    ];
                 })
                 .expect("update");
         }
@@ -445,8 +564,13 @@ mod tests {
         assert!(restored.always_on_top);
         assert!(restored.locked);
         assert_eq!(restored.display_name, "Example Person");
-        assert_eq!(restored.homepage_label, "Example Site");
-        assert_eq!(restored.homepage_url, "https://example.com/");
+        // Order and ids survive the round trip; duplicate names and duplicate
+        // URLs are allowed and are not collapsed.
+        assert_eq!(restored.quick_links.len(), 2);
+        assert_eq!(restored.quick_links[0].id, "link-a");
+        assert_eq!(restored.quick_links[1].id, "link-b");
+        assert_eq!(restored.quick_links[0].name, restored.quick_links[1].name);
+        assert_eq!(restored.quick_links[0].url, restored.quick_links[1].url);
 
         for candidate in [
             path.clone(),
@@ -596,7 +720,12 @@ mod tests {
             .snapshot()
             .expect("snapshot");
         assert_eq!(restored.display_name, "Your Name");
-        assert_eq!(restored.homepage_label, "Homepage");
+        // A pre-Quick-Links document with no homepage configured yields an empty
+        // list: there is nothing to migrate. The legacy pair is no longer part of
+        // the document, so absent keys resolve to empty here rather than to the
+        // old in-memory "Homepage" placeholder.
+        assert!(restored.quick_links.is_empty());
+        assert!(restored.homepage_label.is_empty());
         assert!(restored.homepage_url.is_empty());
         assert!(restored.weather_location_label.is_empty());
         assert_eq!(restored.temperature_unit, super::TemperatureUnit::Celsius);
@@ -786,6 +915,9 @@ mod tests {
         assert!(!serialized.to_ascii_lowercase().contains("alanfloyd.net"));
         assert!(settings.weather_location_label.is_empty());
         assert!(settings.weather_latitude.is_none());
+        // v1 ships no Quick Links: the product section is hidden until the user
+        // adds one, and the open-source default stays neutral.
+        assert!(settings.quick_links.is_empty());
         assert!(settings.homepage_url.is_empty());
         assert_eq!(settings.display_name, "Your Name");
         assert_eq!(
@@ -796,5 +928,222 @@ mod tests {
             settings.appearance_profiles.floating.background_type,
             BackgroundType::Glass
         );
+    }
+
+    #[test]
+    fn quick_links_default_shape_is_an_empty_list() {
+        let settings = super::ProductSettings::default();
+        // camelCase on the wire, and an empty list is serialized rather than omitted
+        // so a reader never has to distinguish "absent" from "empty".
+        let json = serde_json::to_value(&settings).expect("serialize");
+        assert_eq!(json["quickLinks"], serde_json::json!([]));
+        assert!(json.get("homepageLabel").is_none());
+        assert!(json.get("homepageUrl").is_none());
+
+        let parsed: super::ProductSettings =
+            serde_json::from_value(serde_json::json!({ "quickLinks": [] })).expect("parse");
+        assert!(parsed.quick_links.is_empty());
+    }
+
+    #[test]
+    fn quick_links_round_trip_with_camel_case_keys() {
+        let mut settings = super::ProductSettings::default();
+        settings.quick_links = vec![
+            super::QuickLink {
+                id: "b".into(),
+                name: "Docs".into(),
+                url: "https://example.com/docs".into(),
+            },
+            super::QuickLink {
+                id: "a".into(),
+                name: "Docs".into(),
+                url: "https://example.com/docs".into(),
+            },
+        ];
+        let json = serde_json::to_value(&settings).expect("serialize");
+        assert_eq!(
+            json["quickLinks"],
+            serde_json::json!([
+                { "id": "b", "name": "Docs", "url": "https://example.com/docs" },
+                { "id": "a", "name": "Docs", "url": "https://example.com/docs" },
+            ])
+        );
+        let parsed: super::ProductSettings = serde_json::from_value(json).expect("parse");
+        // Array order is the display order and is preserved verbatim.
+        assert_eq!(parsed.quick_links, settings.quick_links);
+    }
+
+    #[test]
+    fn legacy_homepage_migrates_to_one_quick_link_once() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"displayName":"Example Person","homepageLabel":"Personal Site","homepageUrl":"https://www.example.net","mode":"floating"}"#,
+            )
+            .expect("legacy settings");
+
+        let state = AppState::load(database).expect("load");
+        let migrated = state.snapshot().expect("snapshot");
+        assert_eq!(
+            migrated.quick_links,
+            vec![super::QuickLink {
+                id: super::LEGACY_HOMEPAGE_LINK_ID.into(),
+                // The user's own label is kept verbatim, language included.
+                name: "Personal Site".into(),
+                url: "https://www.example.net".into(),
+            }]
+        );
+
+        // The written document drops the legacy pair, so loading it again must not
+        // append a second link.
+        let stored = state
+            .database
+            .setting("product_settings")
+            .expect("stored")
+            .expect("value");
+        assert!(!stored.contains("homepageUrl"));
+        let reloaded = AppState::load(state.database).expect("reload").snapshot().expect("snapshot");
+        assert_eq!(reloaded.quick_links.len(), 1);
+    }
+
+    #[test]
+    fn legacy_homepage_without_a_label_gets_the_neutral_name() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"homepageLabel":"","homepageUrl":"https://example.com"}"#,
+            )
+            .expect("legacy settings");
+        let migrated = AppState::load(database).expect("load").snapshot().expect("snapshot");
+        assert_eq!(migrated.quick_links.len(), 1);
+        assert_eq!(migrated.quick_links[0].name, super::DEFAULT_QUICK_LINK_NAME);
+    }
+
+    #[test]
+    fn legacy_homepage_with_no_url_migrates_to_nothing() {
+        // The pre-Quick-Links default: a "Homepage" label and no URL. That is a
+        // default, not user configuration, so it must not become a link.
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"homepageLabel":"Homepage","homepageUrl":""}"#,
+            )
+            .expect("legacy settings");
+        let migrated = AppState::load(database).expect("load").snapshot().expect("snapshot");
+        assert!(migrated.quick_links.is_empty());
+    }
+
+    #[test]
+    fn legacy_homepage_with_an_unusable_url_is_not_migrated() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"homepageLabel":"Something","homepageUrl":"javascript:alert(1)"}"#,
+            )
+            .expect("legacy settings");
+        let migrated = AppState::load(database).expect("load").snapshot().expect("snapshot");
+        assert!(migrated.quick_links.is_empty());
+    }
+
+    #[test]
+    fn an_existing_list_is_never_re_seeded_from_the_legacy_pair() {
+        // A document that already has links keeps exactly those: the legacy pair is
+        // read for migration only, and a user who emptied their list stays empty.
+        let mut settings = super::ProductSettings {
+            homepage_label: "Personal Site".into(),
+            homepage_url: "https://www.example.net".into(),
+            ..Default::default()
+        };
+        settings.normalize();
+        assert_eq!(settings.quick_links.len(), 1);
+
+        // Emptied by the user, with the legacy pair still present in the document.
+        settings.quick_links.clear();
+        settings.normalize_quick_links();
+        assert!(settings.quick_links.is_empty());
+
+        settings.quick_links = vec![super::QuickLink {
+            id: "kept".into(),
+            name: "Kept".into(),
+            url: "https://example.com/kept".into(),
+        }];
+        settings.normalize();
+        assert_eq!(settings.quick_links.len(), 1);
+        assert_eq!(settings.quick_links[0].id, "kept");
+    }
+
+    #[test]
+    fn normalizing_drops_unusable_quick_links_and_trims_the_rest() {
+        let mut settings = super::ProductSettings {
+            quick_links: vec![
+                super::QuickLink {
+                    id: "  keep  ".into(),
+                    name: "  Docs  ".into(),
+                    url: "  https://example.com/docs  ".into(),
+                },
+                super::QuickLink {
+                    id: "no-name".into(),
+                    name: "   ".into(),
+                    url: "https://example.com".into(),
+                },
+                super::QuickLink {
+                    id: "bad-url".into(),
+                    name: "Bad".into(),
+                    url: "file:///C:/private.txt".into(),
+                },
+                super::QuickLink {
+                    id: String::new(),
+                    name: "No id".into(),
+                    url: "https://example.com".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        settings.normalize();
+        assert_eq!(
+            settings.quick_links,
+            vec![super::QuickLink {
+                id: "keep".into(),
+                name: "Docs".into(),
+                url: "https://example.com/docs".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn url_validation_accepts_only_http_and_https_with_a_host() {
+        for accepted in [
+            "https://example.com/",
+            "http://localhost:3000/",
+            "https://example.com/path?query=1#fragment",
+        ] {
+            assert!(
+                super::validate_quick_link_url(accepted).is_ok(),
+                "{accepted} should be accepted"
+            );
+        }
+        for rejected in [
+            "",
+            "example.com",
+            "/relative/path",
+            "javascript:alert(1)",
+            "file:///C:/private.txt",
+            "data:text/html,<h1>x</h1>",
+            "shell:startup",
+            "mailto:someone@example.com",
+            "ftp://example.com/file",
+            "https://",
+            "https:// example.com",
+        ] {
+            assert!(
+                super::validate_quick_link_url(rejected).is_err(),
+                "{rejected} should be rejected"
+            );
+        }
+        assert!(super::validate_quick_link_url("https://example.com/").is_ok());
     }
 }

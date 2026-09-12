@@ -150,8 +150,19 @@ export interface ProductSettings {
   appearanceProfiles: AppearanceProfiles;
   displayName: string;
   avatarAssetId: string | null;
-  homepageLabel: string;
-  homepageUrl: string;
+  /**
+   * Quick Links, in display order.
+   *
+   * `id` is the stable identity used by edit/delete/reorder, so the array index is
+   * never the identity. Names and URLs are user data and are never localized.
+   */
+  quickLinks: QuickLink[];
+}
+
+export interface QuickLink {
+  id: string;
+  name: string;
+  url: string;
 }
 
 export interface AssetPayload {
