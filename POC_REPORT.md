@@ -41,7 +41,7 @@ The diagnostic observer was proven non-invasive: after arming and doing nothing 
 - No input-blocking click-through styles.
 - Diagnostics remain available under **Settings → Developer → Desktop diagnostics**, hidden by default.
 
-## Known experimental risks
+## Known risks
 
 WorkerW, Progman, and `SHELLDLL_DefView` structure is undocumented and may change after Windows or Explorer updates. Explorer restart, monitor hot-plug, lock/sleep/resume, fullscreen, and additional Windows-build coverage remain useful regression gates. Multi-monitor hot-plug is explicitly deferred and did not block Phase 2.
 

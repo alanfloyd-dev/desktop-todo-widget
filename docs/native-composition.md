@@ -1,5 +1,7 @@
 # Native window and composition architecture
 
+> **Historical record.** This document describes the Phase 7A isolated proof of concept and the state of the research at that time. It is kept as evidence and is not the v1 status. Production composition hosting has since landed: see [phase-7c2-production-composition-spike.md](phase-7c2-production-composition-spike.md), [phase-7c3b4-dual-backend-release-decision.md](phase-7c3b4-dual-backend-release-decision.md), and [appearance.md](appearance.md). Statements below such as "no production Acrylic backend has been implemented yet" describe Phase 7A, not v1.
+
 ## Status and stop gate
 
 **Gate A is PASS and Phase 7A is complete.** The framework-dependent PoC still cannot
@@ -352,8 +354,9 @@ marshalling might need them. Release installer/CI work is intentionally deferred
 - Existing `product_window.rs` and `window_mode.rs` responsibilities remain
   coupled because production integration was intentionally excluded from Phase
   7A.
-- The current Shell child host remains experimental and untested with
-  `DesktopAcrylicController`.
+- The Shell child host was never tested with `DesktopAcrylicController` in this
+  phase. v1 confirms that as a design constraint rather than a gap: a Shell child
+  has no top-level HWND semantics, so Desktop uses the translucent fallback.
 
 Recommendation: preserve this isolated proof as the Phase 7A baseline. Any later
 Tauri/WebView2 integration must independently validate its host styles,

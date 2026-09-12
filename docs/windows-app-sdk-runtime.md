@@ -9,7 +9,8 @@ payload from build output, and so that the version/EOL decision is explicit.
 
 **Decision: unpackaged + self-contained.**
 
-The runtime is shipped beside `alan-desktop.exe` and activated through Undocked
+The runtime is shipped beside `alan-desktop.exe` (the internal executable name; the
+public product name is `desktop-todo-widget`) and activated through Undocked
 RegFree WinRT. There is no bootstrapper call and no package graph.
 
 Why not framework-dependent:

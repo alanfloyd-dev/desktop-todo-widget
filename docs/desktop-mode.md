@@ -6,9 +6,9 @@
 
 **Sidebar** is also a top-level window. It occupies the monitor work-area height, snaps left or right, and remembers side and width. It does not use WorkerW or `SHELLDLL_DefView`.
 
-**Desktop** is experimental Windows Shell integration. The same Tauri HWND and WebView2 controller are retained while the bounded, frameless Widget is temporarily converted into a child of the interactive desktop host. Its geometry is independent from Floating mode and clamped within the host client area, leaving the real wallpaper, desktop icons, and native desktop surface available outside the Widget. Desktop mode never uses always-on-top as a substitute.
+**Desktop** is Windows Shell integration and is a supported v1 mode. The same Tauri HWND and WebView2 controller are retained while the bounded, frameless Widget is converted into a child of the interactive desktop host. Its geometry is independent from Floating mode and clamped within the host client area, leaving the real wallpaper, desktop icons, and native desktop surface available outside the Widget. It is draggable and resizable while unlocked, and it never uses always-on-top as a substitute.
 
-Appearance does not alter this parenting route. Desktop clears top-level Acrylic before `WS_CHILD` reparenting and uses a transparent WebView with the documented translucent Graphite fallback; it does not claim unreliable child-window backdrop blur. Switching Orb → Desktop or Desktop → Floating changes presentation through the existing mode state machine without copying the 56 DIP size into Desktop or expanded-Floating geometry.
+Appearance does not alter this parenting route. Desktop clears top-level Acrylic before `WS_CHILD` reparenting and uses a transparent WebView with the documented translucent Graphite fallback; it does not claim unreliable child-window backdrop blur, and native Acrylic is unavailable in this mode by design because a Shell child has no top-level HWND semantics. Switching Orb → Desktop or Desktop → Floating changes presentation through the existing mode state machine without copying the 56 DIP size into Desktop or expanded-Floating geometry.
 
 ## Relevant Shell windows
 
@@ -44,11 +44,13 @@ Manual transitions and lifecycle recovery share one transition mutex. Recovery r
 
 A `SHELLDLL_DefView` child is not an independently activatable top-level application window. Win+D changes the foreground and ordinary top-level windows; the widget remains an ambient child of the desktop host. The accepted Phase 1 trace observed the foreground transition while parent, style, bounds, visibility, z-order, and attachment stayed stable. No recovery mutation was necessary.
 
-Alan Desktop does not register or intercept the global Win+D chord. Lifecycle observation uses WinEvents and a debounced, conditional validation. It does not repeatedly call `SetParent`.
+desktop-todo-widget does not register or intercept the global Win+D chord. Lifecycle observation uses WinEvents and a debounced, conditional validation. It does not repeatedly call `SetParent`.
 
-## Why Experimental
+## Why the desktop host is handled carefully
 
-Progman, WorkerW, and `SHELLDLL_DefView` topology is not a documented public embedding API. Explorer restarts and Windows updates can change handles or hierarchy. Desktop remains marked Experimental even though the tested interaction, detach/reattach, observer, and Win+D gates passed.
+Progman, WorkerW, and `SHELLDLL_DefView` topology is not a documented public embedding API. Explorer restarts and Windows updates can change handles or hierarchy, and the fallback that places the Widget behind the icon ListView is rejected rather than accepted silently.
+
+Desktop is therefore a supported mode with a guarded implementation rather than experimental. The Phase 1 interaction, detach/reattach, observer, and Win+D gates passed, and the dual-backend work verified Desktop drag/reorder with SQLite persistence proof on this route.
 
 Known limitations and deferred regression work include multi-monitor hot-plug, Explorer restart, lock/sleep/resume, fullscreen applications, DPI changes across displays, and broader Windows-build coverage.
 

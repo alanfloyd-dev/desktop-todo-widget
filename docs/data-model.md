@@ -1,6 +1,6 @@
 # Local data model
 
-Alan Desktop is local-first. Tauri resolves the platform app-data directory and opens `alan-desktop.sqlite3`; the path is not derived from the source checkout and is not included in copied diagnostics.
+desktop-todo-widget is local-first. Tauri resolves the platform app-data directory and opens `alan-desktop.sqlite3` (an internal compatibility filename, kept so existing installs keep their data); the path is not derived from the source checkout and is not included in copied diagnostics. The same applies to the app-data directory `net.alanfloyd.desktop` and the `alan-desktop-tray` tray id.
 
 ## Migration invariants
 
@@ -33,7 +33,7 @@ The task day is derived in Rust from local time and the configured `day_rollover
 
 Daily, Weekly, and Monthly Review create no tables or stored summaries. Every report reads raw `tasks` rows for its task-day range and computes `planned`, `completed`, `carried`, `cancelled`, and `pending` counts in memory. `planned` is the number of task rows scheduled in the period; each row then contributes to exactly one final-status count.
 
-Carry preserves two distinct facts: the original row contributes `carried` on its original `scheduled_date`, and the linked successor contributes its own current status only on the successor's `scheduled_date`. Category breakdowns use the task's nullable category relationship, and Daily task facts retain `completed_at` and `carried_from`. Because all derived values are recomputed, schema version 3 remains unchanged in Phase 6.
+Carry preserves two distinct facts: the original row contributes `carried` on its original `scheduled_date`, and the linked successor contributes its own current status only on the successor's `scheduled_date`. Category breakdowns use the task's nullable category relationship, and Daily task facts retain `completed_at` and `carried_from`. Because all derived values are recomputed, the schema remains version 3.
 
 ### categories
 
@@ -96,7 +96,7 @@ Weather fields use:
 
 The label and administrative text are presentation only. Forecast requests use the saved coordinates and weather-location timezone; they never re-geocode the label at startup. Todo task-day calculation remains tied to the computer's local time and is intentionally independent.
 
-Geometry values are logical pixels (DIP), not raw device pixels. Missing fields from an older settings document receive defaults during compatible deserialization. Desktop defaults to a bounded 420×700 DIP Widget rather than inheriting Floating geometry. A one-time settings migration converts legacy Floating and Sidebar physical values to DIP while retaining the Desktop numeric defaults as their originally intended logical values. Phase 5 and Phase 6 add no SQLite migration; the schema remains version 3.
+Geometry values are logical pixels (DIP), not raw device pixels. Missing fields from an older settings document receive defaults during compatible deserialization. Desktop defaults to a bounded 420×700 DIP Widget rather than inheriting Floating geometry. A one-time settings migration converts legacy Floating and Sidebar physical values to DIP while retaining the Desktop numeric defaults as their originally intended logical values. No SQLite migration was added after schema 3, and later features (Quick Links, per-mode appearance profiles, the rendering backend choice, UI language) are additive settings fields only.
 
 ## Privacy boundary
 

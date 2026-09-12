@@ -213,6 +213,9 @@ Evidence (from B3, reproduced by controller type here):
 | Standard | `ICoreWebView2Controller` | **22**, including `'Alan Desktop - Web 内容'` and named buttons |
 | Enhanced | `ICoreWebView2CompositionController` | **1** (`TAURI_DRAG_RESIZE_WINDOW` only) — no WebView content tree |
 
+> Naming note: the quoted pane name is reproduced from the B3 trace, where the window
+> title was still `Alan Desktop`. It is now `desktop-todo-widget`.
+
 Honest statement of the position:
 
 - Windowed hosting exposes the WebView2 content to Windows UI Automation.

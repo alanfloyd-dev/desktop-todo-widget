@@ -1,5 +1,5 @@
 name: Bug report
-description: Report reproducible Alan Desktop behavior
+description: Report reproducible desktop-todo-widget behavior
 title: "[Bug]: "
 labels: ["bug"]
 body:
@@ -28,7 +28,7 @@ body:
       options:
         - Floating
         - Sidebar
-        - Desktop (Experimental)
+        - Desktop
         - Not mode-specific
     validations:
       required: true

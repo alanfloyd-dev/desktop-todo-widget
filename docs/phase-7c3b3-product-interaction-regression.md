@@ -155,6 +155,10 @@ descendants: 22
 The WebView2 accessibility tree **is** exposed, controls carry names, and keyboard
 focusable elements are reported.
 
+> Naming note: the `Alan Desktop` pane names are the window and WebView titles as
+> recorded at the time of this measurement. The window title has since been renamed
+> to `desktop-todo-widget`; the trace is preserved exactly as observed.
+
 ### Composition hosting (`ICoreWebView2CompositionController`) — empty
 
 ```text

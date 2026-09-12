@@ -23,7 +23,7 @@ body:
       options:
         - Floating
         - Sidebar
-        - Desktop (Experimental)
+        - Desktop
         - Settings or persistence
         - Other
     validations:

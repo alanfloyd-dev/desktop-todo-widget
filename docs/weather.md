@@ -1,6 +1,6 @@
 # Weather
 
-Alan Desktop treats weather as optional ambient information, not as an application startup dependency. It uses the key-free Open-Meteo Geocoding and Forecast APIs directly; there is no Alan Desktop account, proxy, or sync service.
+desktop-todo-widget treats weather as optional ambient information, not as an application startup dependency. It uses the key-free Open-Meteo Geocoding and Forecast APIs directly; there is no product account, proxy, or sync service.
 
 ## Location and timezone
 

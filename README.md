@@ -1,71 +1,190 @@
-# Alan Desktop
+# desktop-todo-widget
 
-Lightweight, local-first Windows desktop widget built with Tauri, Vue, and Rust.
+A local-first Windows todo widget built around three window modes: **Sidebar**, **Floating**, and **Desktop**.
 
-Alan Desktop is an early local productivity widget for quiet, ambient information on the Windows desktop. The current release provides the window system, local Todo workflow, history semantics, factual Daily/Weekly/Monthly Review, an optional current-weather glance, and local appearance personalization.
+It focuses on lightweight task management, tray-first interaction, customizable appearance, Quick Links, weather, and native Windows integration.
 
-## Principles
+`Rust` · `Tauri` · `Vue 3` · `TypeScript` · `WebView2` · `SQLite`
 
-- **Local-first:** application state is stored in a local SQLite database.
-- **No account:** no sign-in or hosted identity is required.
-- **No sync server:** the application has no cloud backend.
-- **No telemetry:** the application sends no analytics or usage data. Weather requests go directly to Open-Meteo only after a user selects a location.
-- **Configurable identity:** display name, local avatar, homepage label, and homepage URL are local settings.
-- **Open source:** released under the [MIT License](LICENSE); dependencies keep their [own licenses](THIRD_PARTY_NOTICES.md).
+## Screenshots
+
+<!-- Add Sidebar screenshot here -->
+<!-- Add Floating (Acrylic) screenshot here -->
+<!-- Add Desktop screenshot here -->
+<!-- Add Orb screenshot here -->
+
+Screenshots are added here as release assets are captured. The placeholders above exist so no image path is guessed.
+
+## Features
+
+**Todo lifecycle** — add, edit, complete, reopen, cancel, carry, delete, and reorder. Carry is history-preserving: the original row is marked `carried` and a linked successor is created for the next task day in one SQLite transaction.
+
+**Window modes** — Sidebar, Floating, and Desktop share one window and one WebView; Floating collapses to a 56 DIP avatar Orb. See [Window modes](#window-modes).
+
+**Appearance profiles** — each window mode keeps its own profile: Glass, Solid, two-stop Gradient, a managed local image, or the current Windows wallpaper, plus tint, opacity, blur, overlay, image fit/position, and an optional custom text colour.
+
+**Quick Links** — add, edit, reorder, and delete your own links; only `http://` and `https://` URLs are accepted.
+
+**Weather** — optional current conditions and today's high/low with a locally cached snapshot and a clear "not configured" state.
+
+**Review** — read-only Daily, Weekly, and Monthly Review aggregated from local task history. No scores, trends, or advice.
+
+**Language** — English, Simplified Chinese, or System (follows the Windows display language).
+
+**Windows integration** — tray-resident, no taskbar button, no ordinary Alt+Tab entry, right-click context menu on the widget and the Orb, and per-mode window geometry that survives restarts. Verified at 150% display scaling.
 
 ## Window modes
 
-- **Floating** — the safe default; a draggable 56 DIP avatar Orb expands in the same window to the full frameless Widget. The expanded size and Orb anchor are stored separately.
-- **Sidebar** — snaps to the left or right monitor work-area edge and remembers side and width.
-- **Desktop — Experimental** — attaches the bounded Widget HWND to the Windows Shell desktop host while leaving the surrounding native desktop available.
+**Sidebar** — edge-oriented widget mode. Occupies the monitor work-area height, docks to the left or right edge, and remembers side and width. Dragging Floating near an edge enters Sidebar.
 
-Desktop mode integrates with undocumented Progman, WorkerW, and `SHELLDLL_DefView` behavior. It passed the Phase 1 interaction, detach/reattach, observer, and Win+D gates, but Windows Shell changes can still break it. See [docs/desktop-mode.md](docs/desktop-mode.md).
+**Floating** — a movable, frameless window and the first-run default. It can collapse to the Orb and expand again, and it keeps its expanded size and Orb anchor as independent saved values. The Enhanced rendering backend supports native Acrylic in this mode.
 
-## Current scope
+**Desktop** — a desktop-hosted frameless widget. It is reparented as a child of the Windows desktop host, so the wallpaper, desktop icons, and the native desktop context menu stay usable around it. It is movable and resizable when unlocked, with geometry independent from Floating, and always-on-top is unavailable.
 
-Implemented:
+### Native Acrylic is unavailable in Desktop mode
 
-- Floating / Sidebar / Desktop window orchestration
-- lock and applicable always-on-top state
-- local SQLite migrations and settings persistence
-- configurable profile and homepage shortcut foundation
-- privacy-minimized developer diagnostics
-- Today tasks with inline add/edit, complete/reopen, cancel, carry, delete, ordering, and one optional category
-- a review-only prompt for unfinished tasks from the previous task day
-- a small monthly completed/carried count
-- read-only Daily, Weekly, and Monthly Review dynamically aggregated from task history
-- configurable Open-Meteo location search and current/daily weather summary
-- location-isolated SQLite weather cache with stale/offline fallback
-- Celsius and Fahrenheit display units
-- Glass · Graphite Frost default appearance, preserved Solid Graphite, simple gradients, managed local images, and current Windows wallpaper
-- true transparent WebView Glass with top-level Windows Acrylic, a Desktop translucent-Graphite fallback, and bounded opacity/overlay controls
-- managed local profile avatar with initials fallback
-- single-window Floating Avatar Orb with click/drag distinction and monitor-aware expansion
+This is a design and platform constraint, not a regression:
 
-Not implemented yet: hourly or multi-day weather views, charts, trend judgments, AI summaries, cloud sync, updater, installer pipeline, localization, or autostart.
+- Desktop is hosted as a child window under the Windows desktop hierarchy (`SHELLDLL_DefView`), which is not a documented public embedding API.
+- The native Acrylic path requires top-level HWND semantics; a composition-hosted backdrop cannot be attached to that child window.
+- Desktop therefore uses the documented translucent Graphite fallback, and the native menu labels it `Desktop (Acrylic unavailable)`.
 
-Task days roll over at the locally configured time (04:00 by default), while the header continues to show the actual calendar date. Carry never moves or overwrites the original row: it marks that row `carried` and creates a linked pending successor for the next task day in one SQLite transaction.
+See [docs/desktop-mode.md](docs/desktop-mode.md) for the attach/detach lifecycle and host discovery details.
 
-## Development
+## Rendering backends
 
-Requirements: Windows 11, Node.js 20+, pnpm, Rust stable with the MSVC target, Windows SDK, and WebView2 Runtime.
+The WebView2 hosting backend is chosen in Settings and applies after a restart. It is orthogonal to the window mode: Sidebar, Floating, and Desktop all work on either backend. **Standard** is the v1 default.
+
+| Backend | Hosting | Notes |
+| --- | --- | --- |
+| **Standard** | Ordinary windowed WebView2 (`ICoreWebView2Controller`) | Compatibility-oriented and the recommended choice when composition features are unnecessary. Exposes the WebView content to Windows UI Automation. |
+| **Enhanced** | Composition-hosted WebView2 (`ICoreWebView2CompositionController`) | Enables native Acrylic in Floating. A deeper Windows-specific implementation, and its conventional UI Automation / accessibility behavior is more limited. |
+
+See [docs/phase-7c3b4-dual-backend-release-decision.md](docs/phase-7c3b4-dual-backend-release-decision.md) and [docs/native-composition.md](docs/native-composition.md).
+
+## Appearance profiles
+
+Appearance is per window mode: editing Sidebar's material cannot change Floating's. Each profile stores the background type, tint, opacity, blur, and overlay values, image fit and position, the text contrast mode, and the custom text colour.
+
+- Background types: Glass, Solid, Gradient, managed local image, current Windows wallpaper.
+- Text contrast: Auto, Light, Dark, or Custom. Auto samples solid colours and gradient stops directly, and samples image/wallpaper data once at 32×32.
+- Missing, corrupt, or oversized images resolve to the safe Glass fallback instead of breaking the surface.
+
+See [docs/appearance.md](docs/appearance.md).
+
+## Quick Links
+
+Quick Links are user-managed name/URL pairs shown as a product section: add, edit, reorder, delete. Names and URLs are your own data and are never translated. A link is validated as `http`/`https` with a host when it is saved and again immediately before it is opened. An empty list simply hides the section.
+
+## Weather and Review
+
+Weather is optional ambient information rather than a startup dependency. Location search runs only after an explicit action, you must pick a result yourself, and forecasts then use the saved coordinates and timezone. Cached snapshot freshness is graded, and a failed refresh keeps the last valid cache. Weather data by [Open-Meteo.com](https://open-meteo.com/) under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); attribution is shown in Settings and in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Review is a read-only projection over raw task history: Daily (one task day), Weekly (Monday–Sunday), or Monthly (calendar month). It reports Planned, Completed, Carried, Cancelled, and Pending counts plus task-day and category distributions, and it stores no report snapshots.
+
+See [docs/weather.md](docs/weather.md) and [docs/reviews.md](docs/reviews.md).
+
+## Data and privacy
+
+- **Local-first.** Tasks, settings, appearance profiles, Quick Links, profile identity, and the weather cache live on this machine.
+- **No account.** There is no sign-in, hosted identity, or sync server.
+- **No intentional upload.** Task, profile, appearance, and Quick Link data are not sent anywhere by the application.
+- **Weather is the one remote call.** Open-Meteo receives the geocoding and forecast request needed to answer a location you configured. With no configured location, no weather request is made.
+- **Diagnostics are opt-in.** Settings → Developer → Copy diagnostics produces an allowlisted, privacy-minimized report with runtime/window metadata and non-sensitive appearance state. It excludes task content, profile values, weather location, asset filenames/paths, and exact database paths.
+
+### Internal compatibility identifiers
+
+Some shipping identifiers keep their pre-release `alan-desktop` spelling on purpose, because renaming them would strand existing user data or break upgrades. They are internal names, not the product name:
+
+- `alan-desktop` — the Rust crate name, the private `package.json` name, and therefore the built executable `alan-desktop.exe`.
+- `alan-desktop.sqlite3` — the local database file, under the app-data directory `net.alanfloyd.desktop`.
+- `alan-desktop-tray` — the tray icon id.
+
+The public product name is `desktop-todo-widget`, which is what the tray tooltip, the tray/context menu heading, and the window title use. See [docs/data-model.md](docs/data-model.md).
+
+## Development note
+
+This project is built with significant AI assistance.
+
+I am a geology student rather than a computer science student, and my main technical direction is Python and data analysis for scientific work. Windows internals, Rust, Tauri, and WebView2 are not my primary stack, so I do not claim deep expertise in every implementation detail.
+
+That said, this is not a one-shot AI-generated repository. I remain involved in product design, architecture decisions, testing, debugging, manual QA, and release review. The codebase includes comments, tests, and technical documentation intended to make the implementation easier to inspect and maintain.
+
+The project is actively maintained, and I expect to keep improving it as I learn more.
+
+Contributions are very welcome — especially bug reports, code review, Windows platform expertise, and cleaner implementations of areas that could be improved.
+
+AI-assisted contributions are also welcome, but please review, test, and understand the changes you submit.
+
+## Architecture
+
+High level: Vue 3 + TypeScript render the product surface and own presentation state; Rust owns OS paths, persistence, the window/tray lifecycle, and the Win32 boundary; the Win32/WebView2 layer stays behind a narrow adapter. The UI never manipulates HWNDs or SQLite directly.
+
+- **Tauri** — application shell, window/tray lifecycle, IPC commands and events.
+- **Rust** — product settings, SQLite repository and migrations, task lifecycle, reviews, weather adapter, appearance validation.
+- **Vue 3 + TypeScript** — presentation, per-mode layout, settings, review, weather display.
+- **WebView2** — windowed (`Standard`) or composition-hosted (`Enhanced`) rendering surface.
+- **SQLite** — local task/history/category/weather storage; typed JSON settings in `app_settings`.
+- **Windows Composition APIs** — the Enhanced backend's composition host, Desktop Acrylic controller, and visual tree.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/](docs/) for the module-by-module detail.
+
+## Building from source
+
+Requirements: Windows 11, Node.js 20+, pnpm, Rust stable with the MSVC target, the Windows SDK, and the WebView2 Runtime.
 
 ```powershell
 pnpm install
-pnpm tauri:dev
+pnpm build
+cargo test --manifest-path src-tauri/Cargo.toml
+pnpm tauri build --no-bundle
 ```
 
-Checks:
+The Windows build also stages the self-contained Windows App SDK payload beside the executable. `build.rs` fails with the exact command if it is missing, because the Enhanced (composition-hosted) backend needs it at runtime:
 
 ```powershell
-pnpm build
-cargo fmt --check --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
-cargo test --manifest-path src-tauri/Cargo.toml
+powershell -ExecutionPolicy Bypass -File tools/windows-app-sdk/prepare-runtime-payload.ps1
 ```
 
-The database is created under the platform app-data directory as `alan-desktop.sqlite3`; managed background/avatar copies live under the same platform app-data boundary. No private asset path is exposed to the WebView or copied diagnostics. Weather uses the key-free Open-Meteo APIs and retains its required attribution in Settings and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). See [docs/reviews.md](docs/reviews.md), [docs/appearance.md](docs/appearance.md), [docs/weather.md](docs/weather.md), [docs/data-model.md](docs/data-model.md), [ARCHITECTURE.md](ARCHITECTURE.md), and [CONTRIBUTING.md](CONTRIBUTING.md).
+The payload is not committed; [docs/windows-app-sdk-runtime.md](docs/windows-app-sdk-runtime.md) is the authoritative description of its provenance and version policy.
 
-## Privacy-safe bug reports
+`pnpm tauri:dev` runs the Vite dev server for frontend work. Production builds embed the compiled frontend and serve it through the Tauri custom protocol (`custom-protocol` feature), so a release build never depends on a dev server. v1 has no installer or updater pipeline: `pnpm tauri build --no-bundle` produces the executable and its runtime payload, and `bundle.active` is `false`.
 
-Settings → Developer → Copy diagnostics produces an issue-ready text report containing application/runtime/window metadata plus non-sensitive appearance availability/state. It excludes tasks, weather location, profile values, homepage URLs, asset filenames/paths, wallpaper paths, and precise database paths.
+## Known limitations
+
+- **Desktop Acrylic** — unavailable by design. Desktop is hosted as a child of the Windows desktop hierarchy while the native Acrylic path needs top-level HWND semantics; Desktop uses the translucent Graphite fallback instead.
+- **Enhanced accessibility** — composition hosting means the Enhanced backend offers more limited conventional Windows UI Automation behavior than Standard. Use Standard if you rely on screen readers or automation tools.
+- **Windows-specific implementation** — Enhanced depends on Windows/WebView2/Tauri-specific behavior and may need compatibility updates as those platforms evolve.
+- **Desktop host is undocumented** — `Progman`, `WorkerW`, and `SHELLDLL_DefView` topology can change across Windows updates and Explorer restarts.
+- **Scope** — Windows 11 only, no installer/updater, no sync, and no localization beyond English and Simplified Chinese.
+
+## Roadmap
+
+Planned after v1 stabilization:
+
+- Evaluate extracting the Windows Composition / Acrylic hosting work into a standalone reusable project or library.
+- Reports: broader factual review surfaces on the existing task history.
+- Componentization: smaller, clearer frontend and Rust boundaries.
+- Settings organization: group the current settings surface more deliberately.
+- Installer and update improvements.
+
+Deferred work is tracked in [FUTURE.md](FUTURE.md). Nothing in this section is implemented yet.
+
+## Contributing
+
+Contributions are welcome. Short version:
+
+- Keep pull requests focused on one change.
+- Explain platform-specific behavior and the Windows/WebView2 assumptions behind it.
+- Add tests where practical; native mode changes still need the manual mode-transition checks.
+- Preserve user data. Migrations must be idempotent, and destructive migrations are not acceptable.
+- Do not regress Standard mode while changing Enhanced.
+- AI-assisted pull requests are welcome, but you must review, test, and understand what you submit.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Alan Floyd.
+
+Dependency licenses and provenance notes are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

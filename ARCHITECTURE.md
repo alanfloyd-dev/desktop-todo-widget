@@ -1,4 +1,6 @@
-# Alan Desktop architecture — Phase 6
+# desktop-todo-widget architecture
+
+The v1 module map. Product behaviour is described in [README.md](README.md); the Windows research and phase evidence behind the native boundary live in [docs/](docs/).
 
 ```text
 Vue / TypeScript
@@ -21,6 +23,8 @@ Rust product boundary
                  ▼
 Frozen Phase 1 native boundary
   window_mode.rs       HWND, SetParent, styles, z-order, Shell hooks
+  platform/windows/widget_frame.rs         taskbar/Alt+Tab exclusion (widget semantics)
+  platform/windows/composition_host/       Enhanced-backend composition hosting and material
 ```
 
 ## Product and native separation
@@ -35,13 +39,22 @@ All widget and tray actions use the same string command IDs and `dispatch_produc
 
 - **Floating:** top-level non-WorkerW window with `collapsed` and `expanded` presentation states. Collapsed is a 56 DIP Orb; expanded restores its independent width/height. Both use the same Tauri window and preserve topmost/lock state.
 - **Sidebar:** top-level non-WorkerW window; uses the selected monitor work area, left/right edge, stored width, and full work-area height. Moving Floating within 24 physical pixels of an edge enters Sidebar.
-- **Desktop:** a bounded, frameless Widget using the Phase 1 `SHELLDLL_DefView` child route; experimental; always-on-top is forced off. Its parent-client geometry is persisted separately and clamped inside the current desktop host. Returning to Floating saves Desktop geometry, detaches through the validated Phase 1 path, and restores the independent Floating rectangle.
+- **Desktop:** a bounded, frameless Widget using the Phase 1 `SHELLDLL_DefView` child route; draggable and resizable while unlocked, with always-on-top forced off. Its parent-client geometry is persisted separately and clamped inside the current desktop host. Returning to Floating saves Desktop geometry, detaches through the validated Phase 1 path, and restores the independent Floating rectangle.
 
 Lock disables drag initiation and native resizing. It does not enable click-through, so content, links, settings, and the context menu remain interactive.
 
+## Rendering backends
+
+`RenderingBackend` is orthogonal to the window mode and is fixed when the WebView is created, so changing it needs a restart.
+
+- **Standard** (v1 default): Tauri/Wry create the ordinary windowed `ICoreWebView2Controller`. The window's material is CSS-only, because driving the native material host over a windowed WebView puts a composition target on the parent of the WebView's child HWND.
+- **Enhanced**: the vendored Wry patch creates `ICoreWebView2CompositionController` and the WebView is composited into the app's own `Windows.UI.Composition` visual tree. Only this path reaches the `DesktopAcrylicController`, and only for expanded Floating with a Glass background; Sidebar, collapsed Orb, and Desktop resolve to their documented CSS fallbacks. The composition host also owns the spatial input bridge and the geometry/DPI policy for that tree.
+
+`src-tauri/src/platform/windows/composition_host/` contains that host; it is Windows-only code behind a platform boundary, and `docs/native-composition.md` and `docs/windows-app-sdk-runtime.md` describe its runtime dependency.
+
 ## Persistence and migration
 
-At startup, Tauri resolves the platform app-data directory and opens `alan-desktop.sqlite3`. Migration 1 creates:
+At startup, Tauri resolves the platform app-data directory and opens `alan-desktop.sqlite3` (an internal compatibility filename; the public product name is `desktop-todo-widget`). Migration 1 creates:
 
 - `schema_migrations`
 - `categories`
@@ -49,7 +62,7 @@ At startup, Tauri resolves the platform app-data directory and opens `alan-deskt
 - `shortcuts`
 - `app_settings`
 
-`tasks.status` is constrained to `pending`, `completed`, `cancelled`, or `carried`; the schema includes scheduled/completed timestamps, ordering, nullable category, and `carried_from`. Migration 3 adds only `weather_cache`; it does not modify task, category, shortcut, or settings rows. Phase 6 adds no migration. `tasks.rs` owns validation and repository operations; Vue never issues SQL or derives the authoritative task day.
+`tasks.status` is constrained to `pending`, `completed`, `cancelled`, or `carried`; the schema includes scheduled/completed timestamps, ordering, nullable category, and `carried_from`. Migration 3 adds only `weather_cache`; it does not modify task, category, shortcut, or settings rows. No migration was added after schema 3. `tasks.rs` owns validation and repository operations; Vue never issues SQL or derives the authoritative task day.
 
 Carry is history-preserving: one transaction changes the original pending row to `carried`, then inserts a pending successor for the next task day with copied title/category and `carried_from` pointing to the original. Reordering validates that every pending row for the task day appears exactly once and updates all sort positions in one transaction.
 
@@ -57,15 +70,15 @@ The calendar date and task day are intentionally separate. The UI header uses th
 
 `reviews.rs` is a read-only projection over raw `tasks` rows. Each request calculates Daily, Monday–Sunday Weekly, or calendar-month bounds, queries `scheduled_date` inside those bounds, and aggregates final task statuses plus task-day and category distributions in memory. `completed_at` and `carried_from` remain available as history facts; a carried source counts as `carried` on its own scheduled day, while its successor is an independent row on its successor day. No report snapshots, percentages, scores, or other derived values are persisted.
 
-The typed product-settings document stored in `app_settings` contains mode, independent expanded-Floating/Desktop geometry, an independent Floating Orb anchor, monitor identity, sidebar state, lock/topmost flags, day rollover, normalized weather settings, appearance settings, avatar asset ID, and profile/homepage fields. Product geometry is persisted in logical pixels (DIP). Missing Phase 5 fields merge centralized defaults, so no SQLite migration is required and schema 3 remains authoritative.
+The typed product-settings document stored in `app_settings` contains mode, the rendering backend, independent expanded-Floating/Desktop geometry, an independent Floating Orb anchor, monitor identity, sidebar state, lock/topmost flags, day rollover, language, normalized weather settings, per-mode appearance profiles, avatar asset ID, Quick Links, and profile fields. Product geometry is persisted in logical pixels (DIP). Missing fields merge centralized defaults, so no SQLite migration is required and schema 3 remains authoritative.
 
-Appearance is split into a transparent native/WebView surface, transparent DOM roots, background/backdrop/tint material layers, and a fully opaque content layer. Expanded Floating and Sidebar Glass use Tauri Acrylic plus the CSS graphite tint; collapsed Orb disables Acrylic and native shadow; Desktop clears the effect before Phase 1 Shell reparenting and uses a translucent Graphite fallback. Rust validates/clamps the settings, reads the Windows wallpaper once on demand, copies selected PNG/JPEG/WebP files into app data with generated IDs, and returns data URLs rather than private paths. Missing or corrupt assets resolve to safe transparent graphite Glass.
+Appearance is split into a transparent native/WebView surface, transparent DOM roots, background/backdrop/tint material layers, and a fully opaque content layer, with one stored profile per window mode. On the Enhanced backend, expanded Floating Glass reaches the native Desktop Acrylic controller through the composition host; Sidebar Glass keeps the Tauri acrylic request plus the CSS graphite tint; the collapsed Orb disables the effect and the native shadow; Desktop clears the effect before Phase 1 Shell reparenting and always uses the translucent Graphite fallback, because a `SHELLDLL_DefView` child is not a top-level HWND and cannot host a native backdrop. Rust validates/clamps the settings, reads the Windows wallpaper once on demand, copies selected PNG/JPEG/WebP files into app data with generated IDs, and returns data URLs rather than private paths. Missing or corrupt assets resolve to safe transparent graphite Glass.
 
 Auto contrast uses a centralized representative-luminance calculation. Solid colors and gradient stops are deterministic; image/wallpaper data are sampled once with a 32×32 browser canvas when loaded or changed. A small hysteresis band prevents threshold flicker. Manual Light and Dark remain explicit overrides.
 
 Weather is an isolated optional capability. Vue first requests cache state and renders the product immediately; stale or missing configured data triggers a background command. `weather.rs` alone understands Open-Meteo JSON and WMO codes. It validates HTTP status and payload shape, normalizes errors, and writes only a `WeatherSnapshot` to SQLite. Cache lookup requires both the stable coordinate/timezone location key and temperature unit, so a changed setting cannot relabel another location's result. One backend atomic gate and one App-level hourly timer prevent mode transitions from creating duplicate refresh loops.
 
-Public issue diagnostics use an explicit allowlist. They include runtime/window/schema metadata plus total task count and current task day, but never task titles, categories, history content, profile values, homepage URLs, weather location, or the precise database path.
+Public issue diagnostics use an explicit allowlist. They include runtime/window/schema metadata plus total task count and current task day, but never task titles, categories, history content, profile values, Quick Link URLs, weather location, or the precise database path.
 
 ## Startup order
 
@@ -79,4 +92,4 @@ Public issue diagnostics use an explicit allowlist. They include runtime/window/
 
 ## Scope boundary
 
-Phase 6 stops at factual local Review and Reports. Charts, evaluative trends, AI summaries, hourly/multi-day weather products, downloadable themes, autostart, complex tray behavior, auto-hide, notifications, calendar integration, and sync remain later work.
+v1 stops at factual local Review and Reports. Charts, evaluative trends, AI summaries, hourly/multi-day weather products, downloadable themes, autostart, complex tray behavior, auto-hide, notifications, calendar integration, and sync remain later work. [FUTURE.md](FUTURE.md) tracks the deferred list.

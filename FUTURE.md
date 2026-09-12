@@ -1,6 +1,15 @@
-# Future work after Phase 6
+# Future work after v1
 
-Phase 6 stops at factual, local Daily/Weekly/Monthly Review. The following work is explicitly deferred and must not be inferred as implemented:
+v1 stops at factual, local Daily/Weekly/Monthly Review. The following work is explicitly deferred and must not be inferred as implemented.
+
+## Planned after v1 stabilization
+
+- Evaluate extracting the Windows Composition / Acrylic hosting work
+  (`src-tauri/src/platform/windows/composition_host/` and the vendored Wry
+  composition patch) into a standalone reusable project or library. This is an
+  evaluation, not a commitment, and no separate repository exists yet.
+
+## Deferred features
 
 - Hourly and 7-day forecasts, radar, AQI, UV, sunrise/sunset, wind dashboards, severe-weather warnings, and weather notifications
 - Windows GPS, IP-based location, weather-driven backgrounds, and AI weather summaries
