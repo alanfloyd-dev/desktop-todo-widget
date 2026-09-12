@@ -77,7 +77,11 @@ Profile fields use:
 
 Floating presentation uses `floating_presentation` (`collapsed` or `expanded`) and independent `floating_orb_x`, `floating_orb_y`, and monitor identity. The 56 DIP Orb never overwrites the saved expanded `width`/`height`.
 
-`appearance_settings` is a backward-compatible nested JSON value. It stores `background_type`, bounded opacity/blur/overlay values, Solid/Glass/Gradient controls, optional managed image ID, fit/position, text contrast mode, and an optional one-time sampled luminance. No native path is stored in the UI-facing model. Old documents without these fields receive Glass Graphite Frost, Auto contrast, no avatar, and collapsed Floating defaults during serde default merging.
+`appearanceProfiles` is a backward-compatible nested JSON value holding one complete appearance per window mode: `sidebar`, `floating`, and `desktop`. Each profile stores `backgroundType`, bounded opacity/blur/overlay values, Solid/Glass/Gradient controls, optional managed image ID, fit/position, text contrast mode, and an optional one-time sampled luminance. Text contrast is `auto`, `light`, `dark`, or `custom`, where `custom` carries a user-chosen `customTextColor` for body and secondary product text; accent, warning/error, and task-state colors are never part of the custom palette. No native path is stored in the UI-facing model.
+
+Every appearance consumer selects the profile of the current window mode, so editing one mode's appearance cannot change another's, and a mode switch shows that mode's own material. The Settings panel's profile selector is UI state only: it picks which profile the shared Appearance controls edit, never the product's window mode, and it is not persisted.
+
+Pre-profile documents stored a single `appearanceSettings` value. It still deserializes, is copied into all three profiles on load (so an existing user's look is unchanged), and is no longer written back: the upgraded document carries `appearanceProfiles` only. Old documents without any appearance fields receive Glass Graphite Frost, Auto contrast, no avatar, and collapsed Floating defaults in all three profiles during serde default merging.
 
 Weather fields use:
 
@@ -94,4 +98,4 @@ Geometry values are logical pixels (DIP), not raw device pixels. Missing fields 
 
 ## Privacy boundary
 
-Task titles, category names, task history, weather location/coordinates, profile values, shortcut URLs, asset filenames/paths, wallpaper path, and exact database paths are local data. The Copy diagnostics command uses an explicit allowlist. Appearance diagnostics expose only background type/availability, contrast mode/resolution, avatar configured yes/no, Floating presentation, and logical Orb bounds.
+Task titles, category names, task history, weather location/coordinates, profile values, shortcut URLs, asset filenames/paths, wallpaper path, and exact database paths are local data. The Copy diagnostics command uses an explicit allowlist. Appearance diagnostics expose only the current mode's background type/availability, contrast mode/resolution, avatar configured yes/no, Floating presentation, and logical Orb bounds.

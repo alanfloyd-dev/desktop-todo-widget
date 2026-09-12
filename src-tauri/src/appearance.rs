@@ -1,4 +1,4 @@
-use crate::settings::AppState;
+use crate::settings::{AppState, ProductWindowMode};
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 use tauri::WebviewWindow;
@@ -25,6 +25,11 @@ pub enum TextContrast {
     Auto,
     Light,
     Dark,
+    /// A user-chosen [`AppearanceSettings::custom_text_color`] for product body
+    /// and secondary text. The palette direction (accent, semantic and overlay
+    /// colours) is derived from that colour, so the rest of the surface keeps
+    /// matching the text the user picked.
+    Custom,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -80,6 +85,8 @@ pub struct AppearanceSettings {
     pub image_position: ImagePosition,
     pub background_opacity: f64,
     pub text_contrast: TextContrast,
+    /// Product text colour used when `text_contrast` is `custom`.
+    pub custom_text_color: String,
     pub sampled_luminance: Option<f64>,
 }
 
@@ -100,6 +107,9 @@ impl Default for AppearanceSettings {
             image_position: ImagePosition::Center,
             background_opacity: 0.94,
             text_contrast: TextContrast::Auto,
+            // Matches the default graphite body text, so selecting Custom before
+            // picking a colour does not change the surface.
+            custom_text_color: "#d3dade".into(),
             sampled_luminance: None,
         }
     }
@@ -111,6 +121,7 @@ impl AppearanceSettings {
         self.glass_tint_color = normalized_color(&self.glass_tint_color, "#11191e");
         self.gradient_start_color = normalized_color(&self.gradient_start_color, "#11191e");
         self.gradient_end_color = normalized_color(&self.gradient_end_color, "#213747");
+        self.custom_text_color = normalized_color(&self.custom_text_color, "#d3dade");
         self.glass_tint_opacity = finite_clamp(self.glass_tint_opacity, 0.0, 1.0, 0.78);
         self.blur_px = finite_clamp(self.blur_px, 0.0, 24.0, 14.0);
         self.overlay_strength = finite_clamp(self.overlay_strength, 0.0, 0.72, 0.18);
@@ -124,6 +135,61 @@ impl AppearanceSettings {
             .image_asset_id
             .take()
             .filter(|value| is_managed_asset_id(value, AssetKind::Background));
+    }
+}
+
+/// One complete appearance per window mode.
+///
+/// Sidebar, Floating, and Desktop are separate products on screen: each owns its
+/// own material, wallpaper/image, opacity, overlay, and text presentation. Every
+/// appearance consumer therefore selects the profile of the *current* window mode
+/// instead of reading one shared value, which is what keeps a Desktop edit from
+/// repainting Floating and makes a mode switch restore that mode's own look.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+pub struct AppearanceProfiles {
+    pub sidebar: AppearanceSettings,
+    pub floating: AppearanceSettings,
+    pub desktop: AppearanceSettings,
+}
+
+impl AppearanceProfiles {
+    /// Copies one appearance into every mode.
+    ///
+    /// Used by the legacy migration: a pre-profile document had a single
+    /// appearance for all three modes, and fanning it out is what preserves an
+    /// existing user's look across the upgrade.
+    pub fn from_all(settings: AppearanceSettings) -> Self {
+        Self {
+            sidebar: settings.clone(),
+            floating: settings.clone(),
+            desktop: settings,
+        }
+    }
+
+    pub fn for_mode(&self, mode: ProductWindowMode) -> &AppearanceSettings {
+        match mode {
+            ProductWindowMode::Sidebar => &self.sidebar,
+            ProductWindowMode::Floating => &self.floating,
+            ProductWindowMode::Desktop => &self.desktop,
+        }
+    }
+
+    pub fn normalize(&mut self) {
+        self.sidebar.normalize();
+        self.floating.normalize();
+        self.desktop.normalize();
+    }
+
+    /// Every managed background image still referenced by a profile.
+    ///
+    /// Asset cleanup and discard have to consider all three: a file released by
+    /// the profile being edited is still in use when another mode references it.
+    pub fn background_asset_ids(&self) -> impl Iterator<Item = &str> {
+        [&self.sidebar, &self.floating, &self.desktop]
+            .into_iter()
+            .filter_map(|profile| profile.image_asset_id.as_deref())
     }
 }
 
@@ -176,6 +242,8 @@ pub fn resolve_appearance_contrast(
     let resolved = match appearance.text_contrast {
         TextContrast::Light => ResolvedContrast::Light,
         TextContrast::Dark => ResolvedContrast::Dark,
+        TextContrast::Custom => custom_contrast(&appearance.custom_text_color)
+            .unwrap_or_else(|| auto_contrast(representative, previous)),
         TextContrast::Auto => auto_contrast(representative, previous),
     };
     ContrastResult {
@@ -263,7 +331,10 @@ pub fn discard_managed_asset(
     asset_id: String,
 ) -> Result<(), String> {
     let settings = state.snapshot()?;
-    if settings.appearance_settings.image_asset_id.as_deref() == Some(asset_id.as_str())
+    if settings
+        .appearance_profiles
+        .background_asset_ids()
+        .any(|in_use| in_use == asset_id)
         || settings.avatar_asset_id.as_deref() == Some(asset_id.as_str())
     {
         return Err("managed asset is still in use".into());
@@ -271,15 +342,20 @@ pub fn discard_managed_asset(
     remove_managed_asset(&state, &asset_id)
 }
 
+/// Deletes background/avatar files that the new settings no longer reference.
+///
+/// Background images are per-profile now, so "still referenced" has to be asked
+/// across all three profiles: an image the edited mode just dropped is still
+/// live when another mode kept it.
 pub fn cleanup_replaced_assets(
     state: &AppState,
-    before_background: Option<&str>,
+    before: &AppearanceProfiles,
     before_avatar: Option<&str>,
-    after_background: Option<&str>,
+    after: &AppearanceProfiles,
     after_avatar: Option<&str>,
 ) {
-    for old in [before_background, before_avatar].into_iter().flatten() {
-        if Some(old) != after_background && Some(old) != after_avatar {
+    for old in before.background_asset_ids().chain(before_avatar) {
+        if !after.background_asset_ids().any(|kept| kept == old) && after_avatar != Some(old) {
             let _ = remove_managed_asset(state, old);
         }
     }
@@ -344,6 +420,24 @@ fn auto_contrast(luminance: f64, previous: Option<ResolvedContrast>) -> Resolved
         _ if luminance >= 0.56 => ResolvedContrast::Dark,
         _ => ResolvedContrast::Light,
     }
+}
+
+/// Resolves the palette direction a custom text colour implies.
+///
+/// Bright custom text is light-on-dark text, so it keeps the light palette —
+/// including the darkening readability scrim — that the accent, semantic, and
+/// warning colours are tuned for; a dark custom colour does the opposite. This
+/// is what lets a custom colour answer a background the background heuristic
+/// misjudges, instead of fighting it. Returns `None` only for an unparsable
+/// colour, which `normalize` has already replaced.
+fn custom_contrast(color: &str) -> Option<ResolvedContrast> {
+    color_luminance(color).map(|luminance| {
+        if luminance >= 0.5 {
+            ResolvedContrast::Light
+        } else {
+            ResolvedContrast::Dark
+        }
+    })
 }
 
 fn normalized_color(value: &str, fallback: &str) -> String {
@@ -678,6 +772,7 @@ mod tests {
             overlay_strength: 2.0,
             gradient_angle: 900.0,
             background_opacity: -1.0,
+            custom_text_color: "not-a-color".into(),
             image_asset_id: Some("../../private.png".into()),
             ..AppearanceSettings::default()
         };
@@ -688,7 +783,124 @@ mod tests {
         assert_eq!(settings.overlay_strength, 0.72);
         assert_eq!(settings.gradient_angle, 360.0);
         assert_eq!(settings.background_opacity, 0.0);
+        assert_eq!(settings.custom_text_color, "#d3dade");
         assert!(settings.image_asset_id.is_none());
+    }
+
+    #[test]
+    fn appearance_profiles_select_the_profile_of_the_requested_mode() {
+        let profiles = AppearanceProfiles {
+            sidebar: AppearanceSettings {
+                solid_color: "#010203".into(),
+                ..AppearanceSettings::default()
+            },
+            floating: AppearanceSettings {
+                solid_color: "#040506".into(),
+                ..AppearanceSettings::default()
+            },
+            desktop: AppearanceSettings {
+                solid_color: "#070809".into(),
+                ..AppearanceSettings::default()
+            },
+        };
+        assert_eq!(
+            profiles.for_mode(ProductWindowMode::Sidebar).solid_color,
+            "#010203"
+        );
+        assert_eq!(
+            profiles.for_mode(ProductWindowMode::Floating).solid_color,
+            "#040506"
+        );
+        assert_eq!(
+            profiles.for_mode(ProductWindowMode::Desktop).solid_color,
+            "#070809"
+        );
+        assert_eq!(profiles.background_asset_ids().count(), 0);
+    }
+
+    /// A profile edit is local: writing through one mode's handle must leave the
+    /// other two exactly as they were.
+    #[test]
+    fn editing_one_profile_leaves_the_others_untouched() {
+        let mut profiles = AppearanceProfiles::from_all(AppearanceSettings::default());
+        profiles.desktop.background_type = BackgroundType::Solid;
+        assert_eq!(
+            profiles
+                .for_mode(ProductWindowMode::Sidebar)
+                .background_type,
+            BackgroundType::Glass,
+            "Sidebar must not inherit a Desktop edit"
+        );
+        assert_eq!(
+            profiles
+                .for_mode(ProductWindowMode::Floating)
+                .background_type,
+            BackgroundType::Glass
+        );
+        assert_eq!(
+            profiles
+                .for_mode(ProductWindowMode::Desktop)
+                .background_type,
+            BackgroundType::Solid
+        );
+    }
+
+    #[test]
+    fn only_referenced_profiles_keep_a_background_asset_alive() {
+        let shared = "background-00000000-0000-0000-0000-000000000000.png";
+        let profiles = AppearanceProfiles {
+            sidebar: AppearanceSettings::default(),
+            floating: AppearanceSettings {
+                image_asset_id: Some(shared.into()),
+                ..AppearanceSettings::default()
+            },
+            desktop: AppearanceSettings {
+                image_asset_id: Some(shared.into()),
+                ..AppearanceSettings::default()
+            },
+        };
+        let mut released = profiles.clone();
+        released.desktop.image_asset_id = None;
+        assert!(
+            released.background_asset_ids().any(|id| id == shared),
+            "the Floating profile still references the image"
+        );
+        released.floating.image_asset_id = None;
+        assert!(!released.background_asset_ids().any(|id| id == shared));
+    }
+
+    /// Custom text has to set the palette direction itself: a bright custom
+    /// colour is light text and keeps the light accent/semantic palette, so the
+    /// readability scrim stays behind it. The background sample deliberately
+    /// disagrees here.
+    #[test]
+    fn custom_text_colour_decides_the_palette_direction() {
+        let mut settings = AppearanceSettings {
+            text_contrast: TextContrast::Custom,
+            custom_text_color: "#f5f7f8".into(),
+            ..AppearanceSettings::default()
+        };
+        // A near-white background would resolve Dark under Auto.
+        settings.background_type = BackgroundType::Solid;
+        settings.solid_color = "#ffffff".into();
+        assert_eq!(
+            resolve_appearance_contrast(settings.clone(), None, None).resolved,
+            ResolvedContrast::Light
+        );
+        settings.custom_text_color = "#12181c".into();
+        assert_eq!(
+            resolve_appearance_contrast(settings.clone(), Some(0.0), None).resolved,
+            ResolvedContrast::Dark
+        );
+        // An unusable colour never reaches the contrast decision: `normalize`
+        // replaces it with the default custom colour, which is light text.
+        assert_eq!(custom_contrast("chartreuse"), None);
+        settings.custom_text_color = "chartreuse".into();
+        settings.solid_color = "#ffffff".into();
+        assert_eq!(
+            resolve_appearance_contrast(settings, None, None).resolved,
+            ResolvedContrast::Light
+        );
     }
 
     #[test]

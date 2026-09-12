@@ -35,7 +35,7 @@ pub fn copyable_diagnostics(
         weather: weather::diagnostic_snapshot(&app_state, &weather_runtime)?,
         background_available: appearance::background_available(
             &app_state,
-            &settings.appearance_settings,
+            settings.active_appearance(),
         ),
         avatar_configured: appearance::avatar_available(
             &app_state,
@@ -120,14 +120,14 @@ fn render_diagnostics(settings: &ProductSettings, input: &DiagnosticInput) -> St
             .map(|seconds| format!("{seconds}s"))
             .unwrap_or_else(|| "unavailable".into()),
         input.weather.last_refresh,
-        settings.appearance_settings.background_type,
+        settings.active_appearance().background_type,
         if input.background_available {
             "yes"
         } else {
             "no"
         },
-        settings.appearance_settings.text_contrast,
-        appearance::resolved_for_diagnostics(&settings.appearance_settings).as_str(),
+        settings.active_appearance().text_contrast,
+        appearance::resolved_for_diagnostics(settings.active_appearance()).as_str(),
         if input.avatar_configured { "yes" } else { "no" },
         settings.floating_presentation,
         settings
@@ -253,11 +253,15 @@ mod tests {
             homepage_url: "https://private.example/secret".into(),
             display_name: "Private Person".into(),
             avatar_asset_id: Some("avatar-00000000-0000-0000-0000-000000000000-private.png".into()),
-            appearance_settings: crate::appearance::AppearanceSettings {
-                image_asset_id: Some(
-                    "background-00000000-0000-0000-0000-000000000000-private.png".into(),
-                ),
-                ..crate::appearance::AppearanceSettings::default()
+            appearance_profiles: crate::appearance::AppearanceProfiles {
+                // The active profile is the one diagnostics report on.
+                floating: crate::appearance::AppearanceSettings {
+                    image_asset_id: Some(
+                        "background-00000000-0000-0000-0000-000000000000-private.png".into(),
+                    ),
+                    ..crate::appearance::AppearanceSettings::default()
+                },
+                ..crate::appearance::AppearanceProfiles::default()
             },
             ..ProductSettings::default()
         };

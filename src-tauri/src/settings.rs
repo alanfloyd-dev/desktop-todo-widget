@@ -1,5 +1,5 @@
 use crate::{
-    appearance::{self, AppearanceSettings},
+    appearance::{self, AppearanceProfiles, AppearanceSettings},
     database::{Database, Shortcut},
     locale::Language,
 };
@@ -168,7 +168,19 @@ pub struct ProductSettings {
     /// [`crate::locale`] for the (deliberately small) resolution rules.
     pub language: Language,
     pub appearance: String,
-    pub appearance_settings: AppearanceSettings,
+    /// Appearance per window mode: Sidebar, Floating, and Desktop each keep an
+    /// independent profile.
+    pub appearance_profiles: AppearanceProfiles,
+    /// Deserialize-only bridge for the pre-profile settings document.
+    ///
+    /// Documents written before per-mode profiles stored one `appearanceSettings`
+    /// for every mode. That key still parses into this field, and
+    /// [`ProductSettings::migrate_legacy_appearance`] copies it into all three
+    /// profiles so an existing user's look survives the upgrade unchanged. It is
+    /// never serialized: the written document carries `appearanceProfiles` only,
+    /// so the migration runs exactly once.
+    #[serde(default, skip_serializing, rename = "appearanceSettings")]
+    pub legacy_appearance_settings: Option<AppearanceSettings>,
     pub display_name: String,
     pub avatar_asset_id: Option<String>,
     pub homepage_label: String,
@@ -213,7 +225,8 @@ impl Default for ProductSettings {
             // first run matches the operating system language.
             language: Language::System,
             appearance: "geological_observatory".into(),
-            appearance_settings: AppearanceSettings::default(),
+            appearance_profiles: AppearanceProfiles::default(),
+            legacy_appearance_settings: None,
             display_name: "Your Name".into(),
             avatar_asset_id: None,
             homepage_label: "Homepage".into(),
@@ -223,13 +236,30 @@ impl Default for ProductSettings {
 }
 
 impl ProductSettings {
+    /// The appearance profile of the window mode this document is currently in.
+    pub fn active_appearance(&self) -> &AppearanceSettings {
+        self.appearance_profiles.for_mode(self.mode)
+    }
+
+    /// Fans a legacy single-appearance document out to the three profiles.
+    ///
+    /// Called from [`Self::normalize`], which runs on load before the state is
+    /// persisted, so an upgraded document is written with the profiles and
+    /// without the legacy key. Taking the value makes the fan-out one-shot.
+    fn migrate_legacy_appearance(&mut self) {
+        if let Some(legacy) = self.legacy_appearance_settings.take() {
+            self.appearance_profiles = AppearanceProfiles::from_all(legacy);
+        }
+    }
+
     pub fn normalize(&mut self) {
         self.width = self.width.clamp(360, 1100);
         self.height = self.height.clamp(500, 1200);
         self.desktop_width = self.desktop_width.clamp(360, 1100);
         self.desktop_height = self.desktop_height.clamp(500, 1200);
         self.sidebar_width = self.sidebar_width.clamp(320, 560);
-        self.appearance_settings.normalize();
+        self.migrate_legacy_appearance();
+        self.appearance_profiles.normalize();
         appearance::normalize_avatar_asset_id(&mut self.avatar_asset_id);
         self.display_name = self.display_name.trim().to_string();
         self.homepage_label = self.homepage_label.trim().to_string();
@@ -575,7 +605,7 @@ mod tests {
             FloatingPresentation::Collapsed
         );
         assert_eq!(
-            restored.appearance_settings.background_type,
+            restored.appearance_profiles.floating.background_type,
             BackgroundType::Glass
         );
         assert!(restored.avatar_asset_id.is_none());
@@ -585,6 +615,168 @@ mod tests {
             (restored.desktop_width, restored.desktop_height),
             (420, 700)
         );
+    }
+
+    /// The upgrade path for users whose document predates per-mode profiles.
+    ///
+    /// One `appearanceSettings` value has to become three identical profiles, or
+    /// an existing user's window would silently change material on the first
+    /// launch after the update. The legacy key must also stop being written, so
+    /// the migrated document has exactly one representation.
+    #[test]
+    fn legacy_single_appearance_settings_fans_out_to_every_profile_and_is_not_rewritten() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r##"{"mode":"desktop","appearance":"geological_observatory","appearanceSettings":{"backgroundType":"solid","solidColor":"#123456","glassTintOpacity":0.4,"blurPx":6,"backgroundOpacity":0.5,"textContrast":"dark","customTextColor":"#abcdef"}}"##,
+            )
+            .expect("legacy settings");
+
+        let state = AppState::load(database).expect("compatible load");
+        let restored = state.snapshot().expect("snapshot");
+        for (mode, profile) in [
+            ("sidebar", &restored.appearance_profiles.sidebar),
+            ("floating", &restored.appearance_profiles.floating),
+            ("desktop", &restored.appearance_profiles.desktop),
+        ] {
+            assert_eq!(
+                profile.background_type,
+                BackgroundType::Solid,
+                "{mode} must inherit the legacy appearance"
+            );
+            assert_eq!(profile.solid_color, "#123456", "{mode}");
+            assert_eq!(profile.glass_tint_opacity, 0.4, "{mode}");
+            assert_eq!(profile.blur_px, 6.0, "{mode}");
+            assert_eq!(profile.background_opacity, 0.5, "{mode}");
+            assert_eq!(profile.text_contrast, crate::appearance::TextContrast::Dark);
+            assert_eq!(profile.custom_text_color, "#abcdef", "{mode}");
+            // Fields the legacy document never had still take their defaults.
+            assert_eq!(profile.overlay_strength, 0.18, "{mode}");
+        }
+
+        let stored = state
+            .database
+            .setting("product_settings")
+            .expect("stored")
+            .expect("value");
+        assert!(stored.contains("\"appearanceProfiles\""));
+        assert!(stored.contains("\"desktop\":{\"backgroundType\":\"solid\""));
+        assert!(
+            !stored.contains("\"appearanceSettings\""),
+            "the bridge field must not be written back"
+        );
+    }
+
+    /// A document that predates Appearance entirely keeps the documented
+    /// defaults in all three profiles.
+    #[test]
+    fn document_without_any_appearance_still_resolves_three_default_profiles() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"mode":"sidebar","appearance":"geological_observatory"}"#,
+            )
+            .expect("legacy settings");
+        let restored = AppState::load(database)
+            .expect("compatible load")
+            .snapshot()
+            .expect("snapshot");
+        assert_eq!(
+            restored.appearance_profiles.sidebar,
+            crate::appearance::AppearanceSettings::default()
+        );
+        assert_eq!(
+            restored.appearance_profiles.floating,
+            crate::appearance::AppearanceSettings::default()
+        );
+        assert_eq!(
+            restored.appearance_profiles.desktop,
+            crate::appearance::AppearanceSettings::default()
+        );
+    }
+
+    /// The three profiles have to survive a restart independently, and the mode
+    /// the app is in has to select its own.
+    #[test]
+    fn per_mode_appearance_profiles_persist_independently() {
+        use crate::appearance::{AppearanceSettings, BackgroundType};
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "alan-desktop-appearance-{}-{suffix}.sqlite3",
+            std::process::id()
+        ));
+
+        {
+            let state = AppState::load(Database::open(&path).expect("database")).expect("state");
+            state
+                .update(|settings| {
+                    settings.appearance_profiles.sidebar = AppearanceSettings {
+                        background_type: BackgroundType::Solid,
+                        solid_color: "#101112".into(),
+                        text_contrast: crate::appearance::TextContrast::Custom,
+                        custom_text_color: "#ffcc00".into(),
+                        ..AppearanceSettings::default()
+                    };
+                    settings.appearance_profiles.floating = AppearanceSettings {
+                        background_type: BackgroundType::Gradient,
+                        gradient_angle: 20.0,
+                        ..AppearanceSettings::default()
+                    };
+                    settings.appearance_profiles.desktop = AppearanceSettings {
+                        background_type: BackgroundType::Wallpaper,
+                        overlay_strength: 0.6,
+                        ..AppearanceSettings::default()
+                    };
+                })
+                .expect("persist profiles");
+        }
+
+        let restored = AppState::load(Database::open(&path).expect("reopen")).expect("state");
+        let snapshot = restored.snapshot().expect("snapshot");
+        assert_eq!(snapshot.appearance_profiles.sidebar.solid_color, "#101112");
+        assert_eq!(
+            snapshot.appearance_profiles.sidebar.custom_text_color,
+            "#ffcc00"
+        );
+        assert_eq!(snapshot.appearance_profiles.floating.gradient_angle, 20.0);
+        assert_eq!(
+            snapshot.appearance_profiles.desktop.background_type,
+            BackgroundType::Wallpaper
+        );
+        assert_eq!(snapshot.appearance_profiles.desktop.overlay_strength, 0.6);
+        // Editing Desktop must not have touched the other two.
+        assert_eq!(snapshot.appearance_profiles.floating.overlay_strength, 0.18);
+
+        restored
+            .update(|settings| settings.mode = ProductWindowMode::Desktop)
+            .expect("switch mode");
+        let desktop = restored.snapshot().expect("snapshot");
+        assert_eq!(
+            desktop.active_appearance().background_type,
+            BackgroundType::Wallpaper
+        );
+        restored
+            .update(|settings| settings.mode = ProductWindowMode::Sidebar)
+            .expect("switch back");
+        let sidebar = restored.snapshot().expect("snapshot");
+        assert_eq!(
+            sidebar.active_appearance().background_type,
+            BackgroundType::Solid
+        );
+
+        for candidate in [
+            path.clone(),
+            path.with_extension("sqlite3-wal"),
+            path.with_extension("sqlite3-shm"),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
     }
 
     #[test]
@@ -601,7 +793,7 @@ mod tests {
             FloatingPresentation::Collapsed
         );
         assert_eq!(
-            settings.appearance_settings.background_type,
+            settings.appearance_profiles.floating.background_type,
             BackgroundType::Glass
         );
     }

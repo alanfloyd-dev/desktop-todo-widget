@@ -14,7 +14,7 @@ export type FloatingPresentation = "collapsed" | "expanded";
  */
 export type RenderingBackend = "standard" | "enhanced";
 export type BackgroundType = "glass" | "solid" | "gradient" | "image" | "wallpaper";
-export type TextContrast = "auto" | "light" | "dark";
+export type TextContrast = "auto" | "light" | "dark" | "custom";
 export type ResolvedContrast = "light" | "dark";
 export type ImageFit = "cover" | "contain" | "stretch";
 export type ImagePosition = "center" | "top" | "bottom";
@@ -84,7 +84,22 @@ export interface AppearanceSettings {
   imagePosition: ImagePosition;
   backgroundOpacity: number;
   textContrast: TextContrast;
+  /** Product text colour, used when `textContrast` is `custom`. */
+  customTextColor: string;
   sampledLuminance: number | null;
+}
+
+/**
+ * Appearance per window mode.
+ *
+ * Sidebar, Floating, and Desktop each own a complete `AppearanceSettings`, so
+ * editing one mode's appearance never changes another's, and switching mode
+ * selects that mode's own profile.
+ */
+export interface AppearanceProfiles {
+  sidebar: AppearanceSettings;
+  floating: AppearanceSettings;
+  desktop: AppearanceSettings;
 }
 export type WeatherCondition =
   | "clear"
@@ -132,7 +147,7 @@ export interface ProductSettings {
   temperatureUnit: TemperatureUnit;
   language: Language;
   appearance: string;
-  appearanceSettings: AppearanceSettings;
+  appearanceProfiles: AppearanceProfiles;
   displayName: string;
   avatarAssetId: string | null;
   homepageLabel: string;

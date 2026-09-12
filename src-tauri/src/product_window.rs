@@ -1,5 +1,5 @@
 use crate::{
-    appearance::{self, AppearanceSettings},
+    appearance::{self, AppearanceProfiles, AppearanceSettings},
     database::Shortcut,
     platform,
     settings::{
@@ -113,7 +113,10 @@ pub struct SettingsPatch {
     weather_admin1: Option<String>,
     temperature_unit: Option<TemperatureUnit>,
     appearance: Option<String>,
-    appearance_settings: Option<AppearanceSettings>,
+    /// One complete appearance per window mode. The Settings panel edits a
+    /// profile draft and writes all three back, so the payload stays a single
+    /// value instead of needing a "which mode" side channel.
+    appearance_profiles: Option<AppearanceProfiles>,
     #[serde(default, deserialize_with = "deserialize_nullable_option")]
     avatar_asset_id: Option<Option<String>>,
     sidebar_width: Option<u32>,
@@ -227,8 +230,8 @@ pub fn update_product_settings(
         if let Some(value) = patch.appearance {
             settings.appearance = value;
         }
-        if let Some(value) = patch.appearance_settings {
-            settings.appearance_settings = value;
+        if let Some(value) = patch.appearance_profiles {
+            settings.appearance_profiles = value;
         }
         if let Some(value) = patch.avatar_asset_id {
             settings.avatar_asset_id = value;
@@ -259,9 +262,9 @@ pub fn update_product_settings(
     })?;
     appearance::cleanup_replaced_assets(
         &state,
-        before.appearance_settings.image_asset_id.as_deref(),
+        &before.appearance_profiles,
         before.avatar_asset_id.as_deref(),
-        settings.appearance_settings.image_asset_id.as_deref(),
+        &settings.appearance_profiles,
         settings.avatar_asset_id.as_deref(),
     );
     if profile_changed {
@@ -282,7 +285,9 @@ pub fn update_product_settings(
         &window.app_handle().state::<ProductWindowRuntime>(),
         effective_settings.mode,
         effective_settings.floating_presentation,
-        &effective_settings.appearance_settings,
+        effective_settings
+            .appearance_profiles
+            .for_mode(effective_settings.mode),
     )?;
     Ok(ProductViewState::new(&state, effective_settings))
 }
@@ -448,7 +453,7 @@ pub fn qa_native_material_control(
                     &runtime,
                     settings.mode,
                     settings.floating_presentation,
-                    &settings.appearance_settings,
+                    &settings.appearance_profiles.for_mode(settings.mode),
                 )?;
                 diagnostics.record(platform::windows::composition_host::diagnostic_summary(
                     &runtime.native_material,
@@ -609,7 +614,9 @@ pub fn restore_window_to_visual_qa(
         runtime,
         ProductWindowMode::Floating,
         FloatingPresentation::Expanded,
-        &settings.appearance_settings,
+        settings
+            .appearance_profiles
+            .for_mode(ProductWindowMode::Floating),
     )?;
 
     window
@@ -642,7 +649,7 @@ pub fn apply_product_mode(
             runtime,
             mode,
             settings.floating_presentation,
-            &settings.appearance_settings,
+            settings.appearance_profiles.for_mode(mode),
         )?;
     }
 
@@ -750,7 +757,7 @@ pub fn apply_product_mode(
             runtime,
             mode,
             settings.floating_presentation,
-            &settings.appearance_settings,
+            settings.appearance_profiles.for_mode(mode),
         )?;
     }
     // A Desktop widget is a child of `SHELLDLL_DefView`, so it sits below every
@@ -840,7 +847,7 @@ pub fn set_floating_presentation(
         runtime,
         updated.mode,
         updated.floating_presentation,
-        &updated.appearance_settings,
+        updated.appearance_profiles.for_mode(updated.mode),
     )?;
     Ok(())
 }

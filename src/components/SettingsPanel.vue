@@ -1,13 +1,20 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { DEFAULT_APPEARANCE, profileInitials, sampleImageLuminance } from "../appearance";
+import {
+  APPEARANCE_MODES,
+  DEFAULT_APPEARANCE,
+  profileInitials,
+  sampleImageLuminance,
+} from "../appearance";
 import { languageOptionLabel, normalizeLanguage, useI18n, type Language } from "../i18n";
 import type {
+  AppearanceProfiles,
   AppearanceSettings,
   AssetPayload,
   LocationCandidate,
   ProductSettings,
+  ProductWindowMode,
   RenderingBackend,
   TemperatureUnit,
   WeatherViewState,
@@ -39,7 +46,7 @@ const emit = defineEmits<{
     temperatureUnit: TemperatureUnit;
     language: Language;
     appearance: string;
-    appearanceSettings: AppearanceSettings;
+    appearanceProfiles: AppearanceProfiles;
     displayName: string;
     avatarAssetId: string | null;
     homepageLabel: string;
@@ -77,12 +84,38 @@ const locationError = ref("");
 const weatherSection = ref<HTMLElement | null>(null);
 const locationInput = ref<HTMLInputElement | null>(null);
 const appearance = ref(props.settings.appearance);
-const appearanceSettings = ref<AppearanceSettings>({ ...props.settings.appearanceSettings });
+/**
+ * Appearance drafts, one per window mode.
+ *
+ * The panel edits a draft of each profile, and Save writes all three back. The
+ * mode selector below is *not* persisted and never changes the real window mode:
+ * it only chooses which profile the shared Appearance controls edit, so a
+ * Desktop appearance can be prepared while the app runs as Sidebar.
+ */
+const appearanceProfiles = ref<AppearanceProfiles>(cloneProfiles(props.settings.appearanceProfiles));
+/** The profile being edited. Opens on the mode the product is actually in. */
+const appearanceMode = ref<ProductWindowMode>(props.settings.mode);
+const appearanceSettings = computed<AppearanceSettings>(
+  () => appearanceProfiles.value[appearanceMode.value],
+);
 const displayName = ref(props.settings.displayName);
 const avatarAssetId = ref(props.settings.avatarAssetId);
 const avatarPreviewUrl = ref(props.avatarUrl);
 const avatarPreviewAvailable = ref(props.avatarAvailable);
 const imagePreviewAvailable = ref(props.imageAvailable);
+/**
+ * Background image the user picked in this panel session, and for which profile.
+ *
+ * `imageAvailable` describes the profile the app has loaded — the current mode's.
+ * A pick made here is known exactly, and for any other profile nothing is
+ * claimed: see `editedImageUnavailable`.
+ */
+const pickedImage = ref<{ mode: ProductWindowMode; available: boolean } | null>(null);
+const editedImageUnavailable = computed(() => {
+  if (!appearanceSettings.value.imageAssetId) return false;
+  if (pickedImage.value?.mode === appearanceMode.value) return !pickedImage.value.available;
+  return appearanceMode.value === props.settings.mode && !imagePreviewAvailable.value;
+});
 const assetMessage = ref("");
 const provisionalAssets = new Set<string>();
 const homepageLabel = ref(props.settings.homepageLabel);
@@ -132,7 +165,7 @@ function save() {
     temperatureUnit: temperatureUnit.value,
     language: language.value,
     appearance: appearance.value,
-    appearanceSettings: appearanceSettings.value,
+    appearanceProfiles: cloneProfiles(appearanceProfiles.value),
     displayName: displayName.value,
     avatarAssetId: avatarAssetId.value,
     homepageLabel: homepageLabel.value,
@@ -175,6 +208,7 @@ async function chooseAsset(kind: "background" | "avatar") {
       appearanceSettings.value.imageAssetId = selected.assetId;
       appearanceSettings.value.backgroundType = "image";
       appearanceSettings.value.sampledLuminance = await sampleImageLuminance(selected.dataUrl);
+      pickedImage.value = { mode: appearanceMode.value, available: selected.available };
       imagePreviewAvailable.value = selected.available;
     }
   } catch (reason) {
@@ -188,8 +222,15 @@ function removeAvatar() {
   avatarPreviewAvailable.value = false;
 }
 
+/**
+ * Resets only the profile being edited.
+ *
+ * The other two modes keep their appearance: a single click must never discard
+ * an appearance the user built for a different window mode.
+ */
 function resetAppearance() {
-  appearanceSettings.value = { ...DEFAULT_APPEARANCE };
+  appearanceProfiles.value[appearanceMode.value] = { ...DEFAULT_APPEARANCE };
+  pickedImage.value = null;
   imagePreviewAvailable.value = false;
 }
 
@@ -263,10 +304,21 @@ onBeforeUnmount(() => {
   for (const assetId of provisionalAssets) {
     const saved =
       props.settings.avatarAssetId === assetId ||
-      props.settings.appearanceSettings.imageAssetId === assetId;
+      Object.values(props.settings.appearanceProfiles).some(
+        (profile) => profile.imageAssetId === assetId,
+      );
     if (!saved) void discard(assetId);
   }
 });
+
+/** Detached copies, so an unsaved draft can never write through to the parent. */
+function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
+  return {
+    sidebar: { ...profiles.sidebar },
+    floating: { ...profiles.floating },
+    desktop: { ...profiles.desktop },
+  };
+}
 </script>
 
 <template>
@@ -406,6 +458,30 @@ onBeforeUnmount(() => {
           <strong id="appearance-settings-heading">{{ t("settings.appearanceHeading") }}</strong>
           <small>{{ t("settings.appearanceMaterial") }}</small>
         </div>
+        <!--
+          Which profile the controls below edit. This is Settings UI state only:
+          it never changes the window mode the product runs in, and it is not
+          persisted, so it reopens on the mode actually in use. The mode names
+          are the same ones the window menu uses.
+        -->
+        <div class="settings-row appearance-background-row">
+          <span>
+            <strong>{{ t("settings.appearanceFor") }}</strong>
+            <small>{{ t("settings.appearanceForHint") }}</small>
+          </span>
+          <div class="appearance-options" role="group" :aria-label="t('settings.appearanceForAriaLabel')">
+            <button
+              v-for="option in APPEARANCE_MODES"
+              :key="option"
+              type="button"
+              :class="{ active: appearanceMode === option }"
+              :aria-pressed="appearanceMode === option"
+              @click="appearanceMode = option"
+            >
+              {{ t(`menu.mode.${option}`) }}
+            </button>
+          </div>
+        </div>
         <div class="settings-row appearance-background-row">
           <span>
             <strong>{{ t("settings.rendering") }}</strong>
@@ -491,7 +567,7 @@ onBeforeUnmount(() => {
             <span><strong>{{ t("settings.customImage") }}</strong><small>{{ t("settings.customImageHint") }}</small></span>
             <div class="asset-actions">
               <button type="button" @click="chooseAsset('background')">{{ t("settings.chooseImage") }}</button>
-              <small v-if="appearanceSettings.imageAssetId && !imagePreviewAvailable" class="asset-unavailable">{{ t("settings.imageUnavailable") }}</small>
+              <small v-if="editedImageUnavailable" class="asset-unavailable">{{ t("settings.imageUnavailable") }}</small>
             </div>
           </div>
           <label class="settings-row">
@@ -517,9 +593,23 @@ onBeforeUnmount(() => {
           <span><strong>{{ t("settings.overlay") }}</strong><small>{{ t("settings.overlayHint") }}</small></span>
           <div class="range-control"><input v-model.number="appearanceSettings.overlayStrength" type="range" min="0" max="0.72" step="0.01" /><output>{{ Math.round(appearanceSettings.overlayStrength * 100) }}%</output></div>
         </label>
-        <label class="settings-row">
+        <div class="settings-row appearance-background-row">
           <span><strong>{{ t("settings.textContrast") }}</strong><small>{{ t("settings.textContrastHint") }}</small></span>
-          <select v-model="appearanceSettings.textContrast"><option value="auto">{{ t("settings.textContrast.auto") }}</option><option value="light">{{ t("settings.textContrast.light") }}</option><option value="dark">{{ t("settings.textContrast.dark") }}</option></select>
+          <div class="appearance-options" role="group" :aria-label="t('settings.textContrastAriaLabel')">
+            <button
+              v-for="option in ['auto', 'light', 'dark', 'custom'] as const"
+              :key="option"
+              type="button"
+              :class="{ active: appearanceSettings.textContrast === option }"
+              @click="appearanceSettings.textContrast = option"
+            >
+              {{ t(`settings.textContrast.${option}`) }}
+            </button>
+          </div>
+        </div>
+        <label v-if="appearanceSettings.textContrast === 'custom'" class="settings-row">
+          <span><strong>{{ t("settings.customTextColor") }}</strong><small>{{ t("settings.customTextColorHint") }}</small></span>
+          <div class="color-control"><input v-model="appearanceSettings.customTextColor" type="color" /><code>{{ appearanceSettings.customTextColor }}</code></div>
         </label>
         <button type="button" class="reset-appearance" @click="resetAppearance">{{ t("settings.resetAppearance") }}</button>
       </section>

@@ -9,12 +9,16 @@ import ProductContent from "./components/ProductContent.vue";
 import ReviewPanel from "./components/ReviewPanel.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import {
+  activeAppearance,
   browserRepresentativeLuminance,
   browserResolvedContrast,
+  customTextVariables,
+  defaultAppearanceProfiles,
   sampleImageLuminance,
 } from "./appearance";
 import { createI18n, normalizeLanguage, provideI18n } from "./i18n";
 import type {
+  AppearanceProfiles,
   AppearanceSettings,
   AssetPayload,
   ContrastResult,
@@ -75,6 +79,16 @@ watch(
 );
 
 const modeClass = computed(() => `mode-${state.value.settings.mode}`);
+/**
+ * The appearance profile of the window mode the product is in.
+ *
+ * Sidebar, Floating, and Desktop each own one, so this is the single place that
+ * decides which profile the background, the contrast resolution, and the custom
+ * text colour read from.
+ */
+const appearance = computed<AppearanceSettings>(() => activeAppearance(state.value.settings));
+/** Custom text variables, or `undefined` when the profile is not on Custom. */
+const customTextStyle = computed(() => customTextVariables(appearance.value));
 const presentationClass = computed(
   () => `presentation-${state.value.settings.floatingPresentation}`,
 );
@@ -100,6 +114,14 @@ function browserState(): ProductViewState {
     ? background as AppearanceSettings["backgroundType"]
     : "glass";
   const lightSolid = preview.get("palette") === "light";
+  // The browser preview has no persisted profiles, so every mode starts from the
+  // same draft; `resolve_appearance_contrast` and the profile selector are still
+  // exercised because the draft is stored per mode.
+  const appearanceProfiles = defaultAppearanceProfiles();
+  for (const profile of Object.values(appearanceProfiles)) {
+    profile.backgroundType = backgroundType;
+    profile.solidColor = lightSolid ? "#f3f5f6" : "#11191e";
+  }
   return {
     settings: {
       geometryUnitsVersion: 1,
@@ -133,23 +155,7 @@ function browserState(): ProductViewState {
       temperatureUnit: "celsius",
       language: "system",
       appearance: "geological_observatory",
-      appearanceSettings: {
-        backgroundType,
-        solidColor: lightSolid ? "#f3f5f6" : "#11191e",
-        glassTintColor: "#11191e",
-        glassTintOpacity: 0.78,
-        blurPx: 14,
-        overlayStrength: 0.18,
-        gradientStartColor: "#11191e",
-        gradientEndColor: "#213747",
-        gradientAngle: 135,
-        imageAssetId: null,
-        imageFit: "cover",
-        imagePosition: "center",
-        backgroundOpacity: 0.94,
-        textContrast: "auto",
-        sampledLuminance: null,
-      },
+      appearanceProfiles,
       displayName: "Your Name",
       avatarAssetId: null,
       homepageLabel: "Homepage",
@@ -207,18 +213,19 @@ async function loadState() {
 
 async function loadAppearanceRuntime() {
   const settings = state.value.settings;
-  imageAsset.value = emptyAsset(settings.appearanceSettings.imageAssetId);
+  const profile = activeAppearance(settings);
+  imageAsset.value = emptyAsset(profile.imageAssetId);
   wallpaperAsset.value = emptyAsset();
   avatarAsset.value = emptyAsset(settings.avatarAssetId);
   if (nativeBridgeAvailable) {
     try {
-      if (settings.appearanceSettings.imageAssetId) {
+      if (profile.imageAssetId) {
         imageAsset.value = await invoke<AssetPayload>("load_managed_asset", {
           kind: "background",
-          assetId: settings.appearanceSettings.imageAssetId,
+          assetId: profile.imageAssetId,
         });
       }
-      if (["glass", "wallpaper"].includes(settings.appearanceSettings.backgroundType)) {
+      if (["glass", "wallpaper"].includes(profile.backgroundType)) {
         wallpaperAsset.value = await invoke<AssetPayload>("load_windows_wallpaper");
       }
       if (settings.avatarAssetId) {
@@ -232,17 +239,16 @@ async function loadAppearanceRuntime() {
       // wallpaper must leave the local-first Todo/Weather surface usable.
     }
   }
-  const appearance = settings.appearanceSettings;
-  const sampleUrl = appearance.backgroundType === "image"
+  const sampleUrl = profile.backgroundType === "image"
     ? imageAsset.value.dataUrl
-    : ["glass", "wallpaper"].includes(appearance.backgroundType)
+    : ["glass", "wallpaper"].includes(profile.backgroundType)
       ? wallpaperAsset.value.dataUrl
       : null;
-  const sampled = sampleUrl ? await sampleImageLuminance(sampleUrl) : appearance.sampledLuminance;
+  const sampled = sampleUrl ? await sampleImageLuminance(sampleUrl) : profile.sampledLuminance;
   if (nativeBridgeAvailable) {
     try {
       const result = await invoke<ContrastResult>("resolve_appearance_contrast", {
-        appearance,
+        appearance: profile,
         sampledLuminance: sampled,
         previous: resolvedContrast.value,
       });
@@ -252,9 +258,9 @@ async function loadAppearanceRuntime() {
       // The browser fallback below is the same bounded luminance policy.
     }
   }
-  const representative = browserRepresentativeLuminance(appearance, sampled);
+  const representative = browserRepresentativeLuminance(profile, sampled);
   resolvedContrast.value = browserResolvedContrast(
-    appearance.textContrast,
+    profile,
     representative,
     resolvedContrast.value,
   );
@@ -346,11 +352,18 @@ async function runAction(action: string) {
   }
   if (!nativeBridgeAvailable) {
     applyBrowserAction(action);
+    await loadAppearanceRuntime();
     return;
   }
   try {
     state.value = await invoke<ProductViewState>("product_action", { action });
-    if (action.startsWith("floating.")) await loadAppearanceRuntime();
+    // A mode action changes which profile is current, and a Floating action
+    // changes the presentation the wallpaper/image is sampled against. Either
+    // way the runtime appearance has to be rebuilt from the new profile instead
+    // of keeping the previous mode's material.
+    if (action.startsWith("floating.") || action.startsWith("mode.")) {
+      await loadAppearanceRuntime();
+    }
   } catch (reason) {
     error.value = String(reason);
   }
@@ -380,7 +393,7 @@ async function saveSettings(patch: {
   temperatureUnit: TemperatureUnit;
   language: Language;
   appearance: string;
-  appearanceSettings: AppearanceSettings;
+  appearanceProfiles: AppearanceProfiles;
   displayName: string;
   avatarAssetId: string | null;
   homepageLabel: string;
@@ -464,10 +477,14 @@ onMounted(async () => {
     // action. Native menus (the tray and the Orb's context menu) cannot return
     // that result to us, so this event is the only way a natively triggered mode
     // or presentation change reaches the DOM: without it the layout keeps
-    // rendering the previous mode inside the new mode's window geometry.
+    // rendering the previous mode inside the new mode's window geometry. A mode
+    // change also swaps the appearance profile, so the material has to be
+    // reloaded here too — there is no other hook for a native mode switch.
     unlistenProductState = await listen<ProductViewState>("product-state", (event) => {
+      const modeChanged = event.payload.settings.mode !== state.value.settings.mode;
       state.value = event.payload;
       menu.value.open = false;
+      if (modeChanged) void loadAppearanceRuntime();
     });
   }
 });
@@ -484,13 +501,14 @@ onBeforeUnmount(() => {
 
 <template>
   <main
-    :class="['app-shell', modeClass, presentationClass, `contrast-${resolvedContrast}`]"
+    :class="['app-shell', modeClass, presentationClass, `contrast-${resolvedContrast}`, { 'text-custom': !!customTextStyle }]"
+    :style="customTextStyle"
     :data-window-mode="state.settings.mode"
     :data-floating-presentation="state.settings.floatingPresentation"
     @contextmenu.prevent="openContextMenu"
   >
     <AppearanceBackground
-      :appearance="state.settings.appearanceSettings"
+      :appearance="appearance"
       :image-url="imageAsset.dataUrl || ''"
       :image-available="imageAsset.available"
       :wallpaper-url="wallpaperAsset.dataUrl || ''"

@@ -25,6 +25,23 @@
   --danger: #873f47;
 }
 
+/*
+ * A Custom text color is a product-content choice: it lands in the body and
+ * secondary text variables on `.app-shell`.
+ *
+ * The Settings overlay draws on its own opaque graphite surface and is where the
+ * color is chosen, so it keeps the fixed graphite palette instead of inheriting
+ * one — a dark custom color would otherwise make the picker itself unreadable,
+ * with no way back. (The Review overlay already declares its own palette for the
+ * same reason.) Accent, warning/error, task-state, and status-mark colors are
+ * never part of the custom palette, so meaning survives any text color.
+ */
+.text-custom .settings-panel {
+  --ink: #d3dade;
+  --muted: #849198;
+  --faint: #59676f;
+}
+
 * {
   box-sizing: border-box;
 }

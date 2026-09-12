@@ -21,6 +21,24 @@ parser.add_argument("--quiet", action="store_true")
 args = parser.parse_args()
 
 connection = sqlite3.connect(args.database)
+
+
+def every_profile(settings):
+    """The appearance value(s) carried by a settings document.
+
+    v1 stores one `appearanceSettings`; per-mode profiles store three. Seeding a
+    background for QA means the same thing either way: the product shows it.
+    """
+    if "appearanceProfiles" in settings:
+        return list(settings["appearanceProfiles"].values())
+    return [settings["appearanceSettings"]]
+
+
+def set_background(settings, background):
+    for appearance in every_profile(settings):
+        appearance["backgroundType"] = background
+
+
 if args.restore:
     backup_path = Path(args.restore)
     raw_settings = backup_path.read_text(encoding="utf-8")
@@ -63,16 +81,16 @@ if args.mode or args.presentation or args.x is not None or args.y is not None or
     if args.height:
         settings["height"] = args.height
     if args.background:
-        settings["appearanceSettings"]["backgroundType"] = args.background
+        set_background(settings, args.background)
     if args.always_on_top:
         settings["alwaysOnTop"] = args.always_on_top == "true"
     if args.transparent_css:
-        appearance = settings["appearanceSettings"]
-        appearance["backgroundType"] = "glass"
-        appearance["glassTintOpacity"] = 0
-        appearance["blurPx"] = 0
-        appearance["overlayStrength"] = 0
-        appearance["backgroundOpacity"] = 0
+        for appearance in every_profile(settings):
+            appearance["backgroundType"] = "glass"
+            appearance["glassTintOpacity"] = 0
+            appearance["blurPx"] = 0
+            appearance["overlayStrength"] = 0
+            appearance["backgroundOpacity"] = 0
     connection.execute(
         "UPDATE app_settings SET value = ? WHERE key = 'product_settings'",
         (json.dumps(settings, separators=(",", ":"), ensure_ascii=False),),
