@@ -21,6 +21,7 @@ defineEmits<{
   collapse: [];
   configureWeather: [];
   openReview: [];
+  openSettings: [];
   error: [message: string];
 }>();
 
@@ -145,6 +146,59 @@ const dateLabel = computed(() =>
         </span>
         <span>{{ displayName }}</span>
       </span>
+
+      <!--
+        The visible Settings entry point.
+
+        Settings used to be reachable only from the right-click menu (and the
+        tray), which nothing on the surface advertises. This is that same action
+        as a footer control, not a second settings surface: it emits
+        `openSettings`, which `App.vue` routes through the existing
+        `product_action("settings")` command.
+
+        It is unconditional within this component, which is what makes the
+        visibility rule fall out structurally rather than from a mode list: the
+        component renders exactly in the three expanded presentations (Floating
+        expanded, Sidebar, Desktop) and is replaced by `FloatingOrb` in the
+        collapsed Orb, so the gear exists in every expanded mode and nowhere
+        else. It is also independent of the profile identity, so a user who
+        cleared their display name and avatar still has a way in.
+
+        Keyboard: it is a real `<button>`, so Tab reaches it and Enter/Space
+        activate it without extra handlers.
+      -->
+      <button
+        type="button"
+        class="footer-settings-button"
+        :aria-label="t('footer.settings')"
+        :title="t('footer.settings')"
+        @click="$emit('openSettings')"
+      >
+        <svg
+          class="footer-settings-icon"
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <g
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.7"
+            stroke-linecap="round"
+          >
+            <circle cx="12" cy="12" r="5.6" />
+            <circle cx="12" cy="12" r="2.3" />
+            <line x1="12" y1="3.4" x2="12" y2="6.5" />
+            <line x1="12" y1="3.4" x2="12" y2="6.5" transform="rotate(45 12 12)" />
+            <line x1="12" y1="3.4" x2="12" y2="6.5" transform="rotate(90 12 12)" />
+            <line x1="12" y1="3.4" x2="12" y2="6.5" transform="rotate(135 12 12)" />
+            <line x1="12" y1="3.4" x2="12" y2="6.5" transform="rotate(180 12 12)" />
+            <line x1="12" y1="3.4" x2="12" y2="6.5" transform="rotate(225 12 12)" />
+            <line x1="12" y1="3.4" x2="12" y2="6.5" transform="rotate(270 12 12)" />
+            <line x1="12" y1="3.4" x2="12" y2="6.5" transform="rotate(315 12 12)" />
+          </g>
+        </svg>
+      </button>
     </footer>
   </div>
 </template>

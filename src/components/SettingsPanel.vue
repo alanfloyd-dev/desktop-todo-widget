@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   APPEARANCE_MODES,
   DEFAULT_APPEARANCE,
+  normalizeAvatarImage,
   profileInitials,
   sampleImageLuminance,
 } from "../appearance";
@@ -116,8 +117,31 @@ const editedImageUnavailable = computed(() => {
   if (pickedImage.value?.mode === appearanceMode.value) return !pickedImage.value.available;
   return appearanceMode.value === props.settings.mode && !imagePreviewAvailable.value;
 });
-const assetMessage = ref("");
+/**
+ * Failure of the last image pick, and which control produced it.
+ *
+ * The message is rendered inside that control's own row rather than at the bottom
+ * of the panel: the picker is a native dialog that can legitimately refuse a file,
+ * and a rejection the user cannot see is indistinguishable from "nothing
+ * happened". `null` means no failure to show.
+ */
+const assetError = ref<{ kind: "avatar" | "background"; message: string } | null>(null);
 const provisionalAssets = new Set<string>();
+
+/**
+ * Turns a native image failure into localized copy.
+ *
+ * The backend speaks a small, pinned vocabulary (see `appearance.rs`); anything
+ * unrecognised becomes the "could not be loaded" message rather than leaking a raw
+ * English string into a localized UI.
+ */
+function imageErrorLabel(reason: unknown): string {
+  const text = String(reason);
+  if (text.includes("too large")) return t("settings.error.imageTooLarge");
+  if (text.includes("unsupported")) return t("settings.error.imageUnsupported");
+  if (text.includes("could not be read")) return t("settings.error.imageUnreadable");
+  return t("settings.error.imageUnreadable");
+}
 
 /**
  * Quick Links draft.
@@ -294,15 +318,29 @@ async function discard(assetId: string) {
   }
 }
 
+/**
+ * Picks an image for the profile avatar or the background material.
+ *
+ * The two kinds deliberately differ:
+ *
+ * - **Avatar** — the picked file is only *read* (`persist: false`), normalized in
+ *   the WebView to {@link AVATAR_EDGE_PX} square PNG, and stored through
+ *   `store_managed_asset`. The original, which may be a multi-megabyte photo, is
+ *   never written to the profile, and the preview shows exactly the normalized
+ *   bytes that will be persisted.
+ * - **Background** — the picked file is still stored at full resolution, because
+ *   it is scaled to a whole window.
+ *
+ * A refusal (too large to read, unsupported format, undecodable image) is reported
+ * in the row that owns the control.
+ */
 async function chooseAsset(kind: "background" | "avatar") {
-  assetMessage.value = "";
+  assetError.value = null;
   if (!("__TAURI_INTERNALS__" in window)) {
-    assetMessage.value = t("settings.error.localFilePicker");
+    assetError.value = { kind, message: t("settings.error.localFilePicker") };
     return;
   }
   try {
-    const selected = await invoke<AssetPayload | null>("choose_local_asset", { kind });
-    if (!selected?.assetId || !selected.dataUrl) return;
     const previous = kind === "avatar"
       ? avatarAssetId.value
       : appearanceSettings.value.imageAssetId;
@@ -310,20 +348,33 @@ async function chooseAsset(kind: "background" | "avatar") {
       provisionalAssets.delete(previous);
       void discard(previous);
     }
-    provisionalAssets.add(selected.assetId);
+
     if (kind === "avatar") {
-      avatarAssetId.value = selected.assetId;
-      avatarPreviewUrl.value = selected.dataUrl;
-      avatarPreviewAvailable.value = selected.available;
-    } else {
-      appearanceSettings.value.imageAssetId = selected.assetId;
-      appearanceSettings.value.backgroundType = "image";
-      appearanceSettings.value.sampledLuminance = await sampleImageLuminance(selected.dataUrl);
-      pickedImage.value = { mode: appearanceMode.value, available: selected.available };
-      imagePreviewAvailable.value = selected.available;
+      const picked = await invoke<AssetPayload | null>("choose_local_asset", { kind, persist: false });
+      if (!picked?.dataUrl) return;
+      const normalized = await normalizeAvatarImage(picked.dataUrl);
+      const stored = await invoke<AssetPayload>("store_managed_asset", { kind, dataUrl: normalized });
+      if (!stored.assetId || !stored.dataUrl) {
+        assetError.value = { kind, message: t("settings.error.imageUnreadable") };
+        return;
+      }
+      provisionalAssets.add(stored.assetId);
+      avatarAssetId.value = stored.assetId;
+      avatarPreviewUrl.value = stored.dataUrl;
+      avatarPreviewAvailable.value = true;
+      return;
     }
+
+    const selected = await invoke<AssetPayload | null>("choose_local_asset", { kind });
+    if (!selected?.assetId || !selected.dataUrl) return;
+    provisionalAssets.add(selected.assetId);
+    appearanceSettings.value.imageAssetId = selected.assetId;
+    appearanceSettings.value.backgroundType = "image";
+    appearanceSettings.value.sampledLuminance = await sampleImageLuminance(selected.dataUrl);
+    pickedImage.value = { mode: appearanceMode.value, available: selected.available };
+    imagePreviewAvailable.value = selected.available;
   } catch (reason) {
-    assetMessage.value = String(reason);
+    assetError.value = { kind, message: imageErrorLabel(reason) };
   }
 }
 
@@ -486,6 +537,13 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
           </span>
           <button type="button" @click="chooseAsset('avatar')">{{ t("settings.chooseImage") }}</button>
           <button type="button" :disabled="!avatarAssetId" @click="removeAvatar">{{ t("settings.removeAvatar") }}</button>
+          <!--
+            The failure is shown here, under the button that caused it, instead of
+            at the bottom of the panel: the picker is a native dialog whose
+            rejections are otherwise invisible, and "the click did nothing" is the
+            worst possible answer.
+          -->
+          <small v-if="assetError?.kind === 'avatar'" class="settings-error asset-error" role="status">{{ assetError.message }}</small>
         </div>
       </div>
       <label class="settings-row">
@@ -745,6 +803,7 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
             <div class="asset-actions">
               <button type="button" @click="chooseAsset('background')">{{ t("settings.chooseImage") }}</button>
               <small v-if="editedImageUnavailable" class="asset-unavailable">{{ t("settings.imageUnavailable") }}</small>
+              <small v-if="assetError?.kind === 'background'" class="settings-error asset-error" role="status">{{ assetError.message }}</small>
             </div>
           </div>
           <label class="settings-row">
@@ -790,7 +849,6 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
         </label>
         <button type="button" class="reset-appearance" @click="resetAppearance">{{ t("settings.resetAppearance") }}</button>
       </section>
-      <p v-if="assetMessage" class="settings-error" role="status">{{ assetMessage }}</p>
     </div>
 
     <button type="button" class="save-settings" @click="save">{{ t("settings.save") }}</button>

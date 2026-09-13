@@ -65,6 +65,11 @@ export const en: Record<string, string> = {
   // forms of that control: the clickable identity block and the standalone
   // control shown when there is no identity content.
   "footer.collapseToOrb": "Collapse to Orb",
+  // Accessible name and tooltip of the visible Settings gear in the expanded
+  // footer. Same action and same wording as `menu.settings`: the gear and the
+  // right-click menu entry open one Settings surface, so the two keys are kept
+  // separate only because they live on different surfaces.
+  "footer.settings": "Settings",
 
   // --- Weather --------------------------------------------------------------
   "weather.empty": "WEATHER —",
@@ -303,6 +308,12 @@ export const en: Record<string, string> = {
   "settings.error.locationNoMatch": "No matching locations.",
   "settings.error.openAttribution": "Could not open Open-Meteo.",
   "settings.error.localFilePicker": "Local file selection is available in the Windows app.",
+  // Image pick failures. Shown next to the control that caused them, so they use
+  // the user's vocabulary rather than the backend's: the picker itself stays
+  // native and can refuse a file for several reasons.
+  "settings.error.imageUnsupported": "Unsupported image format. Use PNG, JPEG, or WebP.",
+  "settings.error.imageTooLarge": "That image is too large to open.",
+  "settings.error.imageUnreadable": "That image could not be loaded.",
 
   "settings.developer.supportReport": "Support report",
   "settings.developer.supportReportHint":
@@ -367,6 +378,7 @@ export const zhHans: Record<string, string> = {
 
   "camera.label": "相机",
   "footer.collapseToOrb": "折叠为悬浮球",
+  "footer.settings": "设置",
 
   "weather.empty": "天气 —",
   "weather.setLocation": "设置地点",
@@ -597,6 +609,9 @@ export const zhHans: Record<string, string> = {
   "settings.error.locationNoMatch": "没有匹配的地点。",
   "settings.error.openAttribution": "无法打开 Open-Meteo。",
   "settings.error.localFilePicker": "本地文件选择仅在 Windows 应用中可用。",
+  "settings.error.imageUnsupported": "不支持的图片格式，请使用 PNG、JPEG 或 WebP。",
+  "settings.error.imageTooLarge": "该图片过大，无法打开。",
+  "settings.error.imageUnreadable": "该图片无法加载。",
 
   "settings.developer.supportReport": "支持报告",
   "settings.developer.supportReportHint": "隐私安全 · 不包含内容、路径、地点和 URL",

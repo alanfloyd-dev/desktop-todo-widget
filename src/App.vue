@@ -549,6 +549,7 @@ onBeforeUnmount(() => {
         :weather="weather"
         @open-quick-link="openQuickLink"
         @collapse="runAction('floating.collapse')"
+        @open-settings="runAction('settings')"
         @configure-weather="openWeatherSettings"
         @open-review="settingsOpen = false; reviewOpen = true"
         @error="error = $event"

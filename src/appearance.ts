@@ -30,6 +30,89 @@ export const DEFAULT_APPEARANCE: AppearanceSettings = {
 /** Every window mode, in the order the Settings profile selector lists them. */
 export const APPEARANCE_MODES: ProductWindowMode[] = ["sidebar", "floating", "desktop"];
 
+/**
+ * Edge length of the persisted avatar, in pixels.
+ *
+ * The Orb renders it at 56 DIP and the expanded footer at 28 DIP, so 256 px keeps
+ * it crisp at every Windows scaling level while the stored PNG stays a few tens of
+ * kilobytes. Kept in step with `AVATAR_EDGE_PX` in `src-tauri/src/appearance.rs`,
+ * which bounds what the backend will accept.
+ */
+export const AVATAR_EDGE_PX = 256;
+
+/**
+ * Normalizes a picked avatar into the small square the profile stores.
+ *
+ * A user picks a photo, not an icon: it can be a multi-megabyte, non-square,
+ * EXIF-rotated original. This decodes it, applies its orientation, takes the
+ * centre square — the same region the circular `object-fit: cover` preview shows —
+ * scales it to {@link AVATAR_EDGE_PX}, and re-encodes it as PNG so transparency
+ * survives. Only this result is persisted, so the profile never carries the
+ * original, and the backend receives a payload whose format the app itself chose.
+ *
+ * The bytes are decoded from the data URL directly rather than fetched: the
+ * product's CSP allows no `data:` connection source.
+ *
+ * Rejects with a message the caller turns into localized copy when the image
+ * cannot be decoded at all (for example a truncated file).
+ */
+export async function normalizeAvatarImage(dataUrl: string): Promise<string> {
+  const { bytes, mime } = dataUrlBytes(dataUrl);
+  const blob = new Blob([bytes], { type: mime });
+  let bitmap: ImageBitmap;
+  try {
+    // `from-image` honours the EXIF orientation tag, so a portrait photo taken on
+    // a phone is not stored sideways.
+    bitmap = await createImageBitmap(blob, { imageOrientation: "from-image" });
+  } catch {
+    throw new Error("selected image could not be read");
+  }
+  const edge = Math.min(bitmap.width, bitmap.height);
+  if (!edge) {
+    bitmap.close();
+    throw new Error("selected image could not be read");
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = AVATAR_EDGE_PX;
+  canvas.height = AVATAR_EDGE_PX;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    bitmap.close();
+    throw new Error("selected image could not be read");
+  }
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(
+    bitmap,
+    Math.round((bitmap.width - edge) / 2),
+    Math.round((bitmap.height - edge) / 2),
+    edge,
+    edge,
+    0,
+    0,
+    AVATAR_EDGE_PX,
+    AVATAR_EDGE_PX,
+  );
+  bitmap.close();
+  return canvas.toDataURL("image/png");
+}
+
+/** Splits a base64 `data:` URL into its bytes and declared media type. */
+function dataUrlBytes(dataUrl: string): { bytes: Uint8Array<ArrayBuffer>; mime: string } {
+  const comma = dataUrl.indexOf(",");
+  const header = comma < 0 ? "" : dataUrl.slice(0, comma);
+  if (!header.startsWith("data:") || !header.endsWith(";base64")) {
+    throw new Error("unsupported image");
+  }
+  const mime = header.slice("data:".length, header.length - ";base64".length);
+  const binary = atob(dataUrl.slice(comma + 1));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return { bytes, mime };
+}
+
 /** A fresh, independent appearance profile per window mode. */
 export function defaultAppearanceProfiles(): AppearanceProfiles {
   return {

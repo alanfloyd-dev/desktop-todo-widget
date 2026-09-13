@@ -7,6 +7,34 @@ use uuid::Uuid;
 const MAX_BACKGROUND_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_AVATAR_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Largest source file the avatar picker will read without persisting it.
+///
+/// The picker no longer stores what the user selected: the frontend decodes the
+/// chosen image, crops it to a square and scales it to [`AVATAR_EDGE_PX`], and
+/// only that normalized PNG is persisted (a few tens of kilobytes). The source
+/// cap therefore only bounds what can be read and handed over in one IPC payload,
+/// and it covers a high-resolution phone photo or screenshot rather than the
+/// 56 DIP circle those files would end up in. Above it the picker refuses with a
+/// message the UI shows next to the control.
+const MAX_AVATAR_SOURCE_BYTES: u64 = 24 * 1024 * 1024;
+
+/// Edge length of a persisted avatar, in pixels.
+///
+/// Kept in step with `AVATAR_EDGE_PX` in `src/appearance.ts`, which performs the
+/// resize; this constant documents the size the backend expects to receive and
+/// bounds what it will store.
+pub const AVATAR_EDGE_PX: u32 = 256;
+
+/// Rejection messages the frontend maps to localized copy.
+///
+/// Stable, machine-checked phrases rather than free-form text: the frontend
+/// matches them to show a translated message, and the unit tests below pin the
+/// same phrases, so changing one here cannot silently degrade the UI to an
+/// untranslated or generic message.
+const ERROR_IMAGE_TOO_LARGE: &str = "selected image is too large";
+const ERROR_IMAGE_UNSUPPORTED: &str = "unsupported image";
+const ERROR_IMAGE_UNREADABLE: &str = "selected image could not be read";
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackgroundType {
@@ -208,10 +236,22 @@ impl AssetKind {
         }
     }
 
+    /// Largest payload this kind may *persist*.
     fn max_bytes(self) -> u64 {
         match self {
             Self::Background => MAX_BACKGROUND_BYTES,
             Self::Avatar => MAX_AVATAR_BYTES,
+        }
+    }
+
+    /// Largest source file that may be *read* for this kind.
+    ///
+    /// An avatar is read only to be normalized, so the source may legitimately be
+    /// far larger than the artifact that gets stored.
+    fn max_source_bytes(self) -> u64 {
+        match self {
+            Self::Background => MAX_BACKGROUND_BYTES,
+            Self::Avatar => MAX_AVATAR_SOURCE_BYTES,
         }
     }
 }
@@ -252,28 +292,158 @@ pub fn resolve_appearance_contrast(
     }
 }
 
+/// Opens the picker and returns the chosen image.
+///
+/// `persist` defaults to `true`, which is the background-image contract: the
+/// picked file is validated and copied into the managed assets directory, and the
+/// payload carries the new asset id.
+///
+/// `persist = false` is the avatar contract. The chosen file is validated and
+/// returned as a data URL but **nothing is written**: the frontend decodes it,
+/// normalizes it to [`AVATAR_EDGE_PX`] square, and stores that through
+/// [`store_managed_asset`]. That keeps the original — which may be a multi-megabyte
+/// photo — out of the profile entirely, and it means the source cap used here
+/// ([`AssetKind::max_source_bytes`]) is about what can be read, not about what is
+/// kept.
 #[tauri::command]
 pub fn choose_local_asset(
     window: WebviewWindow,
     state: tauri::State<'_, AppState>,
     kind: AssetKind,
+    persist: Option<bool>,
 ) -> Result<Option<AssetPayload>, String> {
+    let persist = persist.unwrap_or(true);
     let Some(source) = choose_image_file(&window)? else {
         return Ok(None);
     };
-    let metadata =
-        fs::metadata(&source).map_err(|_| "selected image is unavailable".to_string())?;
-    if metadata.len() > kind.max_bytes() {
-        return Err("selected image is too large".into());
+    let metadata = fs::metadata(&source).map_err(|_| ERROR_IMAGE_UNREADABLE.to_string())?;
+    let cap = if persist {
+        kind.max_bytes()
+    } else {
+        kind.max_source_bytes()
+    };
+    if metadata.len() > cap {
+        return Err(ERROR_IMAGE_TOO_LARGE.into());
     }
-    let bytes = fs::read(&source).map_err(|_| "selected image could not be read".to_string())?;
+    let bytes = fs::read(&source).map_err(|_| ERROR_IMAGE_UNREADABLE.to_string())?;
     let (extension, mime) = supported_image(&source, &bytes, false)?;
+    if !persist {
+        return Ok(Some(AssetPayload {
+            asset_id: None,
+            available: true,
+            data_url: Some(data_url(mime, &bytes)),
+        }));
+    }
     let assets = managed_assets_dir(&state)?;
     fs::create_dir_all(&assets).map_err(|error| error.to_string())?;
     let asset_id = format!("{}{}.{}", kind.prefix(), Uuid::new_v4(), extension);
     let destination = assets.join(&asset_id);
     fs::write(&destination, &bytes).map_err(|error| error.to_string())?;
     Ok(Some(payload(asset_id, mime, bytes)))
+}
+
+/// Stores a normalized image the frontend produced.
+///
+/// The avatar flow is: pick (validate, hand over, store nothing) → normalize in
+/// the WebView (decode, EXIF orientation, centre crop, scale to
+/// [`AVATAR_EDGE_PX`], re-encode as PNG so alpha survives) → this command. It is
+/// deliberately the only way a normalized image reaches the profile, so the file
+/// that ends up beside the database is small and the format is one the app itself
+/// chose.
+///
+/// The payload must be a `data:` URL whose declared media type matches the file's
+/// own signature, and the result is bounded by [`AssetKind::max_bytes`]. Nothing
+/// here trusts the caller's declared type: a mismatch is a rejection, not a
+/// stored file with a lying extension.
+#[tauri::command]
+pub fn store_managed_asset(
+    state: tauri::State<'_, AppState>,
+    kind: AssetKind,
+    data_url: String,
+) -> Result<AssetPayload, String> {
+    let (bytes, declared_mime) = decode_image_data_url(&data_url)?;
+    if bytes.len() as u64 > kind.max_bytes() {
+        return Err(ERROR_IMAGE_TOO_LARGE.into());
+    }
+    let (extension, mime) = image_signature(&bytes, false)?;
+    if mime != declared_mime {
+        return Err(format!("{ERROR_IMAGE_UNSUPPORTED}: payload declares {declared_mime} but contains {mime}").into());
+    }
+    let assets = managed_assets_dir(&state)?;
+    fs::create_dir_all(&assets).map_err(|error| error.to_string())?;
+    let asset_id = format!("{}{}.{}", kind.prefix(), Uuid::new_v4(), extension);
+    fs::write(assets.join(&asset_id), &bytes).map_err(|error| error.to_string())?;
+    Ok(payload(asset_id, mime, bytes))
+}
+
+/// Splits and decodes a base64 `data:image/...` URL.
+///
+/// Strict on purpose: the three media types the product itself produces are the
+/// only ones accepted, and the `;base64` marker is required. Anything else is a
+/// programming error or a hostile payload, not a user's image.
+fn decode_image_data_url(value: &str) -> Result<(Vec<u8>, &'static str), String> {
+    let (header, encoded) = value
+        .split_once(',')
+        .ok_or_else(|| ERROR_IMAGE_UNREADABLE.to_string())?;
+    let mime = match header {
+        "data:image/png;base64" => "image/png",
+        "data:image/jpeg;base64" => "image/jpeg",
+        "data:image/webp;base64" => "image/webp",
+        _ => return Err(ERROR_IMAGE_UNSUPPORTED.into()),
+    };
+    let bytes = base64_decode(encoded).ok_or_else(|| ERROR_IMAGE_UNREADABLE.to_string())?;
+    if bytes.is_empty() {
+        return Err(ERROR_IMAGE_UNREADABLE.into());
+    }
+    Ok((bytes, mime))
+}
+
+/// Decodes standard base64, returning `None` for anything malformed.
+///
+/// Rejects non-alphabet characters, wrong padding, and truncated group lengths, so
+/// a corrupt payload can never be written as a file that merely looks like an
+/// image to the extension check.
+fn base64_decode(value: &str) -> Option<Vec<u8>> {
+    let mut output = Vec::with_capacity(value.len() / 4 * 3);
+    let mut accumulator: u32 = 0;
+    let mut bits = 0_u32;
+    let mut padding = 0_usize;
+    for byte in value.bytes() {
+        if byte == b'=' {
+            padding += 1;
+            continue;
+        }
+        if padding > 0 {
+            return None;
+        }
+        let digit = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            // Whitespace inside a data URL is not part of the encoding.
+            b'\r' | b'\n' => continue,
+            _ => return None,
+        } as u32;
+        accumulator = (accumulator << 6) | digit;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            output.push(((accumulator >> bits) & 0xff) as u8);
+        }
+    }
+    // The remaining bits must be the zero padding of a complete group.
+    if bits >= 6 || padding > 2 {
+        return None;
+    }
+    if accumulator & ((1 << bits) - 1) != 0 {
+        return None;
+    }
+    if (output.len() + padding) % 3 != 0 {
+        return None;
+    }
+    Some(output)
 }
 
 #[tauri::command]
@@ -521,6 +691,25 @@ pub fn normalize_avatar_asset_id(value: &mut Option<String>) {
         .filter(|asset_id| is_managed_asset_id(asset_id, AssetKind::Avatar));
 }
 
+/// Identifies an image from its own bytes, ignoring any file name.
+///
+/// The signature is the authority for what the bytes are; [`supported_image`]
+/// additionally requires the file extension to agree with it, which only makes
+/// sense for a file the user picked, not for a payload the app itself produced.
+fn image_signature(bytes: &[u8], allow_bmp: bool) -> Result<(&'static str, &'static str), String> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        Ok(("png", "image/png"))
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Ok(("jpg", "image/jpeg"))
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Ok(("webp", "image/webp"))
+    } else if allow_bmp && bytes.starts_with(b"BM") {
+        Ok(("bmp", "image/bmp"))
+    } else {
+        Err(ERROR_IMAGE_UNSUPPORTED.into())
+    }
+}
+
 fn supported_image(
     path: &std::path::Path,
     bytes: &[u8],
@@ -531,24 +720,11 @@ fn supported_image(
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let signature = if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
-        Some(("png", "image/png"))
-    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
-        Some(("jpg", "image/jpeg"))
-    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some(("webp", "image/webp"))
-    } else if allow_bmp && bytes.starts_with(b"BM") {
-        Some(("bmp", "image/bmp"))
-    } else {
-        None
-    };
-    let Some((normalized_extension, mime)) = signature else {
-        return Err("unsupported or corrupted image".into());
-    };
+    let (normalized_extension, mime) = image_signature(bytes, allow_bmp)?;
     let extension_allowed = matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp")
         || (allow_bmp && extension == "bmp");
     if !extension_allowed {
-        return Err("unsupported image extension".into());
+        return Err(format!("{ERROR_IMAGE_UNSUPPORTED} extension").into());
     }
     Ok((normalized_extension, mime))
 }
@@ -985,6 +1161,176 @@ mod tests {
             Ok(("png", "image/png"))
         );
         assert_eq!(base64(b"Alan"), "QWxhbg==");
+    }
+
+    /// The avatar source cap exists so a multi-megabyte photo can be read and
+    /// normalized; the *stored* avatar stays under the small artifact bound.
+    #[test]
+    fn avatar_source_cap_covers_photos_the_stored_artifact_must_not() {
+        assert!(
+            AssetKind::Avatar.max_source_bytes() > AssetKind::Avatar.max_bytes(),
+            "the picker must be able to read a photo it will not keep"
+        );
+        assert_eq!(AssetKind::Avatar.max_source_bytes(), 24 * 1024 * 1024);
+        assert_eq!(AssetKind::Avatar.max_bytes(), 8 * 1024 * 1024);
+        // Backgrounds keep one cap: they are stored at full resolution.
+        assert_eq!(
+            AssetKind::Background.max_source_bytes(),
+            AssetKind::Background.max_bytes()
+        );
+        // The frontend resizes to this edge; the two must not drift apart.
+        assert_eq!(AVATAR_EDGE_PX, 256);
+    }
+
+    /// Base64 decoding is strict: the normalizer's output must round-trip, and a
+    /// malformed payload must never be written as a file.
+    #[test]
+    fn base64_decoding_round_trips_and_rejects_malformed_input() {
+        for payload in [
+            &b""[..],
+            &b"a"[..],
+            &b"ab"[..],
+            &b"abc"[..],
+            &b"Alan Floyd"[..],
+            &[0x89, b'P', b'N', b'G', 0xff, 0x00, 0x7f][..],
+        ] {
+            let encoded = base64(payload);
+            assert_eq!(
+                base64_decode(&encoded).as_deref(),
+                Some(payload),
+                "round trip failed for {encoded}"
+            );
+        }
+        // Whitespace inside the payload is tolerated, everything else is not.
+        assert_eq!(base64_decode("QWxh\nbg==").as_deref(), Some(&b"Alan"[..]));
+        assert_eq!(base64_decode("QWxh bg=="), None);
+        assert_eq!(base64_decode("****"), None);
+        assert_eq!(base64_decode("QQ="), None, "a short final group is malformed");
+        assert_eq!(base64_decode("Q==="), None);
+        assert_eq!(base64_decode("="), None);
+        assert_eq!(base64_decode("QQ==QQ=="), None, "padding must come last");
+    }
+
+    /// The store path accepts exactly the three media types the product produces,
+    /// and the declared type must match the bytes.
+    #[test]
+    fn data_url_decoding_is_strict_about_type_and_content() {
+        let png = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3];
+        let encoded = base64(&png);
+        let (bytes, mime) =
+            decode_image_data_url(&format!("data:image/png;base64,{encoded}")).expect("png");
+        assert_eq!(bytes, png);
+        assert_eq!(mime, "image/png");
+
+        for header in ["data:image/jpeg;base64", "data:image/webp;base64"] {
+            assert_eq!(
+                decode_image_data_url(&format!("{header},{encoded}")).expect("accepted").1,
+                header.trim_start_matches("data:").trim_end_matches(";base64"),
+                "{header} must be accepted"
+            );
+        }
+        for rejected in [
+            "",
+            "data:image/gif;base64,R0lGOD",
+            "data:image/png,R0lGOD",
+            "data:text/plain;base64,QQ==",
+            "data:image/png;base64,****",
+            "data:image/png;base64,",
+        ] {
+            assert!(
+                decode_image_data_url(rejected).is_err(),
+                "{rejected} must be rejected"
+            );
+        }
+
+        // A payload whose bytes are not an image is refused before anything is
+        // written, and by signature rather than by the declared type.
+        let gif = b"GIF89a....";
+        assert_eq!(
+            image_signature(gif, false).unwrap_err(),
+            ERROR_IMAGE_UNSUPPORTED
+        );
+    }
+
+    /// The rejection vocabulary is the contract the frontend maps to localized
+    /// copy, so the phrases themselves are pinned here: renaming one without
+    /// updating `src/components/SettingsPanel.vue` breaks this test instead of
+    /// silently showing a generic message.
+    #[test]
+    fn rejection_messages_stay_renderable_by_the_frontend() {
+        assert_eq!(ERROR_IMAGE_TOO_LARGE, "selected image is too large");
+        assert_eq!(ERROR_IMAGE_UNSUPPORTED, "unsupported image");
+        assert_eq!(ERROR_IMAGE_UNREADABLE, "selected image could not be read");
+
+        let panel = include_str!("../../src/components/SettingsPanel.vue");
+        for (constant, message, phrase) in [
+            ("ERROR_IMAGE_TOO_LARGE", ERROR_IMAGE_TOO_LARGE, "too large"),
+            ("ERROR_IMAGE_UNSUPPORTED", ERROR_IMAGE_UNSUPPORTED, "unsupported"),
+            ("ERROR_IMAGE_UNREADABLE", ERROR_IMAGE_UNREADABLE, "could not be read"),
+        ] {
+            assert!(
+                message.contains(phrase),
+                "{constant} must contain the phrase the UI matches on"
+            );
+            assert!(
+                panel.contains(&format!("\"{phrase}\"")),
+                "SettingsPanel.vue no longer maps {constant} ({phrase})"
+            );
+        }
+    }
+
+    /// The avatar flow must normalize before storing, store through the dedicated
+    /// command, and report failures inside the row that produced them.
+    ///
+    /// These are source pins for the frontend half of the pipeline, in the same
+    /// style as the footer tests in `settings.rs`: the backend contract above and
+    /// the UI that consumes it have to move together.
+    #[test]
+    fn avatar_flow_normalizes_then_stores_and_reports_inline() {
+        let panel = include_str!("../../src/components/SettingsPanel.vue");
+        let appearance = include_str!("../../src/appearance.ts");
+
+        // The picker is asked not to persist the original file.
+        assert!(
+            panel.contains("choose_local_asset\", { kind, persist: false }"),
+            "the avatar picker must not store the original file"
+        );
+        // The normalized image is what gets stored.
+        assert!(panel.contains("normalizeAvatarImage("));
+        assert!(panel.contains("store_managed_asset"));
+        // Normalization is a square centre crop at the documented edge, encoded as
+        // PNG so alpha survives.
+        assert!(appearance.contains("export const AVATAR_EDGE_PX = 256"));
+        assert!(appearance.contains("imageOrientation: \"from-image\""));
+        assert!(appearance.contains("toDataURL(\"image/png\")"));
+        // Errors render next to the control that produced them, not at the panel
+        // bottom where the user cannot see them.
+        assert!(
+            panel.contains("assetError?.kind === 'avatar'"),
+            "the avatar row must render its own error"
+        );
+        assert!(
+            panel.contains("assetError?.kind === 'background'"),
+            "the background row must render its own error"
+        );
+        assert!(
+            !panel.contains("v-if=\"assetMessage\""),
+            "the panel-bottom error message must be gone"
+        );
+
+        // Both languages have the copy for every rejection reason.
+        let catalog = include_str!("../../src/i18n/catalog.ts");
+        for key in [
+            "settings.error.imageUnsupported",
+            "settings.error.imageTooLarge",
+            "settings.error.imageUnreadable",
+        ] {
+            assert_eq!(
+                catalog.matches(&format!("\"{key}\":")).count(),
+                2,
+                "{key} must exist in English and Simplified Chinese"
+            );
+        }
     }
 
     #[test]

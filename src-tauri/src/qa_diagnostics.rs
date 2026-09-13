@@ -45,6 +45,7 @@ impl QaDiagnostics {
         if let Some(path) = &log_path {
             let _ = File::create(path);
         }
+        install_panic_logging(log_path.clone());
         let diagnostics = Self {
             native_material_off,
             native_material_late,
@@ -139,6 +140,39 @@ impl QaDiagnostics {
             "frontend_ready=true timestamp_ms={}",
             timestamp_ms()
         ));
+    }
+}
+
+/// Mirrors panic reports into the QA log beside the executable.
+///
+/// A release build is a GUI-subsystem process (see `main.rs`), so it owns no
+/// console and the default panic hook's stderr write reaches nobody: a crash in
+/// the shipped binary would be silent for the user *and* for a bug report. The
+/// hook appends to the same log file the QA records already use, then delegates
+/// to the previous hook, so nothing about panic behavior changes — the process
+/// still aborts exactly as before, and debug builds keep their console output.
+///
+/// This is deliberately the *only* diagnostic that had to be re-homed: every
+/// structured record is written by [`QaDiagnostics::record`], which has always
+/// targeted the file rather than the console.
+fn install_panic_logging(log_path: Option<PathBuf>) {
+    let Some(path) = log_path else {
+        return;
+    };
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        append_panic_record(&path, &sanitize_error(&info.to_string()));
+        previous(info);
+    }));
+}
+
+/// Appends one panic record, tolerating an unreadable or read-only log location.
+///
+/// A panic handler must never panic: a failed write is dropped, and the record
+/// stays single-line so it cannot be mistaken for an unbounded log injection.
+pub fn append_panic_record(path: &std::path::Path, message: &str) {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "panic={message}");
     }
 }
 
@@ -382,15 +416,20 @@ pub fn serves_embedded_frontend() -> bool {
 /// `--release`. Such a binary renders nothing whenever the dev server is absent,
 /// which is exactly how a release artifact silently shipped broken once. The
 /// condition is detected here so it is loud instead.
-pub fn warn_if_release_without_embedded_frontend() {
+///
+/// It goes through [`QaDiagnostics::record`] rather than a bare `eprintln!`: a
+/// release build is a GUI-subsystem process with no console (see `main.rs`), so
+/// stderr alone would make this warning invisible in exactly the build it exists
+/// to protect.
+pub fn warn_if_release_without_embedded_frontend(diagnostics: &QaDiagnostics) {
     if cfg!(debug_assertions) || serves_embedded_frontend() {
         return;
     }
-    eprintln!(
-        "[frontend] WARNING release_profile_without_custom_protocol feature=true \
+    diagnostics.record(
+        "[frontend] WARNING release_profile_without_custom_protocol=true \
          frontend_asset_mode=dev-server \
          this binary will navigate to build.devUrl and render nothing without a dev server; \
-         build with: cargo build --release --features custom-protocol"
+         build with: cargo build --release --features custom-protocol",
     );
 }
 
@@ -518,4 +557,45 @@ fn format_optional_hwnd(hwnd: Option<windows::Win32::Foundation::HWND>) -> Strin
         || "none".into(),
         |value| format!("0x{:X}", value.0 as usize),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_panic_record;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_log(name: &str) -> std::path::PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "alan-desktop-{name}-{}-{suffix}.log",
+            std::process::id()
+        ))
+    }
+
+    /// Release builds have no console, so a panic has to reach the log file or it
+    /// reaches nobody. Records append (a crash after other records must not
+    /// truncate them) and stay single-line.
+    #[test]
+    fn panic_records_append_to_the_qa_log() {
+        let path = temp_log("qa-panic");
+        append_panic_record(&path, "first");
+        append_panic_record(&path, "second\nline");
+        let content = std::fs::read_to_string(&path).expect("log file");
+        assert_eq!(content, "panic=first\npanic=second\nline\n");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The handler must survive an unusable log location and must not create
+    /// directories on its own: a panic while reporting a panic is unacceptable.
+    #[test]
+    fn panic_records_tolerate_an_unwritable_location() {
+        let directory = temp_log("qa-panic-dir");
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        append_panic_record(&directory, "a directory is not a log file");
+        append_panic_record(&directory.join("missing").join("nested.log"), "no parent");
+        std::fs::remove_dir_all(&directory).expect("cleanup");
+    }
 }

@@ -73,7 +73,7 @@ fn install_widget_frame(window: &tauri::WebviewWindow) -> Result<(), std::io::Er
 pub fn run() {
     let qa_diagnostics = qa_diagnostics::QaDiagnostics::from_process_args();
     qa_diagnostics.apply_webview_hosting_environment();
-    qa_diagnostics::warn_if_release_without_embedded_frontend();
+    qa_diagnostics::warn_if_release_without_embedded_frontend(&qa_diagnostics);
 
     // --- Rendering backend selection ---------------------------------------
     // The hosting backend is fixed when the WebView is created, so it must be
@@ -147,16 +147,21 @@ pub fn run() {
         })
         .setup(|app| {
             let resolved_data_dir = app.path().app_data_dir()?;
+            let diagnostics = app.state::<qa_diagnostics::QaDiagnostics>();
             // The rendering backend was read before the WebView existed, using a
             // path derived without an AppHandle. Assert the two agree; if they
             // ever diverge the early read would silently target the wrong file.
+            //
+            // Reported through the diagnostics log rather than stderr: this path
+            // only matters in an optimized build, which is a GUI-subsystem process
+            // with no console to print to.
             if let Some(early_dir) = app_data_dir() {
                 if early_dir != resolved_data_dir {
-                    eprintln!(
+                    diagnostics.record(format!(
                         "[rendering] app_data_dir_mismatch early={} tauri={} — rendering backend was read from the wrong location",
                         early_dir.display(),
                         resolved_data_dir.display()
-                    );
+                    ));
                 }
             }
             let database = database::Database::open(resolved_data_dir.join("alan-desktop.sqlite3"))
@@ -175,7 +180,6 @@ pub fn run() {
             // enforced at the window procedure instead of set once.
             #[cfg(target_os = "windows")]
             install_widget_frame(&window)?;
-            let diagnostics = app.state::<qa_diagnostics::QaDiagnostics>();
             if diagnostics.window_to_visual_requested() {
                 product_window::restore_window_to_visual_qa(
                     &window,
@@ -206,6 +210,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             appearance::resolve_appearance_contrast,
             appearance::choose_local_asset,
+            appearance::store_managed_asset,
             appearance::load_managed_asset,
             appearance::load_windows_wallpaper,
             appearance::discard_managed_asset,

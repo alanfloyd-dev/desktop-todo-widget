@@ -725,6 +725,62 @@ button.profile-identity {
   outline: none;
 }
 
+/*
+ * The visible Settings gear in the expanded footer.
+ *
+ * One control, defined once, in every expanded presentation: Floating expanded,
+ * Sidebar, and Desktop all render the same footer, and the collapsed Orb renders
+ * `FloatingOrb` instead of the product content, so there is no mode list here to
+ * keep in sync.
+ *
+ * It is deliberately quieter than the profile identity it shares the row with:
+ * low-contrast at rest, brightening with a faint tinted fill and border only on
+ * hover or keyboard focus. The 30 px box gives a comfortable hit area while the
+ * 15 px stroke glyph stays visually light, and `flex: none` keeps the identity's
+ * shrinking text from squeezing it.
+ *
+ * `.signature button` (the shared footer button rule) is less specific than
+ * `.signature .footer-settings-button`, so this block owns the gear's padding,
+ * border, and resting colour without editing the collapse affordance's rules.
+ */
+.signature .footer-settings-button {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  flex: none;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: var(--faint);
+  background: transparent;
+  cursor: pointer;
+}
+
+/*
+ * Right-aligns the gear when it is the footer's only content — Sidebar or
+ * Desktop with no profile identity. In every other case `justify-content:
+ * space-between` already puts it on the right, and an unconditional auto margin
+ * would instead split the footer's free space with the Floating standalone
+ * collapse control, dragging that control towards the middle.
+ */
+.signature .footer-settings-button:only-child {
+  margin-left: auto;
+}
+
+.footer-settings-icon {
+  width: 15px;
+  height: 15px;
+}
+
+.signature .footer-settings-button:hover,
+.signature .footer-settings-button:focus-visible {
+  border-color: var(--line-strong);
+  color: var(--mineral);
+  background: rgba(129, 185, 223, 0.1);
+  outline: none;
+}
+
 .mode-sidebar .product-content {
   padding: 30px 24px 24px;
 }
@@ -1465,6 +1521,22 @@ button.profile-identity {
   align-items: flex-end;
   flex-direction: column;
   gap: 6px;
+}
+
+/*
+ * An image-pick failure, rendered inside the row that produced it.
+ *
+ * `flex-basis: 100%` makes it take its own line inside the row's action area
+ * instead of squeezing the buttons, and the wrapping keeps a long sentence
+ * readable at the sidebar's width. The colour matches the other inline
+ * validation messages; the message is intentionally not a floating notification.
+ */
+.asset-error {
+  max-width: 100%;
+  flex-basis: 100%;
+  margin-top: 2px;
+  text-align: left;
+  overflow-wrap: anywhere;
 }
 
 .asset-unavailable {

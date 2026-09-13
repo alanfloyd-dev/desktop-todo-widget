@@ -35,13 +35,17 @@
 
 ## 下载
 
-当前 Windows x64 版本可从 [GitHub Releases](https://github.com/alanfloyd-dev/desktop-todo-widget/releases) 下载。
+正式版本发布在 [GitHub Releases](https://github.com/alanfloyd-dev/desktop-todo-widget/releases)。
 
-下载 `desktop-todo-widget-v1.0.0-windows-x64.zip`，解压后运行：
+**已发布：v1.0.0** —— `desktop-todo-widget-v1.0.0-windows-x64.zip`。解压后运行：
 
 `desktop-todo-widget.exe`
 
-v1.0.0 当前以便携 ZIP 形式发布，暂未提供安装程序。
+**本仓库中已准备：v1.0.1** —— 同样是便携 ZIP，文件名为 `desktop-todo-widget-v1.0.1-windows-x64.zip`，并在可执行文件旁新增了 `install.ps1` 与 `uninstall.ps1`（见[安装](#安装)）。它**尚未发布**：在该 Release 创建之前，只有本源码仓库能够构建或运行 v1.0.1。
+
+两者都保持便携：解压 ZIP 后直接运行可执行文件就是完整的安装过程，按用户安装脚本只是在此之上提供的可选便利。
+
+面向用户的本次发布说明见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
 ### Windows 兼容性
 
@@ -49,11 +53,50 @@ v1.0.0 当前以便携 ZIP 形式发布，暂未提供安装程序。
 - 根据底层平台要求，Windows 10 1809+ 预计可以运行，但目前尚未完成完整验证。
 - 需要 WebView2 Runtime。
 
+## 安装
+
+`install.ps1` 与 `uninstall.ps1` 随发布 payload 一起放置在可执行文件旁（v1.0.1 及以后），用于安装或卸载一份属于当前用户的副本。它们是普通的 PowerShell 脚本（Windows PowerShell 5.1 或更高版本），不需要管理员权限。
+
+```powershell
+# 在解压出的发布文件目录中执行，install.ps1 与可执行文件位于同一目录
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+`-ExecutionPolicy Bypass` 只对该次调用生效，没有理由为了运行这些脚本而修改计算机或用户的全局执行策略。
+
+`install.ps1` 会：
+
+- 把可执行文件及其随附的 Windows App SDK 运行时 payload 复制到 `%LOCALAPPDATA%\Programs\desktop-todo-widget\`；
+- 无论构建产物内部的名称是什么，都安装为 `desktop-todo-widget.exe`；
+- 创建一份当前用户的开始菜单快捷方式，除非传入 `-NoStartMenuShortcut`；
+- 支持重复执行即原地升级：先停止从该目录启动的正在运行的实例，再替换程序文件，并清理新版本不再随附的 payload 文件。
+
+它有意不做的事：不写入 Program Files 或任何全机范围的位置，不修改注册表或 `PATH`，也不删除用户数据。指定的 payload 目录必须同时包含可执行文件与随附的运行时文件；payload 不完整时安装会直接失败，而不是装出一份残缺的程序。
+
+用户数据继续保存在 `%APPDATA%\net.alanfloyd.desktop\`（数据库、设置、外观配置、托管图片、天气缓存），安装与卸载都不会影响它。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1                  # 保留你的数据
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -RemoveUserData  # 先警告，再一并删除数据
+```
+
+`uninstall.ps1` 会在需要时停止正在运行的实例，删除开始菜单快捷方式和程序文件，并在未传入 `-RemoveUserData` 时保留 `%APPDATA%\net.alanfloyd.desktop\`。该参数会在删除前打印确切路径并要求确认；`-Force` 用于脚本化场景跳过确认，而在无法进行交互提示的宿主中会保留数据。删除范围是严格受限的：每个文件都必须位于解析出的安装目录内，并且必须是程序文件（可执行文件、运行时 payload、文档、payload 清单，或应用自身的日志文件）；一旦出现意外内容 —— 陌生的文件或子目录 —— 卸载会停止，而不是把它删掉。
+
+两个脚本都由一个模拟验证脚本在一次性沙箱中运行验证：使用伪造的 `%LOCALAPPDATA%`、`%APPDATA%`、payload 和用户数据目录，覆盖全新安装、覆盖升级、两种卸载方式，以及各项拒绝路径。
+
+```powershell
+pwsh -File scripts/verify-install-scripts.ps1
+```
+
+便携 ZIP 仍然是主要分发方式；解压即运行的流程没有任何变化。
+
 ## Features
 
 **待办生命周期** — 添加、编辑、完成、重新打开、取消、顺延、删除和重新排序。顺延会保留历史：原始记录的 status 被标记为 `carried`，并在同一个 SQLite 事务中为下一个任务日创建一条带关联的后续任务。
 
 **窗口模式** — Sidebar、Floating 和 Desktop 共用同一个窗口和同一个 WebView；Floating 可以折叠为 56 DIP 的头像 Orb。参见[窗口模式](#窗口模式)。
+
+**可见的设置入口** — 展开状态的页脚会在个人资料身份旁边显示一个设置齿轮，分别出现在 Floating 展开、Sidebar 和 Desktop 中（Orb 中不会出现）。它与右键菜单和托盘中的入口打开同一个设置界面，因此无需知道上下文菜单也能发现设置。
 
 **外观配置** — 每种窗口模式各自保持一份外观配置：玻璃、纯色、两段渐变、本地托管图片，或当前 Windows 壁纸，以及色调、不透明度、模糊、遮罩、图片适配方式与位置，还有一个可选的自定义文字颜色。
 
@@ -71,9 +114,13 @@ v1.0.0 当前以便携 ZIP 形式发布，暂未提供安装程序。
 
 **Sidebar** — 面向屏幕边缘的窗口模式。占满显示器工作区高度，停靠在左边缘或右边缘，并记住停靠侧和宽度。把 Floating 拖到边缘附近即可进入 Sidebar。
 
-**Floating** — 可移动的无边框窗口，也是首次运行的默认模式。它可以折叠为 Orb 再展开，并且把展开后的尺寸和 Orb 锚点作为两个相互独立的值保存下来。Enhanced 渲染后端在该模式下支持原生 Acrylic。
+**Floating** — 可移动的无边框窗口，也是首次运行的默认模式。全新（从未使用过的）配置会以**展开**状态打开它，因此首次启动就能看到小组件本身 —— 日期行、任务、页脚和设置齿轮 —— 而不是屏幕角落里一个容易被忽略的 56 DIP Orb。它可以折叠为 Orb 再展开，并且把展开后的尺寸和 Orb 锚点作为两个相互独立的值保存下来。Enhanced 渲染后端在该模式下支持原生 Acrylic。
 
 **Desktop** — 由桌面宿主的无边框小组件。它会被重新挂载为 Windows 桌面宿主的子窗口，因此其周围的壁纸、桌面图标和原生桌面右键菜单仍然可用。解锁状态下可移动、可调整大小，几何信息独立于 Floating，且不提供始终置顶。
+
+### 首次运行
+
+首次运行是产品唯一一次自行决定展示状态的时机：当配置文档尚不存在时，新建的文档以 Floating 展开、默认尺寸、**渐变（Gradient）**材质和 Standard 渲染后端开始。渐变使用的就是项目既有的石墨色板（`#11191e` → `#213747`，135°）与既有不透明度；把它作为全新配置的默认材质，是因为 Standard 后端没有原生 Acrylic：在任意壁纸之上只做一层色调，会和组件自身的文字争夺可读性，而渐变让界面保持一个确定的形状，在暗色、浅色、高饱和和复杂纹理桌面上观感一致。已存在的配置永远不会被重新套用默认值 —— 它会原样加载，包括它的 Floating 展示状态与材质 —— 因此升级不会改变用户上次离开时的状态。可见的设置齿轮从第一帧展开界面起就存在。
 
 ### Desktop 模式下无法使用原生 Acrylic
 
@@ -103,6 +150,7 @@ WebView2 的宿主方式在设置中选择，重启后生效。它与窗口模�
 - 背景类型：玻璃、纯色、渐变、本地托管图片、当前 Windows 壁纸。
 - 文字对比度：自动、浅色、深色或自定义。自动模式会直接采样纯色和渐变端点，并对图片/壁纸数据按 32×32 采样一次。
 - 图片缺失、损坏或过大时会回退到安全的玻璃外观，而不是让整个界面出错。
+- 支持的图片文件为 PNG、JPEG 和 WebP。作为背景选择的图片按原始尺寸保存；而**个人资料头像**会先做归一化 —— 解码、按方向校正、居中裁剪为正方形、缩放到 256×256，并以保留透明通道的 PNG 保存 —— 因此多兆字节的照片不会进入配置。文件过大无法读取（超过 24 MB）或解码器无法处理时，会在打开选择器的按钮旁边给出提示并拒绝。
 
 参见 [docs/appearance.md](docs/appearance.md)。
 
@@ -125,12 +173,13 @@ Quick Links 是用户自行管理的“名称 / URL”组合，作为产品的�
 - **不会主动上传。** 任务、个人资料、外观和 Quick Link 数据不会被应用程序发送到任何地方。
 - **天气是唯一的远程调用。** Open-Meteo 会收到为解析你配置的地点所需的 geocoding 与预报请求。未配置地点时，不会发起任何天气请求。
 - **诊断信息需主动开启。** 设置 → 开发者 → 复制诊断信息会生成一份经过允许列表筛选、隐私最小化的报告，其中包含运行时/窗口元数据和非敏感的 appearance 状态。它不包含任务内容、个人资料值、天气地点、素材文件名/路径，以及确切的数据库路径。
+- **卸载会保留你的数据。** `uninstall.ps1` 只删除程序文件；只有在显式传入 `-RemoveUserData` 时，才会在打印警告并要求确认之后删除 `%APPDATA%\net.alanfloyd.desktop\`。
 
 ### Internal compatibility identifiers
 
 一些随产品发布的标识符有意保留 `alan-desktop` 这一发布前的拼写，因为改名会让已有的用户数据无法关联或破坏升级路径。它们是内部名称，不是产品名：
 
-- `alan-desktop` — Rust crate 名、私有的 `package.json` 名称，因此也是构建出的可执行文件 `alan-desktop.exe`。
+- `alan-desktop` — Rust crate 名、私有的 `package.json` 名称，因此也是构建出的可执行文件 `alan-desktop.exe`。`install.ps1` 会把它安装为 `desktop-todo-widget.exe`，这只是一个文件名：产品自身不读取自己的可执行文件名称。
 - `alan-desktop.sqlite3` — 本地数据库文件，位于应用数据目录 `net.alanfloyd.desktop` 下。
 - `alan-desktop-tray` — 托盘图标 id。
 
@@ -190,7 +239,27 @@ powershell -ExecutionPolicy Bypass -File tools/windows-app-sdk/prepare-runtime-p
 
 该 payload 不会被提交到仓库；其来源与版本策略的权威说明见 [docs/windows-app-sdk-runtime.md](docs/windows-app-sdk-runtime.md)。
 
-`pnpm tauri:dev` 会为前端开发启动 Vite 开发服务器。生产构建会把编译好的前端嵌入其中，并通过 Tauri 自定义协议（`custom-protocol` 特性）提供，因此发布构建从不依赖开发服务器。v1 没有安装程序或更新程序流水线：`pnpm tauri build --no-bundle` 产出可执行文件及其运行时 payload，且 `bundle.active` 为 `false`。
+### 验证
+
+有四个脚本覆盖单元测试无法触达的部分。它们都会先停止正在运行的实例，并且在没有经过校验的副本之前，绝不会改动任何配置目录：
+
+```powershell
+pwsh -File scripts/verify-no-console-window.ps1   # 发布版无控制台窗口；调试版仍有
+pwsh -File scripts/verify-first-use-ux.ps1        # 全新配置的首次运行、材质、设置齿轮、重启、退出
+pwsh -File scripts/verify-avatar-flow.ps1         # 头像选择矩阵、归一化、持久化与错误反馈
+pwsh -File scripts/verify-install-scripts.ps1     # 在一次性沙箱中验证安装 / 升级 / 卸载
+```
+
+- `verify-no-console-window.ps1` 检查两种构建的 PE subsystem，并以 `explorer.exe` 执行一次真实的外壳启动（即双击路径），同时把调试构建作为阳性对照，因此通过即说明检测器本身能识别控制台窗口。
+- `verify-first-use-ux.ps1` 通过 WebView2 DevTools 端点驱动构建好的应用。产品通过 Windows 已知文件夹解析数据目录，因此无法用环境变量把“全新配置”隔离出来：该包装脚本会先把真实的 `%APPDATA%\net.alanfloyd.desktop` 复制到一旁，在删除任何东西之前按大小与 SHA-256 校验副本，结束后再恢复并重新校验。
+- `verify-avatar-flow.ps1` 采用同样的方式，并通过 `scripts/avatar-picker-drive.ps1`（UI Automation）驱动真实的原生文件选择对话框，配合生成的合成图片，逐张检查实际保存、渲染和报错的结果。
+- `verify-install-scripts.ps1` 使用伪造的 `%LOCALAPPDATA%`、`%APPDATA%`、payload 和用户数据目录运行 `install.ps1` 与 `uninstall.ps1`，其中包括各项拒绝路径。
+
+`pnpm tauri:dev` 会为前端开发启动 Vite 开发服务器。生产构建会把编译好的前端嵌入其中，并通过 Tauri 自定义协议（`custom-protocol` 特性）提供，因此发布构建从不依赖开发服务器。
+
+发布构建会以 Windows GUI 子系统链接（`src-tauri/src/main.rs` 中的 `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`），因此双击构建出的可执行文件不会再弹出控制台窗口。调试构建仍保留控制台，开发期间的 `eprintln!` 诊断信息依旧可见。在任何构建配置下，应用都会把诊断信息写入可执行文件旁边的 `phase7b-qa-*.log`，panic 报告也会追加到同一个文件，因此即使没有控制台，发布版本的崩溃依然会被记录。
+
+`pnpm tauri build --no-bundle` 产出可执行文件及其运行时 payload，且 `bundle.active` 为 `false`：Tauri 打包器处于关闭状态，安装方式为[安装](#安装)中描述的按用户脚本，而不是生成的 MSI/EXE 安装包。
 
 ## Known limitations
 
@@ -198,7 +267,7 @@ powershell -ExecutionPolicy Bypass -File tools/windows-app-sdk/prepare-runtime-p
 - **Enhanced 的辅助功能** — 合成托管意味着 Enhanced 后端在常规 Windows UI Automation 行为上比 Standard 更受限。如果你依赖屏幕阅读器或自动化工具，请使用 Standard。
 - **Windows 特定实现** — Enhanced 依赖 Windows/WebView2/Tauri 的特定行为，随着这些平台演进可能需要进行兼容性更新。
 - **Desktop 宿主未公开文档化** — `Progman`、`WorkerW` 和 `SHELLDLL_DefView` 的拓扑结构可能随 Windows 更新和 Explorer 重启而变化。
-- **范围** — 已验证 Windows 11，没有安装程序/更新程序，没有同步，也没有英文和简体中文之外的其他本地化。
+- **范围** — 已验证 Windows 11，没有更新程序，也没有打包的 MSI/EXE 安装包（安装方式为[安装](#安装)中的按用户脚本），没有同步，也没有英文和简体中文之外的其他本地化。
 
 ## Roadmap
 
@@ -208,9 +277,9 @@ powershell -ExecutionPolicy Bypass -File tools/windows-app-sdk/prepare-runtime-p
 - 报表：在现有任务历史之上提供更丰富的事实性回顾界面。
 - 组件化：让前端与 Rust 的边界更小、更清晰。
 - 设置组织：更审慎地对当前设置界面进行分组。
-- 安装程序与更新机制的改进。
+- 打包与更新机制：在现有的按用户安装/卸载脚本之上，补充签名、打包安装程序与更新机制。
 
-已推迟的工作记录在 [FUTURE.md](FUTURE.md) 中。本节内容目前都尚未实现。
+已推迟的工作记录在 [FUTURE.md](FUTURE.md) 中。除[安装](#安装)中描述的安装与卸载脚本外，本节内容目前都尚未实现。
 
 ## Contributing
 

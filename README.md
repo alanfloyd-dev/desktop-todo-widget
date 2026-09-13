@@ -35,13 +35,17 @@ It focuses on lightweight task management, tray-first interaction, customizable 
 
 ## Download
 
-The current Windows x64 release is available from [GitHub Releases](https://github.com/alanfloyd-dev/desktop-todo-widget/releases).
+Releases are published on [GitHub Releases](https://github.com/alanfloyd-dev/desktop-todo-widget/releases).
 
-Download `desktop-todo-widget-v1.0.0-windows-x64.zip`, extract it, and run:
+**Published: v1.0.0** — `desktop-todo-widget-v1.0.0-windows-x64.zip`. Extract it and run:
 
 `desktop-todo-widget.exe`
 
-The v1.0.0 release is currently distributed as a portable ZIP. No installer is included yet.
+**Prepared in this repository: v1.0.1** — the same portable ZIP, named `desktop-todo-widget-v1.0.1-windows-x64.zip`, with `install.ps1` and `uninstall.ps1` added beside the executable (see [Install](#install)). It is not published yet: until that release exists, this source tree is the only place to build or run v1.0.1.
+
+Both are portable and stay portable: extracting the ZIP and running the executable is the whole installation, and the per-user install script is an optional convenience on top of that.
+
+The user-facing summary of the prepared release is in [RELEASE_NOTES.md](RELEASE_NOTES.md).
 
 ### Windows compatibility
 
@@ -49,11 +53,50 @@ The v1.0.0 release is currently distributed as a portable ZIP. No installer is i
 - Windows 10 1809+ is expected to work based on the underlying platform requirements, but has not yet been fully validated.
 - WebView2 Runtime is required.
 
+## Install
+
+`install.ps1` and `uninstall.ps1` ship beside the executable in the release payload (v1.0.1 and later) and install or remove a per-user copy of the app. They are plain PowerShell scripts (Windows PowerShell 5.1 or later) and need no administrator rights.
+
+```powershell
+# from the extracted release payload, with install.ps1 beside the executable
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+`-ExecutionPolicy Bypass` applies to that one invocation only. There is no reason to change the machine or user execution policy to run these scripts.
+
+What `install.ps1` does:
+
+- copies the executable and its staged Windows App SDK runtime payload into `%LOCALAPPDATA%\Programs\desktop-todo-widget\`,
+- installs the executable as `desktop-todo-widget.exe` whatever the build output's internal name was,
+- creates a per-user Start Menu shortcut unless `-NoStartMenuShortcut` is given,
+- supports re-running as an in-place upgrade: it stops a running instance started from that directory, replaces program files, and prunes payload files the new build no longer ships.
+
+What it deliberately does not do: write to Program Files or any machine-wide location, touch the registry or `PATH`, or delete user data. The payload directory it is pointed at must contain the executable plus the runtime files that ship beside it; an incomplete payload fails the install instead of producing a broken one.
+
+User data stays in `%APPDATA%\net.alanfloyd.desktop\` — database, settings, appearance profiles, managed images, and the weather cache — and survives both install and uninstall.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1                  # keeps your data
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -RemoveUserData  # warns, then removes the data too
+```
+
+`uninstall.ps1` stops the app if it is running, removes the Start Menu shortcut and the program files, and keeps `%APPDATA%\net.alanfloyd.desktop\` unless `-RemoveUserData` is passed. That flag prints the exact paths before deleting and asks for confirmation; `-Force` skips the prompt for scripted use, and a host that cannot prompt keeps the data. Deletion is bounded: every file must be inside the resolved install directory and must look like a program file (executable, runtime payload, documentation, payload manifest, or the app's own log), and anything unexpected — a foreign file or a subdirectory — stops the uninstall instead of being deleted.
+
+Both scripts are verified by a simulation harness that runs them against a throwaway sandbox with a fake `%LOCALAPPDATA%`, `%APPDATA%`, payload, and user-data directory: clean install, overwrite upgrade, both uninstall modes, and the refusal paths.
+
+```powershell
+pwsh -File scripts/verify-install-scripts.ps1
+```
+
+The portable ZIP remains the primary distribution; nothing about extracting and running the executable changed.
+
 ## Features
 
 **Todo lifecycle** — add, edit, complete, reopen, cancel, carry, delete, and reorder. Carry is history-preserving: the original row is marked `carried` and a linked successor is created for the next task day in one SQLite transaction.
 
 **Window modes** — Sidebar, Floating, and Desktop share one window and one WebView; Floating collapses to a 56 DIP avatar Orb. See [Window modes](#window-modes).
+
+**Visible Settings entry** — the expanded footer carries a Settings gear next to the profile identity in Floating expanded, Sidebar, and Desktop (never in the Orb). It opens the same Settings surface as the right-click menu entry and the tray, so Settings is discoverable without knowing about the context menu.
 
 **Appearance profiles** — each window mode keeps its own profile: Glass, Solid, two-stop Gradient, a managed local image, or the current Windows wallpaper, plus tint, opacity, blur, overlay, image fit/position, and an optional custom text colour.
 
@@ -71,9 +114,13 @@ The v1.0.0 release is currently distributed as a portable ZIP. No installer is i
 
 **Sidebar** — edge-oriented widget mode. Occupies the monitor work-area height, docks to the left or right edge, and remembers side and width. Dragging Floating near an edge enters Sidebar.
 
-**Floating** — a movable, frameless window and the first-run default. It can collapse to the Orb and expand again, and it keeps its expanded size and Orb anchor as independent saved values. The Enhanced rendering backend supports native Acrylic in this mode.
+**Floating** — a movable, frameless window and the first-run default. A profile that has never been used opens it **expanded**, so a first run shows the widget itself — date line, tasks, footer, and the Settings gear — instead of a 56 DIP Orb that is easy to miss in a screen corner. It can collapse to the Orb and expand again, and it keeps its expanded size and Orb anchor as independent saved values. The Enhanced rendering backend supports native Acrylic in this mode.
 
 **Desktop** — a desktop-hosted frameless widget. It is reparented as a child of the Windows desktop host, so the wallpaper, desktop icons, and the native desktop context menu stay usable around it. It is movable and resizable when unlocked, with geometry independent from Floating, and always-on-top is unavailable.
+
+### First run
+
+The first run is the only time the product chooses a presentation: a profile with no stored settings document yet is created with Floating expanded, the documented default size, and the **Gradient** material on the Standard rendering backend. Gradient is the documented graphite palette (`#11191e` → `#213747` at 135°) at the documented opacity, and it is the fresh default because the Standard backend has no native Acrylic: a tint over an arbitrary wallpaper competes with the widget's own text, while the Gradient keeps a defined surface that reads the same over dark, light, saturated, and textured desktops. An existing profile is never re-defaulted — it is loaded exactly as stored, including its Floating presentation and its material — so upgrading cannot change the state a user left the widget in. The visible Settings gear is present from that first expanded frame.
 
 ### Native Acrylic is unavailable in Desktop mode
 
@@ -103,6 +150,7 @@ Appearance is per window mode: editing Sidebar's material cannot change Floating
 - Background types: Glass, Solid, Gradient, managed local image, current Windows wallpaper.
 - Text contrast: Auto, Light, Dark, or Custom. Auto samples solid colours and gradient stops directly, and samples image/wallpaper data once at 32×32.
 - Missing, corrupt, or oversized images resolve to the safe Glass fallback instead of breaking the surface.
+- Supported image files are PNG, JPEG, and WebP. A picked background is kept at full size; a picked **profile avatar** is normalized first — decoded, oriented, centre-cropped to a square, scaled to 256×256, and stored as a PNG that keeps transparency — so a multi-megabyte photo never ends up in the profile. A file too large to read (over 24 MB), or one the decoder cannot handle, is refused with a message next to the button that opened the picker.
 
 See [docs/appearance.md](docs/appearance.md).
 
@@ -125,12 +173,13 @@ See [docs/weather.md](docs/weather.md) and [docs/reviews.md](docs/reviews.md).
 - **No intentional upload.** Task, profile, appearance, and Quick Link data are not sent anywhere by the application.
 - **Weather is the one remote call.** Open-Meteo receives the geocoding and forecast request needed to answer a location you configured. With no configured location, no weather request is made.
 - **Diagnostics are opt-in.** Settings → Developer → Copy diagnostics produces an allowlisted, privacy-minimized report with runtime/window metadata and non-sensitive appearance state. It excludes task content, profile values, weather location, asset filenames/paths, and exact database paths.
+- **Uninstalling keeps your data.** `uninstall.ps1` removes the program files only; `%APPDATA%\net.alanfloyd.desktop\` is deleted solely with the explicit `-RemoveUserData` flag, after a printed warning and confirmation.
 
 ### Internal compatibility identifiers
 
 Some shipping identifiers keep their pre-release `alan-desktop` spelling on purpose, because renaming them would strand existing user data or break upgrades. They are internal names, not the product name:
 
-- `alan-desktop` — the Rust crate name, the private `package.json` name, and therefore the built executable `alan-desktop.exe`.
+- `alan-desktop` — the Rust crate name, the private `package.json` name, and therefore the built executable `alan-desktop.exe`. `install.ps1` installs it as `desktop-todo-widget.exe`, which is only a file name: nothing in the product reads its own executable name.
 - `alan-desktop.sqlite3` — the local database file, under the app-data directory `net.alanfloyd.desktop`.
 - `alan-desktop-tray` — the tray icon id.
 
@@ -190,7 +239,26 @@ powershell -ExecutionPolicy Bypass -File tools/windows-app-sdk/prepare-runtime-p
 
 The payload is not committed; [docs/windows-app-sdk-runtime.md](docs/windows-app-sdk-runtime.md) is the authoritative description of its provenance and version policy.
 
-`pnpm tauri:dev` runs the Vite dev server for frontend work. Production builds embed the compiled frontend and serve it through the Tauri custom protocol (`custom-protocol` feature), so a release build never depends on a dev server. v1 has no installer or updater pipeline: `pnpm tauri build --no-bundle` produces the executable and its runtime payload, and `bundle.active` is `false`.
+### Verification
+
+Four scripts cover the parts of this project that unit tests cannot reach. All of them stop any running instance first, and none of them touches a profile without a verified copy:
+```powershell
+pwsh -File scripts/verify-no-console-window.ps1   # release has no console window; debug still does
+pwsh -File scripts/verify-first-use-ux.ps1        # fresh-profile first run, material, Settings gear, restart, quit
+pwsh -File scripts/verify-avatar-flow.ps1         # avatar picker matrix, normalization, persistence, errors
+pwsh -File scripts/verify-install-scripts.ps1     # install / upgrade / uninstall in a throwaway sandbox
+```
+
+- `verify-no-console-window.ps1` checks the PE subsystem of both builds and performs a shell launch (`explorer.exe`, the double-click path), using the debug build as a positive control so a passing run proves the detector can see console windows at all.
+- `verify-first-use-ux.ps1` drives the built application over its WebView2 DevTools endpoint. The product resolves its data directory through the Windows known folder, so a fresh-profile run cannot be sandboxed through the environment: the wrapper copies the real `%APPDATA%\net.alanfloyd.desktop` aside, verifies the copy by size and SHA-256 before removing anything, and restores and re-verifies it afterwards.
+- `verify-avatar-flow.ps1` runs the same way and additionally drives the real native file picker through `scripts/avatar-picker-drive.ps1` (UI Automation) with generated synthetic images, then checks what was stored, rendered, and reported for each one.
+- `verify-install-scripts.ps1` runs `install.ps1` and `uninstall.ps1` against a fake `%LOCALAPPDATA%`, `%APPDATA%`, payload, and user-data directory, including the refusal paths.
+
+`pnpm tauri:dev` runs the Vite dev server for frontend work. Production builds embed the compiled frontend and serve it through the Tauri custom protocol (`custom-protocol` feature), so a release build never depends on a dev server.
+
+Release builds are linked as a Windows GUI-subsystem application (`#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` in `src-tauri/src/main.rs`), so double-clicking the built executable does not open a console window. Debug builds keep the console, so `eprintln!` diagnostics stay visible during development. In every profile the app also writes its diagnostics to `phase7b-qa-*.log` beside the executable, and panic reports are appended to that same file, so a release crash is still recorded without a console.
+
+`pnpm tauri build --no-bundle` produces the executable and its runtime payload, and `bundle.active` is `false`: the Tauri bundler is disabled, and installation is the per-user script described in [Install](#install) rather than a generated MSI/EXE package.
 
 ## Known limitations
 
@@ -198,7 +266,7 @@ The payload is not committed; [docs/windows-app-sdk-runtime.md](docs/windows-app
 - **Enhanced accessibility** — composition hosting means the Enhanced backend offers more limited conventional Windows UI Automation behavior than Standard. Use Standard if you rely on screen readers or automation tools.
 - **Windows-specific implementation** — Enhanced depends on Windows/WebView2/Tauri-specific behavior and may need compatibility updates as those platforms evolve.
 - **Desktop host is undocumented** — `Progman`, `WorkerW`, and `SHELLDLL_DefView` topology can change across Windows updates and Explorer restarts.
-- **Scope** — Windows 11 validated, no installer/updater, no sync, and no localization beyond English and Simplified Chinese.
+- **Scope** — Windows 11 validated, no updater and no bundled MSI/EXE package (installation is the per-user script in [Install](#install)), no sync, and no localization beyond English and Simplified Chinese.
 
 ## Roadmap
 
@@ -208,9 +276,9 @@ Planned after v1 stabilization:
 - Reports: broader factual review surfaces on the existing task history.
 - Componentization: smaller, clearer frontend and Rust boundaries.
 - Settings organization: group the current settings surface more deliberately.
-- Installer and update improvements.
+- Packaging and update delivery: signing, a packaged installer, and an update mechanism on top of the existing per-user install/uninstall scripts.
 
-Deferred work is tracked in [FUTURE.md](FUTURE.md). Nothing in this section is implemented yet.
+Deferred work is tracked in [FUTURE.md](FUTURE.md). Apart from the install and uninstall scripts described in [Install](#install), nothing in this section is implemented yet.
 
 ## Contributing
 

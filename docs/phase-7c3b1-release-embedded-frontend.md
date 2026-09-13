@@ -123,10 +123,13 @@ Explicit invocation, matching what `tauri build` does, is the correct mechanism.
 ### New guard against silent recurrence
 
 Because a missing feature produces a binary that *builds fine and renders nothing*,
-this failure mode is now loud at startup (`qa_diagnostics::warn_if_release_without_embedded_frontend`):
+this failure mode is now loud at startup (`qa_diagnostics::warn_if_release_without_embedded_frontend`),
+and since v1.0.1 it is written through `QaDiagnostics::record` rather than a bare
+`eprintln!`, because a release build is a GUI-subsystem process with no console to
+print to:
 
 ```text
-[frontend] WARNING release_profile_without_custom_protocol feature=true \
+[frontend] WARNING release_profile_without_custom_protocol=true \
   frontend_asset_mode=dev-server \
   this binary will navigate to build.devUrl and render nothing without a dev server; \
   build with: cargo build --release --features custom-protocol

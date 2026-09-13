@@ -1,5 +1,5 @@
 use crate::{
-    appearance::{self, AppearanceProfiles, AppearanceSettings},
+    appearance::{self, AppearanceProfiles, AppearanceSettings, BackgroundType},
     database::Database,
     locale::Language,
 };
@@ -308,6 +308,41 @@ impl Default for ProductSettings {
 }
 
 impl ProductSettings {
+    /// The settings document a brand-new profile starts from.
+    ///
+    /// This is *not* [`Default`]: it is used only when no `product_settings` row
+    /// exists at all, i.e. a first run on a machine that has never stored this
+    /// profile. It differs from the historical defaults in exactly two ways:
+    ///
+    /// * the Floating presentation starts **expanded**, so a first run shows the
+    ///   widget — date line, tasks, footer, and the visible Settings affordance —
+    ///   instead of a 56 DIP Orb in a screen corner that is easy to read as
+    ///   "nothing opened";
+    /// * the material starts on **Gradient** rather than Glass.
+    ///
+    /// The material change is a readability decision for the default configuration
+    /// only. A fresh profile also starts on the Standard rendering backend, which
+    /// has no native Acrylic, so Glass there is a translucent tint over whatever
+    /// the wallpaper happens to be: over busy or high-contrast wallpapers the
+    /// widget's own hierarchy competes with the backdrop. The Gradient material
+    /// keeps the same translucent graphite language — the documented palette, not
+    /// a new one — while giving the surface a defined shape that reads the same on
+    /// dark, light, saturated, and textured wallpapers.
+    ///
+    /// Everything else, including the rendering backend and the Gradient values
+    /// themselves, is the documented default. Because this function is reachable
+    /// only from the missing-row branch of [`AppState::load`], an existing
+    /// persisted profile can never be changed by it: a stored Glass profile stays
+    /// Glass, and a document written before these keys existed keeps resolving
+    /// through the serde default in [`ProductSettings::default`].
+    fn for_fresh_profile() -> Self {
+        Self {
+            floating_presentation: FloatingPresentation::Expanded,
+            appearance_profiles: AppearanceProfiles::from_all(fresh_profile_appearance()),
+            ..Self::default()
+        }
+    }
+
     /// The appearance profile of the window mode this document is currently in.
     pub fn active_appearance(&self) -> &AppearanceSettings {
         self.appearance_profiles.for_mode(self.mode)
@@ -394,6 +429,19 @@ fn legacy_geometry_units_version() -> u8 {
     0
 }
 
+/// The material a brand-new profile starts from.
+///
+/// Gradient with the project's own documented palette (`#11191e` → `#213747` at
+/// 135°, the values the Appearance controls already ship) and the documented
+/// background opacity, so the fresh surface stays translucent instead of becoming
+/// a heavy rectangle. No new colours are introduced for this.
+fn fresh_profile_appearance() -> AppearanceSettings {
+    AppearanceSettings {
+        background_type: BackgroundType::Gradient,
+        ..AppearanceSettings::default()
+    }
+}
+
 pub struct AppState {
     pub database: Database,
     settings: Mutex<ProductSettings>,
@@ -424,12 +472,15 @@ impl AppState {
     }
 
     pub fn load(database: Database) -> Result<Self, String> {
-        let mut settings = database
-            .setting(PRODUCT_SETTINGS_KEY)?
-            .map(|value| serde_json::from_str::<ProductSettings>(&value))
-            .transpose()
-            .map_err(|error| error.to_string())?
-            .unwrap_or_default();
+        let mut settings = match database.setting(PRODUCT_SETTINGS_KEY)? {
+            Some(value) => serde_json::from_str::<ProductSettings>(&value)
+                .map_err(|error| error.to_string())?,
+            // No document yet: a first run on this machine, so the fresh-profile
+            // defaults apply. A stored document is never re-defaulted — it is
+            // parsed and normalized as-is, which is what keeps every existing
+            // profile byte-for-byte compatible across an upgrade.
+            None => ProductSettings::for_fresh_profile(),
+        };
         settings.normalize();
         let state = Self {
             database,
@@ -475,7 +526,7 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::{AppState, FloatingPresentation, ProductWindowMode, QuickLink, SidebarSide};
-    use crate::appearance::BackgroundType;
+    use crate::appearance::{AppearanceSettings, BackgroundType};
     use crate::database::Database;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1058,8 +1109,277 @@ mod tests {
         assert!(native.contains("collapse_floating: \"折叠为悬浮球\""));
     }
 
-    /// The shipped profile identity is a neutral placeholder, not a person.
+    /// Returns the declaration block of `selector`, up to and including its
+    /// closing brace. QA helper for the source-pinned style assertions below.
+    fn css_rule<'a>(stylesheet: &'a str, selector: &str) -> &'a str {
+        let start = stylesheet
+            .find(selector)
+            .unwrap_or_else(|| panic!("missing stylesheet rule: {selector}"));
+        let body = &stylesheet[start..];
+        &body[..body.find('}').expect("rule end") + 1]
+    }
+
+    /// The visible Settings entry point: present in every expanded presentation,
+    /// absent from the Orb, routed through the one existing settings action.
     ///
+    /// The visibility rule is structural — `ProductContent` renders exactly in
+    /// Floating expanded, Sidebar, and Desktop, and the Orb replaces it — so this
+    /// pins the properties that keep it structural: one unconditional element, no
+    /// mode list, and no dependency on the profile identity.
+    #[test]
+    fn footer_settings_gear_is_visible_in_every_expanded_mode() {
+        let source = include_str!("../../src/components/ProductContent.vue");
+        let footer_start = source.find("<footer class=\"signature\">").expect("footer");
+        let footer = &source[footer_start..];
+
+        assert_eq!(
+            footer.matches("class=\"footer-settings-button\"").count(),
+            1,
+            "the footer must render exactly one Settings gear"
+        );
+        let gear_start = footer.find("class=\"footer-settings-button\"").expect("gear");
+        let button_start = footer[..gear_start].rfind("<button").expect("gear button");
+        let gear = &footer[button_start..];
+        let tag = &gear[..gear.find('>').expect("gear opening tag")];
+        assert!(
+            !tag.contains("v-if"),
+            "the gear must not be conditional, or an expanded mode would lose it: {tag}"
+        );
+        assert!(tag.contains("type=\"button\""), "the gear must be a real button");
+        assert!(
+            tag.contains("@click=\"$emit('openSettings')\""),
+            "the gear must emit the settings event"
+        );
+        assert!(
+            gear.contains(":aria-label=\"t('footer.settings')\"")
+                && gear.contains(":title=\"t('footer.settings')\""),
+            "the gear needs the localized accessible name and tooltip"
+        );
+        assert!(
+            !source.contains("settingsOpen"),
+            "the product surface must not own settings state; App.vue does"
+        );
+
+        // The Orb is a different component, rendered instead of the product
+        // content, so it cannot carry the gear.
+        let orb = include_str!("../../src/components/FloatingOrb.vue");
+        assert!(
+            !orb.contains("footer-settings"),
+            "the collapsed Orb must not render the Settings gear"
+        );
+
+        // One wiring, into the existing command. `runAction('settings')` is the
+        // same path the right-click entry and the tray use, so there is no second
+        // settings surface.
+        let app = include_str!("../../src/App.vue");
+        assert!(
+            app.contains("@open-settings=\"runAction('settings')\""),
+            "the gear must reuse the product settings action"
+        );
+
+        // Letting the gear shrink would push it out of the footer when the
+        // identity is long, and the identity already owns the shrinking.
+        let styles = include_str!("../../src/styles.css");
+        let gear_rule = css_rule(styles, ".signature .footer-settings-button {");
+        assert!(gear_rule.contains("width: 30px") && gear_rule.contains("height: 30px"));
+        assert!(gear_rule.contains("flex: none"));
+        assert!(gear_rule.contains("color: var(--faint)"), "the gear rests low-contrast");
+        let icon_rule = css_rule(styles, ".footer-settings-icon {");
+        assert!(icon_rule.contains("width: 15px") && icon_rule.contains("height: 15px"));
+        let feedback = css_rule(styles, ".signature .footer-settings-button:hover,");
+        assert!(feedback.contains(":focus-visible"));
+        assert!(
+            feedback.contains("background:") && feedback.contains("border-color:"),
+            "hover and keyboard focus need a visible response"
+        );
+    }
+
+    /// The gear's label exists in both languages and matches the native menu's
+    /// wording, so one action never has two names.
+    #[test]
+    fn footer_settings_label_matches_the_menu_label_in_both_languages() {
+        let catalog = include_str!("../../src/i18n/catalog.ts");
+        assert!(catalog.contains("\"footer.settings\": \"Settings\""));
+        assert!(catalog.contains("\"footer.settings\": \"设置\""));
+        // The right-click entry keeps its own key with the same wording.
+        assert!(catalog.contains("\"menu.settings\": \"Settings\""));
+        assert!(catalog.contains("\"menu.settings\": \"设置\""));
+
+        let native = include_str!("locale.rs");
+        assert!(native.contains("settings: \"Settings\""));
+        assert!(native.contains("settings: \"设置\""));
+    }
+
+    /// A first run has no settings document at all, and that is the only state in
+    /// which the product may pick a more discoverable starting presentation: the
+    /// widget opens expanded, so the new user sees the product instead of a small
+    /// Orb they would have to find.
+    #[test]
+    fn fresh_profile_opens_expanded_and_keeps_that_choice() {
+        let state = AppState::load(Database::in_memory().expect("database")).expect("state");
+        let fresh = state.snapshot().expect("snapshot");
+        assert_eq!(fresh.mode, ProductWindowMode::Floating);
+        assert_eq!(
+            fresh.floating_presentation,
+            FloatingPresentation::Expanded,
+            "a fresh profile must open visibly"
+        );
+
+        // Persisted immediately, so the user's own later collapse is the only
+        // thing that can change it from here on.
+        let stored = state
+            .database
+            .setting("product_settings")
+            .expect("stored")
+            .expect("value");
+        assert!(stored.contains("\"floatingPresentation\":\"expanded\""));
+        let reopened = AppState::load(state.database)
+            .expect("reload")
+            .snapshot()
+            .expect("snapshot");
+        assert_eq!(reopened.floating_presentation, FloatingPresentation::Expanded);
+    }
+
+    /// The upgrade path must not touch an existing profile. A stored document
+    /// wins over the fresh-profile default even when it records a collapse, and a
+    /// document written before the key existed keeps its historical default
+    /// instead of inheriting the new first-run behavior.
+    #[test]
+    fn stored_documents_keep_their_floating_presentation() {
+        for (document, expected) in [
+            (
+                r#"{"mode":"floating","floatingPresentation":"collapsed"}"#,
+                FloatingPresentation::Collapsed,
+            ),
+            (
+                r#"{"mode":"floating","floatingPresentation":"expanded"}"#,
+                FloatingPresentation::Expanded,
+            ),
+            // Pre-key document: the serde default, not the fresh-profile default.
+            (r#"{"mode":"floating"}"#, FloatingPresentation::Collapsed),
+            // A Desktop profile is unaffected in every other respect too.
+            (
+                r#"{"mode":"desktop","floatingPresentation":"collapsed"}"#,
+                FloatingPresentation::Collapsed,
+            ),
+        ] {
+            let database = Database::in_memory().expect("database");
+            database
+                .set_setting("product_settings", document)
+                .expect("stored settings");
+            let restored = AppState::load(database)
+                .expect("load")
+                .snapshot()
+                .expect("snapshot");
+            assert_eq!(
+                restored.floating_presentation, expected,
+                "an existing profile changed for {document}"
+            );
+        }
+    }
+
+    /// A first run starts on the Gradient material in every mode, using the
+    /// project's documented palette and the documented translucency.
+    ///
+    /// This is a fresh-profile decision only: the Standard backend has no native
+    /// Acrylic, so Glass there is a tint over whatever wallpaper is behind it.
+    /// Gradient keeps the same graphite language with a defined shape, which reads
+    /// consistently over dark, light, saturated, and textured desktops.
+    #[test]
+    fn fresh_profile_uses_the_gradient_material_in_every_mode() {
+        let state = AppState::load(Database::in_memory().expect("database")).expect("state");
+        let fresh = state.snapshot().expect("snapshot");
+
+        for (mode, profile) in [
+            ("sidebar", &fresh.appearance_profiles.sidebar),
+            ("floating", &fresh.appearance_profiles.floating),
+            ("desktop", &fresh.appearance_profiles.desktop),
+        ] {
+            assert_eq!(
+                profile.background_type,
+                BackgroundType::Gradient,
+                "{mode} must start on Gradient"
+            );
+            // The documented palette, not a fresh invention.
+            assert_eq!(profile.gradient_start_color, "#11191e", "{mode}");
+            assert_eq!(profile.gradient_end_color, "#213747", "{mode}");
+            assert_eq!(profile.gradient_angle, 135.0, "{mode}");
+            // Still translucent, and exactly the documented opacity: the fresh
+            // surface must not become an opaque black rectangle.
+            assert_eq!(
+                profile.background_opacity,
+                AppearanceSettings::default().background_opacity,
+                "{mode}"
+            );
+            assert!(profile.background_opacity < 1.0, "{mode}");
+            // The Glass values a user would see after switching material back are
+            // untouched.
+            assert_eq!(profile.glass_tint_color, "#11191e", "{mode}");
+            assert_eq!(profile.glass_tint_opacity, 0.78, "{mode}");
+        }
+
+        // Nothing else about the fresh profile changed.
+        assert_eq!(fresh.mode, ProductWindowMode::Floating);
+        assert_eq!(fresh.floating_presentation, FloatingPresentation::Expanded);
+        assert_eq!(fresh.rendering_backend, super::RenderingBackend::Standard);
+
+        let stored = state
+            .database
+            .setting("product_settings")
+            .expect("stored")
+            .expect("value");
+        assert!(stored.contains("\"backgroundType\":\"gradient\""));
+    }
+
+    /// The upgrade path must not touch an existing profile's material, and a
+    /// document written before the appearance keys existed keeps the historical
+    /// serde default instead of inheriting the new first-run choice.
+    #[test]
+    fn stored_documents_keep_their_material_and_historical_defaults() {
+        for (document, expected, why) in [
+            (
+                r#"{"mode":"floating","appearanceProfiles":{"floating":{"backgroundType":"glass"}}}"#,
+                BackgroundType::Glass,
+                "a saved Glass profile stays Glass",
+            ),
+            (
+                r#"{"mode":"floating","appearanceProfiles":{"floating":{"backgroundType":"gradient"}}}"#,
+                BackgroundType::Gradient,
+                "a saved Gradient profile stays Gradient",
+            ),
+            (
+                r#"{"mode":"floating","appearanceProfiles":{"floating":{"backgroundType":"solid"}}}"#,
+                BackgroundType::Solid,
+                "a saved Solid profile stays Solid",
+            ),
+            (
+                r#"{"mode":"floating"}"#,
+                BackgroundType::Glass,
+                "a pre-appearance document keeps the historical Glass default",
+            ),
+            (
+                r#"{"mode":"floating","appearance":"geological_observatory"}"#,
+                BackgroundType::Glass,
+                "the appearance id alone does not select a material",
+            ),
+        ] {
+            let database = Database::in_memory().expect("database");
+            database
+                .set_setting("product_settings", document)
+                .expect("stored settings");
+            let restored = AppState::load(database)
+                .expect("load")
+                .snapshot()
+                .expect("snapshot");
+            assert_eq!(
+                restored.appearance_profiles.floating.background_type,
+                expected,
+                "{why} (document: {document})"
+            );
+        }
+    }
+
+    /// The shipped profile identity is a neutral placeholder, not a person.
     /// The frontend derives its initials from this value, so the default name is
     /// the only place the neutral `U` comes from; a personal literal here would
     /// ship as every new user's profile.

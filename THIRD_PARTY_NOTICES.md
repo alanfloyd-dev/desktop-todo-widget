@@ -27,7 +27,7 @@ desktop-todo-widget's own source is licensed under MIT. Dependencies remain unde
 
 The checked Windows Cargo dependency graph also contains compatible permissive dependencies under MIT, Apache-2.0, BSD, Zlib, Unicode-3.0, CC0, 0BSD, and Unlicense terms. Several transitive parser/style crates declare MPL-2.0. They are consumed as unmodified external dependencies; their files remain governed by MPL-2.0 and are not relicensed by this repository.
 
-A future binary release pipeline should generate and ship a complete dependency notice bundle for the exact release lockfiles. v1 ships no installer or release pipeline (the Tauri bundler is disabled), so a `pnpm tauri build --no-bundle` output carries only the executable and its staged runtime payload.
+A future binary release pipeline should generate and ship a complete dependency notice bundle for the exact release lockfiles. v1 ships no release pipeline (the Tauri bundler is disabled), so a `pnpm tauri build --no-bundle` output carries only the executable and its staged runtime payload; it is packaged by the repository's own `install.ps1`, which adds no third-party code.
 
 ## Windows App SDK runtime payload
 
