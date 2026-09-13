@@ -15,7 +15,11 @@
 <!-- Add Desktop screenshot here -->
 <!-- Add Orb screenshot here -->
 
-截图会在发布素材整理完成后补充到这里。上面的占位注释是有意保留的，这样就不会出现凭空猜测的图片路径。
+截图和演示录屏会在发布素材整理完成后补充到这里。上面的占位注释是有意保留的，这样就不会出现凭空猜测的图片路径。
+
+中英文两个版本共用同一套媒体文件，统一放在 [docs/assets/](docs/assets/)，因此不会出现重复存放两份图片的情况。文件为 `floating-acrylic.png`、`orb.png`、`sidebar.png`、`desktop.png` 和 `demo.mp4`（可选再提供一份 `demo.gif`）。
+
+由于这些图片和录屏尚未提交，本节在真实文件就位之前刻意不放任何图片链接 —— 文件清单与截图约定参见 [docs/assets/README.md](docs/assets/README.md)。
 
 ## Features
 
@@ -130,6 +134,12 @@ Quick Links 是用户自行管理的“名称 / URL”组合，作为产品的�
 - **Windows Composition APIs** — Enhanced 后端的合成宿主、Desktop Acrylic 控制器和视觉树。
 
 逐模块的细节参见 [ARCHITECTURE.md](ARCHITECTURE.md) 与 [docs/](docs/)。
+
+### Windows 特定代码的维护说明
+
+部分 Windows 特定的窗口宿主与窗口模式管理代码刻意保持了保守的实现方式，目前的集中程度也高于理想状态。这些代码是围绕平台兼容性、生命周期、输入、DPI 以及桌面宿主等边界情况逐步积累起来的。重构计划安排在 v1 稳定之后，但行为稳定性优先于结构上的清理。
+
+贡献者需要对此有预期：在这类区域改动时，最好保持小步且不改变行为；相关约束记录在 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [docs/desktop-mode.md](docs/desktop-mode.md) 中。
 
 ## Building from source
 

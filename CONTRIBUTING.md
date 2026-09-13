@@ -31,6 +31,14 @@ Settings → Developer → **Copy diagnostics** produces an issue-ready text rep
 - Preserve the same outer Tauri HWND and WebView2 controller across Desktop transitions.
 - Do not replace conditional lifecycle recovery with polling, a global Win+D shortcut, or always-on-top.
 
+## Windows internals and large orchestration modules
+
+Some Windows-specific modules, especially window-mode and product-window orchestration, are currently larger and more coupled than the project ultimately aims for. In particular, `src-tauri/src/window_mode.rs` and `src-tauri/src/product_window.rs` are known to be large.
+
+This is known technical debt, not something that has gone unnoticed. These areas contain behavior shaped by extensive testing around desktop attachment, WebView2 hosting, DPI, input routing, window styles, Win+D behavior, taskbar/Alt+Tab semantics, and recovery paths. Several of the constraints are undocumented platform behavior, so the current structure often reflects what was verified to work rather than what would be cleanest to read.
+
+Large structural refactors in these files should not be submitted casually. Prefer small, behavior-preserving changes with focused tests and manual verification. Refactors that alter module boundaries should be discussed in an issue first, and every refactor must come with focused tests plus the manual mode-transition and Desktop interaction checks described in [Before opening a change](#before-opening-a-change) and [docs/desktop-mode.md](docs/desktop-mode.md).
+
 ## Development checks
 
 ```powershell

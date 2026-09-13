@@ -15,7 +15,18 @@ It focuses on lightweight task management, tray-first interaction, customizable 
 <!-- Add Desktop screenshot here -->
 <!-- Add Orb screenshot here -->
 
-Screenshots are added here as release assets are captured. The placeholders above exist so no image path is guessed.
+Screenshots and the demo recording are added here as release assets are captured.
+The placeholders above exist so no image path is guessed.
+
+Both language versions share one media set in [docs/assets/](docs/assets/), so the
+English and Simplified Chinese READMEs never hold duplicate images. The files are
+`floating-acrylic.png`, `orb.png`, `sidebar.png`, `desktop.png`, and `demo.mp4`
+(plus an optional `demo.gif`).
+
+These images and the recording are not committed yet, so this section deliberately
+contains no image links until the real files exist — see
+[docs/assets/README.md](docs/assets/README.md) for the file list and capture
+conventions.
 
 ## Features
 
@@ -130,6 +141,12 @@ High level: Vue 3 + TypeScript render the product surface and own presentation s
 - **Windows Composition APIs** — the Enhanced backend's composition host, Desktop Acrylic controller, and visual tree.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/](docs/) for the module-by-module detail.
+
+### Windows-specific maintenance note
+
+Some Windows-specific window hosting and mode-management code is intentionally conservative and currently more centralized than ideal. It has accumulated around platform compatibility, lifecycle, input, DPI, and desktop-hosting edge cases. Refactoring is planned after v1 stabilization, but behavioral stability takes priority over structural cleanup.
+
+Contributors should expect this: changes in these areas are best kept small and behavior-preserving, and their constraints are documented in [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/desktop-mode.md](docs/desktop-mode.md).
 
 ## Building from source
 
