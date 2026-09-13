@@ -10,23 +10,43 @@ It focuses on lightweight task management, tray-first interaction, customizable 
 
 ## Screenshots
 
-<!-- Add Sidebar screenshot here -->
-<!-- Add Floating (Acrylic) screenshot here -->
-<!-- Add Desktop screenshot here -->
-<!-- Add Orb screenshot here -->
+### Demo
 
-Screenshots and the demo recording are added here as release assets are captured.
-The placeholders above exist so no image path is guessed.
+![desktop-todo-widget demo](docs/assets/demo.gif)
 
-Both language versions share one media set in [docs/assets/](docs/assets/), so the
-English and Simplified Chinese READMEs never hold duplicate images. The files are
-`floating-acrylic.png`, `orb.png`, `sidebar.png`, `desktop.png`, and `demo.mp4`
-(plus an optional `demo.gif`).
+[Watch the MP4 recording](docs/assets/demo.mp4)
 
-These images and the recording are not committed yet, so this section deliberately
-contains no image links until the real files exist — see
-[docs/assets/README.md](docs/assets/README.md) for the file list and capture
-conventions.
+### Floating Acrylic
+
+![Floating Acrylic](docs/assets/floating-acrylic.png)
+
+### Orb
+
+![Floating Orb](docs/assets/orb.png)
+
+### Sidebar
+
+![Sidebar mode](docs/assets/sidebar.png)
+
+### Desktop
+
+![Desktop mode](docs/assets/desktop.png)
+
+## Download
+
+The current Windows x64 release is available from [GitHub Releases](https://github.com/alanfloyd-dev/desktop-todo-widget/releases).
+
+Download `desktop-todo-widget-v1.0.0-windows-x64.zip`, extract it, and run:
+
+`desktop-todo-widget.exe`
+
+The v1.0.0 release is currently distributed as a portable ZIP. No installer is included yet.
+
+### Windows compatibility
+
+- Tested on Windows 11.
+- Windows 10 1809+ is expected to work based on the underlying platform requirements, but has not yet been fully validated.
+- WebView2 Runtime is required.
 
 ## Features
 
@@ -144,9 +164,11 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/](docs/) for the module-by-modu
 
 ### Windows-specific maintenance note
 
-Some Windows-specific window hosting and mode-management code is intentionally conservative and currently more centralized than ideal. It has accumulated around platform compatibility, lifecycle, input, DPI, and desktop-hosting edge cases. Refactoring is planned after v1 stabilization, but behavioral stability takes priority over structural cleanup.
+Some Windows-specific window hosting and mode-management code is intentionally conservative and currently more centralized than ideal. In particular, `src-tauri/src/window_mode.rs` and `src-tauri/src/product_window.rs` carry most of it.
 
-Contributors should expect this: changes in these areas are best kept small and behavior-preserving, and their constraints are documented in [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/desktop-mode.md](docs/desktop-mode.md).
+This is known technical debt rather than something unexamined: those modules contain behavior shaped by real bug fixing and QA around platform compatibility, lifecycle, input, DPI, desktop hosting, window styles, Win+D behavior, taskbar/Alt+Tab semantics, and recovery paths.
+
+Refactoring is planned after v1 stabilization, but behavioral stability takes priority over structural cleanup. Changes there are best kept small and behavior-preserving, and their constraints are documented in [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/desktop-mode.md](docs/desktop-mode.md).
 
 ## Building from source
 
@@ -175,7 +197,7 @@ The payload is not committed; [docs/windows-app-sdk-runtime.md](docs/windows-app
 - **Enhanced accessibility** — composition hosting means the Enhanced backend offers more limited conventional Windows UI Automation behavior than Standard. Use Standard if you rely on screen readers or automation tools.
 - **Windows-specific implementation** — Enhanced depends on Windows/WebView2/Tauri-specific behavior and may need compatibility updates as those platforms evolve.
 - **Desktop host is undocumented** — `Progman`, `WorkerW`, and `SHELLDLL_DefView` topology can change across Windows updates and Explorer restarts.
-- **Scope** — Windows 11 only, no installer/updater, no sync, and no localization beyond English and Simplified Chinese.
+- **Scope** — Windows 11 validated, no installer/updater, no sync, and no localization beyond English and Simplified Chinese.
 
 ## Roadmap
 

@@ -10,16 +10,43 @@
 
 ## Screenshots
 
-<!-- Add Sidebar screenshot here -->
-<!-- Add Floating (Acrylic) screenshot here -->
-<!-- Add Desktop screenshot here -->
-<!-- Add Orb screenshot here -->
+### 演示
 
-截图和演示录屏会在发布素材整理完成后补充到这里。上面的占位注释是有意保留的，这样就不会出现凭空猜测的图片路径。
+![desktop-todo-widget 演示](docs/assets/demo.gif)
 
-中英文两个版本共用同一套媒体文件，统一放在 [docs/assets/](docs/assets/)，因此不会出现重复存放两份图片的情况。文件为 `floating-acrylic.png`、`orb.png`、`sidebar.png`、`desktop.png` 和 `demo.mp4`（可选再提供一份 `demo.gif`）。
+[观看 MP4 录屏](docs/assets/demo.mp4)
 
-由于这些图片和录屏尚未提交，本节在真实文件就位之前刻意不放任何图片链接 —— 文件清单与截图约定参见 [docs/assets/README.md](docs/assets/README.md)。
+### Floating Acrylic
+
+![Floating Acrylic](docs/assets/floating-acrylic.png)
+
+### Orb
+
+![悬浮 Orb](docs/assets/orb.png)
+
+### Sidebar
+
+![Sidebar 模式](docs/assets/sidebar.png)
+
+### Desktop
+
+![Desktop 模式](docs/assets/desktop.png)
+
+## 下载
+
+当前 Windows x64 版本可从 [GitHub Releases](https://github.com/alanfloyd-dev/desktop-todo-widget/releases) 下载。
+
+下载 `desktop-todo-widget-v1.0.0-windows-x64.zip`，解压后运行：
+
+`desktop-todo-widget.exe`
+
+v1.0.0 当前以便携 ZIP 形式发布，暂未提供安装程序。
+
+### Windows 兼容性
+
+- 已在 Windows 11 上测试。
+- 根据底层平台要求，Windows 10 1809+ 预计可以运行，但目前尚未完成完整验证。
+- 需要 WebView2 Runtime。
 
 ## Features
 
@@ -137,9 +164,11 @@ Quick Links 是用户自行管理的“名称 / URL”组合，作为产品的�
 
 ### Windows 特定代码的维护说明
 
-部分 Windows 特定的窗口宿主与窗口模式管理代码刻意保持了保守的实现方式，目前的集中程度也高于理想状态。这些代码是围绕平台兼容性、生命周期、输入、DPI 以及桌面宿主等边界情况逐步积累起来的。重构计划安排在 v1 稳定之后，但行为稳定性优先于结构上的清理。
+部分 Windows 特定的窗口宿主与窗口模式管理代码刻意保持了保守的实现方式，目前的集中程度也高于理想状态。这部分代码主要集中在 `src-tauri/src/window_mode.rs` 与 `src-tauri/src/product_window.rs` 两个文件中。
 
-贡献者需要对此有预期：在这类区域改动时，最好保持小步且不改变行为；相关约束记录在 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [docs/desktop-mode.md](docs/desktop-mode.md) 中。
+这是已知的技术债，而不是没人注意到的问题：这些文件里的行为，是在真实缺陷修复与 QA 过程中围绕平台兼容性、生命周期、输入、DPI、桌面宿主、窗口样式、Win+D 行为、任务栏 / Alt+Tab 语义以及恢复路径逐步固化下来的。
+
+重构计划安排在 v1 稳定之后，但行为稳定性优先于结构上的清理。在这类区域改动时，最好保持小步且不改变行为；相关约束记录在 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [docs/desktop-mode.md](docs/desktop-mode.md) 中。
 
 ## Building from source
 
@@ -168,7 +197,7 @@ powershell -ExecutionPolicy Bypass -File tools/windows-app-sdk/prepare-runtime-p
 - **Enhanced 的辅助功能** — 合成托管意味着 Enhanced 后端在常规 Windows UI Automation 行为上比 Standard 更受限。如果你依赖屏幕阅读器或自动化工具，请使用 Standard。
 - **Windows 特定实现** — Enhanced 依赖 Windows/WebView2/Tauri 的特定行为，随着这些平台演进可能需要进行兼容性更新。
 - **Desktop 宿主未公开文档化** — `Progman`、`WorkerW` 和 `SHELLDLL_DefView` 的拓扑结构可能随 Windows 更新和 Explorer 重启而变化。
-- **范围** — 仅支持 Windows 11，没有安装程序/更新程序，没有同步，也没有英文和简体中文之外的其他本地化。
+- **范围** — 已验证 Windows 11，没有安装程序/更新程序，没有同步，也没有英文和简体中文之外的其他本地化。
 
 ## Roadmap
 
