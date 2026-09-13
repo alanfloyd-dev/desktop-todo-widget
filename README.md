@@ -37,15 +37,17 @@ It focuses on lightweight task management, tray-first interaction, customizable 
 
 Releases are published on [GitHub Releases](https://github.com/alanfloyd-dev/desktop-todo-widget/releases).
 
-**Published: v1.0.0** — `desktop-todo-widget-v1.0.0-windows-x64.zip`. Extract it and run:
+**Current release: v1.0.1** — `desktop-todo-widget-v1.0.1-windows-x64.zip`. Extract it and run:
 
 `desktop-todo-widget.exe`
 
-**Prepared in this repository: v1.0.1** — the same portable ZIP, named `desktop-todo-widget-v1.0.1-windows-x64.zip`, with `install.ps1` and `uninstall.ps1` added beside the executable (see [Install](#install)). It is not published yet: until that release exists, this source tree is the only place to build or run v1.0.1.
+The v1.0.1 archive also includes `install.ps1` and `uninstall.ps1` for optional per-user installation and removal (see [Install](#install)).
 
-Both are portable and stay portable: extracting the ZIP and running the executable is the whole installation, and the per-user install script is an optional convenience on top of that.
+The portable workflow remains supported: extracting the ZIP and running the executable requires no installation.
 
-The user-facing summary of the prepared release is in [RELEASE_NOTES.md](RELEASE_NOTES.md).
+**Previous release: v1.0.0** — `desktop-todo-widget-v1.0.0-windows-x64.zip`.
+
+See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the v1.0.1 changes.
 
 ### Windows compatibility
 
