@@ -1,3 +1,5 @@
+**English** | [简体中文](README_ZH.md)
+
 # desktop-todo-widget
 
 A local-first Windows todo widget built around three window modes: **Sidebar**, **Floating**, and **Desktop**.
