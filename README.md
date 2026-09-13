@@ -10,27 +10,28 @@ It focuses on lightweight task management, tray-first interaction, customizable 
 
 ## Screenshots
 
-### Demo
-
-![desktop-todo-widget demo](docs/assets/demo.gif)
+<p align="center">
+  <a href="docs/assets/demo.gif"><img src="docs/assets/demo.gif" width="540" alt="desktop-todo-widget demo"></a>
+</p>
 
 [Watch the MP4 recording](docs/assets/demo.mp4)
 
-### Floating Acrylic
+<p align="center">
+  <a href="docs/assets/floating-acrylic.png"><img src="docs/assets/floating-acrylic.png" width="500" alt="Floating mode with native Acrylic"></a>
+</p>
 
-![Floating Acrylic](docs/assets/floating-acrylic.png)
-
-### Orb
-
-![Floating Orb](docs/assets/orb.png)
-
-### Sidebar
-
-![Sidebar mode](docs/assets/sidebar.png)
-
-### Desktop
-
-![Desktop mode](docs/assets/desktop.png)
+<table>
+  <tr>
+    <th align="center">Orb</th>
+    <th align="center">Sidebar</th>
+    <th align="center">Desktop</th>
+  </tr>
+  <tr>
+    <td align="center"><a href="docs/assets/orb.png"><img src="docs/assets/orb.png" width="90" alt="Floating Orb"></a></td>
+    <td align="center"><a href="docs/assets/sidebar.png"><img src="docs/assets/sidebar.png" width="230" alt="Sidebar mode"></a></td>
+    <td align="center"><a href="docs/assets/desktop.png"><img src="docs/assets/desktop.png" width="270" alt="Desktop mode"></a></td>
+  </tr>
+</table>
 
 ## Download
 
