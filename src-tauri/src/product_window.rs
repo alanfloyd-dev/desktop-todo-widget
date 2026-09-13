@@ -247,6 +247,10 @@ pub fn update_product_settings(
             // Persisted only. The WebView hosting backend is fixed when the
             // WebView is created, so applying it would require recreating the
             // WebView; the UI tells the user a restart is required.
+            //
+            // Standard and Enhanced are orthogonal to the window mode: every
+            // mode runs on either backend. Do not "unify" them here.
+            // See docs/phase-7c3b4-dual-backend-release-decision.md.
             settings.rendering_backend = value;
         }
         if let Some(value) = patch.language {
@@ -368,6 +372,11 @@ fn apply_native_composition(
             let fallback = if mode == ProductWindowMode::Desktop
                 && appearance.background_type == appearance::BackgroundType::Glass
             {
+                // Desktop is child-hosted under the shell, and
+                // DesktopAcrylicController needs top-level HWND semantics, so the
+                // native Acrylic path is unreachable here by design rather than by
+                // omission — Enhanced Desktop is still supported, it just falls
+                // back to translucent Graphite. See docs/desktop-mode.md.
                 "translucent-graphite"
             } else if mode == ProductWindowMode::Floating
                 && presentation == FloatingPresentation::Collapsed
@@ -663,12 +672,14 @@ pub fn apply_product_mode(
         .set_decorations(false)
         .map_err(|error| error.to_string())?;
     if mode == ProductWindowMode::Desktop {
+        // Do not remove or move this earlier resizable pass, and do not let the
+        // generic pass below run for Desktop.
         // Every tao window-flag setter recomputes the whole Win32 style from
         // tao's flags, so any of them running *after* the Shell reparent would
         // overwrite the child style `window_mode` just applied (`WS_CHILD` and
-        // the sizing-border bit included). The widget's final style therefore
-        // has to be settled before `apply_adapter_desktop_mode`, and the
-        // generic `set_resizable` pass below is skipped for Desktop.
+        // the sizing-border bit included), silently breaking Desktop child
+        // hosting. The widget's final style therefore has to be settled before
+        // `apply_adapter_desktop_mode`.
         window
             .set_resizable(product_window_resizable(mode, &settings))
             .map_err(|error| error.to_string())?;
@@ -730,8 +741,9 @@ pub fn apply_product_mode(
         }
     }
     if mode != ProductWindowMode::Desktop {
-        // Desktop already settled this before the reparent; re-running it would
-        // clobber the child style. See the ordering note above.
+        // Do not reorder this after the Desktop branch above.
+        // Desktop already settled its style before the reparent; re-running the
+        // generic pass would clobber the child style. See the note above.
         window
             .set_resizable(product_window_resizable(mode, &settings))
             .map_err(|error| error.to_string())?;
@@ -760,6 +772,10 @@ pub fn apply_product_mode(
     // leave the visible widget completely inert. This runs last, after every
     // style/frame change of the transition, because each of them lets WebView2
     // re-apply its own bounds and visibility.
+    //
+    // The repair moves that runtime window off the virtual screen without hiding
+    // it; hiding restores the hit test but stops WebView2 delivering forwarded
+    // input to the page. See platform/windows/composition_host/input_target.rs.
     #[cfg(target_os = "windows")]
     if runtime.composition_hosting {
         platform::windows::composition_host::sync_input_target(
@@ -789,6 +805,9 @@ pub fn set_floating_presentation(
     }
     match presentation {
         FloatingPresentation::Collapsed => {
+            // Expanded size, position, and monitor are persisted *before* the Orb
+            // geometry is written, so collapsing never destroys the expanded rect
+            // the user set. The Orb anchor is a separate saved value on purpose.
             save_current_floating_rect(window, app_state)?;
             let updated = app_state
                 .update(|stored| stored.floating_presentation = FloatingPresentation::Collapsed)?;
@@ -807,6 +826,10 @@ pub fn set_floating_presentation(
                 .first()
                 .cloned()
                 .ok_or_else(|| "no display work area available".to_string())?;
+            // Derived from the Orb's saved corner rather than from `stored.x/y`:
+            // the expanded window opens against the edge the Orb was parked on, so
+            // dragging the Orb somewhere else and expanding again does not send the
+            // widget back to a stale pre-collapse position.
             let rect = smart_expanded_rect(&settings, &areas, &fallback);
             eprintln!(
                 "[floating-orb] apply expanded · logical={}x{} DIP · physical={},{} {}x{} · anchor={:?},{:?} · locked={} · topmost={}",
@@ -1161,6 +1184,10 @@ fn work_areas(window: &WebviewWindow) -> Result<Vec<WorkArea>, String> {
 }
 
 fn select_work_area(settings: &ProductSettings, areas: &[WorkArea]) -> Option<WorkArea> {
+    // Saved monitor identity wins over saved coordinates: a monitor that was
+    // unplugged and reattached, or a layout that changed the origin, moves every
+    // coordinate while the identity stays stable. Coordinates are the fallback
+    // for a document written before the identity was recorded.
     if let Some(identity) = settings.monitor_identity.as_deref() {
         if let Some(area) = areas
             .iter()
@@ -1362,7 +1389,10 @@ pub fn handle_window_event(window: &tauri::Window, event: &WindowEvent) {
         }
         WindowEvent::Resized(size) => {
             // The same stale-event rule protects expanded size from a queued
-            // 56 DIP Orb resize (and vice versa).
+            // 56 DIP Orb resize (and vice versa). Without it a transition's own
+            // resize event, delivered after the next presentation has already
+            // applied its rect, persists the wrong size and the widget grows or
+            // shrinks on every collapse/expand cycle.
             if webview.inner_size().is_ok_and(|current| current != *size) {
                 return;
             }

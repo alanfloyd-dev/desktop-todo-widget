@@ -133,9 +133,12 @@ pub(crate) unsafe fn clear_covering_webview_windows(hwnd: HWND) -> InputTargetRe
 /// Where the runtime window is parked: fully outside the virtual screen, one
 /// window width to the left of it.
 ///
-/// Off-screen is load-bearing. Any on-screen rectangle would take the pointer
-/// away from whatever is under it instead, so the window has to leave the desktop
-/// entirely while keeping its `WS_VISIBLE` bit.
+/// Off-screen is load-bearing, and so is keeping the window visible.
+/// Do not "simplify" this to `ShowWindow(SW_HIDE)`: hiding does restore the hit
+/// test, but WebView2 then stops delivering forwarded input to the page, so the
+/// widget renders and does nothing. Any on-screen rectangle would take the
+/// pointer away from whatever is under it instead, so the window has to leave the
+/// desktop entirely while keeping its `WS_VISIBLE` bit.
 fn parking_spot(client: RECT) -> Option<RECT> {
     let virtual_left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
     let virtual_top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };

@@ -31,6 +31,11 @@ pub(crate) fn resolve(
     host: NativeHost,
     capabilities: PlatformCapabilities,
 ) -> ResolvedMaterial {
+    // DesktopAcrylic is reachable only for Floating-expanded. Desktop falls
+    // through to `ExistingProductMaterial` on purpose: that mode reparents the
+    // product HWND as a child of the desktop shell, while the controller builds a
+    // DesktopWindowTarget that depends on top-level HWND semantics. Desktop keeps
+    // its translucent CSS fallback instead.
     match (requested, host, capabilities.desktop_acrylic_supported) {
         (RequestedMaterial::Glass, NativeHost::FloatingExpanded, true) => {
             ResolvedMaterial::DesktopAcrylic

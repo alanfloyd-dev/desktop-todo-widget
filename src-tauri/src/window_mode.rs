@@ -1210,6 +1210,9 @@ unsafe extern "system" fn collect_worker_w(
 
 #[cfg(target_os = "windows")]
 fn worker_w_windows() -> Vec<win32::Hwnd> {
+    // Diagnostics only. WorkerW is never a Desktop host candidate: it is reached
+    // only through the raised-desktop transition, and a non-interactive WorkerW
+    // is rejected outright by `find_interactive_desktop_parent`.
     let mut workers = Vec::new();
     // SAFETY: the callback contract and lifetime of the lparam pointer are
     // documented in `collect_worker_w`; EnumWindows is synchronous here.
@@ -1231,6 +1234,10 @@ fn capture_widget_invariant(hwnd: win32::Hwnd) -> WidgetInvariant {
         unsafe { win32::GetWindowRect(hwnd, &mut rect) };
     }
     let has_size = rect.right > rect.left && rect.bottom > rect.top;
+    // The centre point is the hit-test sample because a Desktop widget's failure
+    // mode is "another window sits over the middle of it": that is the exact
+    // shape of the inert-visible-widget regression, and it is invisible to a
+    // style-only check. See docs/phase-7c3b3-product-interaction-regression.md.
     let hit_target = if hwnd != 0 && has_size {
         // SAFETY: WindowFromPoint takes the point by value and returns an
         // opaque HWND; the midpoint is derived from a successfully sized RECT.
@@ -1644,6 +1651,11 @@ fn locate_interactive_desktop_parent() -> Option<(win32::Hwnd, String)> {
 
 #[cfg(target_os = "windows")]
 fn find_interactive_desktop_parent() -> Result<(win32::Hwnd, String), String> {
+    // Desktop hosting has to be a child of the *interactive* desktop view.
+    // Substituting WorkerW, or inventing an owner window, produces a surface that
+    // looks right but does not survive Explorer restarts, Win+D, or a wallpaper
+    // change — so a missing SHELLDLL_DefView is a hard error, not a reason to
+    // guess. See docs/desktop-mode.md for the attach/detach lifecycle.
     if let Some(parent) = locate_interactive_desktop_parent() {
         return Ok(parent);
     }
@@ -1662,6 +1674,8 @@ fn find_interactive_desktop_parent() -> Result<(win32::Hwnd, String), String> {
     unsafe {
         // Undocumented Shell message. 0xD/0x1 is required by the raised desktop
         // used on current Windows 11 builds; classic shells ignore it safely.
+        // It is only a nudge to materialise the desktop host — this function
+        // still fails rather than accepting a non-interactive WorkerW.
         win32::SendMessageTimeoutW(
             progman,
             win32::PROGMAN_SPAWN_WORKERW,
@@ -1982,6 +1996,9 @@ unsafe extern "system" fn desktop_win_event(
 
 #[cfg(target_os = "windows")]
 fn ensure_desktop_lifecycle_monitor(window: WebviewWindow) {
+    // Only ever started once, by the first successful Desktop attach. Recovery
+    // runs on this thread's own message loop, so the timers below are
+    // thread-scoped (hwnd 0) and the hook callbacks stay off the UI thread.
     if DESKTOP_MONITOR_STARTED.set(()).is_err() {
         return;
     }
@@ -2057,6 +2074,12 @@ fn ensure_desktop_lifecycle_monitor(window: WebviewWindow) {
 
 #[cfg(target_os = "windows")]
 fn revalidate_desktop_attachment(window: &WebviewWindow, trigger: &str) {
+    // Deliberately expensive and conservative. Every check below re-reads live
+    // window state instead of trusting a cached flag, because the events that
+    // reach here (Explorer restart, Win+D, desktop composition change, z-order
+    // degradation) each leave the shell in a *different* intermediate topology.
+    // A cheap "is the parent still right" test misses the cases where parent is
+    // unchanged but hit-testing or input has been lost.
     let snapshot = lifecycle_snapshot();
     if !snapshot.requested || !DESKTOP_REQUESTED.load(Ordering::Acquire) {
         return;
@@ -2103,6 +2126,9 @@ fn revalidate_desktop_attachment(window: &WebviewWindow, trigger: &str) {
 
     // Re-probe after taking the transition lock: the shell or a manual mode
     // change may have stabilized the hierarchy while recovery was waiting.
+    // Without this second probe a recovery can "repair" an attachment that
+    // Explorer has already restored, which is what produced a visible flash and
+    // an unnecessary SetParent during the Explorer-restart round.
     let initial = read_attachment_probe(hwnd);
     update_lifecycle_probe(initial);
     let issues = initial.issues();
@@ -2175,6 +2201,9 @@ fn revalidate_desktop_attachment(window: &WebviewWindow, trigger: &str) {
     // SAFETY: the transition mutex is held, the HWND and DefView were probed
     // after locking, bounds are valid, and all style/parent/position mutations
     // complete before another manual or recovery transition can proceed.
+    // Do not collapse the generation re-checks above into one: a recovery that
+    // passed an earlier check can otherwise reparent the window immediately after
+    // a manual mode change has already detached it.
     let recovered = unsafe {
         win32::GetWindowRect(desktop_parent, &mut parent_rect);
         win32::SetWindowLongPtrW(
@@ -2234,9 +2263,11 @@ fn detach_from_desktop(hwnd: win32::Hwnd, native: &mut StoredNativeState) -> Res
     let mut before_rect = win32::Rect::default();
     let attempt = native.last_detach.attempt.saturating_add(1);
     // SAFETY: the transition mutex is held by the caller and `hwnd` is the
-    // live Tauri window. The ordering inside this block is an invariant:
-    // SetParent(NULL), restore top-level styles, frame-change, then verify the
-    // final parent. Reordering recreates the Phase 1 detach failure.
+    // live Tauri window.
+    // Do not reorder the operations in this block. SetParent(NULL), restore
+    // top-level styles, frame-change, then verify the final parent: reordering
+    // recreates the Phase 1 detach failure, where the HWND keeps WS_CHILD and
+    // stays unreachable behind every top-level window.
     unsafe {
         win32::GetWindowRect(hwnd, &mut before_rect);
         let parent_before = win32::GetParent(hwnd);
@@ -2293,7 +2324,11 @@ fn detach_from_desktop(hwnd: win32::Hwnd, native: &mut StoredNativeState) -> Res
         }
 
         // SetParent does not update WS_CHILD/WS_POPUP. For a NULL parent,
-        // Microsoft requires the style transition after SetParent succeeds.
+        // Microsoft requires the style transition after SetParent succeeds, and
+        // success is judged only by the final observable parent — not by the
+        // return value and not by the styles we asked for. A detach that reports
+        // success while the HWND is still a child leaves the widget unreachable
+        // behind every top-level window, which is worse than a failed detach.
         let normal_style = native.original_style.unwrap_or(style_before) & !win32::WS_CHILD;
         let normal_ex_style = native.original_ex_style.unwrap_or(ex_style_before);
 
@@ -2362,6 +2397,8 @@ fn interactive_child_style(style: isize) -> isize {
 
 #[cfg(target_os = "windows")]
 fn frameless_product_child_style(style: isize) -> isize {
+    // Do not "clean up" the bits below; each exception is load-bearing.
+    //
     // WS_MAXIMIZEBOX and WS_TABSTOP share the same numeric bit. Once the HWND
     // becomes a child, that bit is the input-critical TABSTOP invariant and
     // must not be cleared with the other top-level frame controls.
@@ -2379,6 +2416,10 @@ fn frameless_product_child_style(style: isize) -> isize {
 
 #[cfg(target_os = "windows")]
 fn interactive_child_ex_style(ex_style: isize) -> isize {
+    // Do not drop any of these masks. WS_EX_APPWINDOW would put the taskbar
+    // button back, WS_EX_TOPMOST would lift a desktop child above normal apps,
+    // WS_EX_TRANSPARENT/WS_EX_NOACTIVATE would make the widget visible but
+    // unclickable — the exact inert-widget regression.
     ex_style
         & !(win32::WS_EX_TOPMOST
             | win32::WS_EX_TRANSPARENT
@@ -2413,6 +2454,13 @@ fn desktop_request_for_window_dpi(
     request: &DesktopWidgetRequest,
     window_dpi: u32,
 ) -> DesktopWidgetRequest {
+    // The request already carries DIP-converted values, but a child window
+    // inherits the DPI of the desktop host it was just reparented under, which
+    // can differ from the Tauri scale factor captured before the reparent. A
+    // monitor boundary or a mixed-DPI layout therefore needs this retarget or
+    // the widget lands at the wrong physical size. Do not collapse this into the
+    // DIP helpers in `product_window`: those convert for a known scale factor,
+    // this one reconciles two different ones.
     let target_scale = if window_dpi == 0 {
         request.tauri_scale_factor
     } else {
@@ -2760,6 +2808,10 @@ fn apply_windows_mode(
     // window puts the taskbar button back even though the Win32 style says the
     // window is not an application window. Re-asserting the frame after every
     // transition keeps the authoritative style state and the Shell state aligned.
+    //
+    // It also runs *after* the per-mode tao flag setters above on purpose: each
+    // setter recomputes the whole Win32 style from tao's flags, so this is the
+    // only ordering in which the widget ex-style is the last word.
     #[cfg(target_os = "windows")]
     if let Err(error) = crate::platform::windows::widget_frame::enforce_on(hwnd) {
         record_lifecycle_event(format!("widget frame re-assert failed · {error}"));
@@ -2767,6 +2819,9 @@ fn apply_windows_mode(
     }
 
     sync_webview_input(window, true)?;
+    // `native.mode` is the product's record of what was applied, not a request.
+    // Recovery compares against it, so it must only advance once the whole
+    // transition has actually landed.
     native.mode = mode;
     Ok(())
 }

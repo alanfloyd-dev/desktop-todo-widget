@@ -231,6 +231,9 @@ pub fn dispatch_product_action(
     // ran it: the frontend command, the tray menu, or the Orb's context menu.
     // The frontend replaces its reactive state with this payload, which is what
     // keeps a natively triggered mode/presentation change from desyncing the DOM.
+    // Do not remove this emission. Without it the DOM keeps rendering the previous
+    // mode/presentation inside the new native geometry, which is the
+    // stretched-Orb/state-desync regression.
     if let Err(error) = window.emit(PRODUCT_STATE_EVENT, &view) {
         eprintln!("[product-command] product-state emit failed: {error}");
     }
