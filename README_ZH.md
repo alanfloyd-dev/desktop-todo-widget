@@ -11,13 +11,13 @@
 ## Screenshots
 
 <p align="center">
-  <a href="docs/assets/demo.gif"><img src="docs/assets/demo.gif" width="540" alt="desktop-todo-widget 演示"></a>
+  <a href="docs/assets/demo.gif"><img src="docs/assets/demo.gif" width="420" alt="desktop-todo-widget 演示"></a>
 </p>
 
 [观看 MP4 录屏](docs/assets/demo.mp4)
 
 <p align="center">
-  <a href="docs/assets/floating-acrylic.png"><img src="docs/assets/floating-acrylic.png" width="500" alt="Floating 模式的原生 Acrylic"></a>
+  <a href="docs/assets/floating-acrylic.png"><img src="docs/assets/floating-acrylic.png" width="400" alt="Floating 模式的原生 Acrylic"></a>
 </p>
 
 <table>
@@ -27,9 +27,9 @@
     <th align="center">Desktop</th>
   </tr>
   <tr>
-    <td align="center"><a href="docs/assets/orb.png"><img src="docs/assets/orb.png" width="90" alt="悬浮 Orb"></a></td>
-    <td align="center"><a href="docs/assets/sidebar.png"><img src="docs/assets/sidebar.png" width="230" alt="Sidebar 模式"></a></td>
-    <td align="center"><a href="docs/assets/desktop.png"><img src="docs/assets/desktop.png" width="270" alt="Desktop 模式"></a></td>
+    <td align="center"><a href="docs/assets/orb.png"><img src="docs/assets/orb.png" width="72" alt="悬浮 Orb"></a></td>
+    <td align="center"><a href="docs/assets/sidebar.png"><img src="docs/assets/sidebar.png" width="190" alt="Sidebar 模式"></a></td>
+    <td align="center"><a href="docs/assets/desktop.png"><img src="docs/assets/desktop.png" width="220" alt="Desktop 模式"></a></td>
   </tr>
 </table>
 
