@@ -1,5 +1,7 @@
 # Contributing
 
+**English** | [简体中文](CONTRIBUTING_ZH.md)
+
 Thanks for helping improve desktop-todo-widget. The project is Windows-first and intentionally keeps its product layer small.
 
 This is a small, actively maintained project. Bug reports, code review, Windows platform expertise, and cleaner implementations of areas that could be better are all genuinely useful.
