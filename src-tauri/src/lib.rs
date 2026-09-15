@@ -4,6 +4,7 @@ mod diagnostics;
 mod locale;
 mod platform;
 mod product_commands;
+mod product_settings_commands;
 mod product_window;
 mod qa_diagnostics;
 mod reviews;
@@ -214,8 +215,8 @@ pub fn run() {
             appearance::load_managed_asset,
             appearance::load_windows_wallpaper,
             appearance::discard_managed_asset,
-            product_window::product_state,
-            product_window::update_product_settings,
+            product_settings_commands::product_state,
+            product_settings_commands::update_product_settings,
             product_window::request_window_drag,
             product_window::open_quick_link,
             product_window::quit_app,

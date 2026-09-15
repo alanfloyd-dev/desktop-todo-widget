@@ -1,6 +1,7 @@
 use crate::{
     locale,
-    product_window::{self, ProductViewState, ProductWindowRuntime},
+    product_settings_commands::ProductViewState,
+    product_window::{self, ProductWindowRuntime},
     settings::{AppState, FloatingPresentation, ProductWindowMode, SidebarSide},
     window_mode::NativeWindowState,
 };
