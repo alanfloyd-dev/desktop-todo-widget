@@ -867,6 +867,38 @@ fn apply_minimum_size(window: &WebviewWindow, width: u32, height: u32) -> Result
         .map_err(|error| error.to_string())
 }
 
+/// Writes one Expanded position triple (`x`, `y`, `monitor_identity`) into
+/// settings, converting the physical screen position to logical DIP. The three
+/// fields can only ever change together through here; guards, value sourcing,
+/// and `AppState::update` timing stay with the callers. This never writes
+/// `width`/`height` — size has exactly one writer, the `Resized` handler.
+fn persist_expanded_position(
+    stored: &mut ProductSettings,
+    position: PhysicalPosition<i32>,
+    scale_factor: f64,
+    monitor_identity: Option<String>,
+) {
+    stored.x = Some(physical_i32_to_logical(position.x, scale_factor));
+    stored.y = Some(physical_i32_to_logical(position.y, scale_factor));
+    stored.monitor_identity = monitor_identity;
+}
+
+/// The Orb counterpart of [`persist_expanded_position`], for the collapsed
+/// Floating presentation's own triple (`floating_orb_x`, `floating_orb_y`,
+/// `floating_orb_monitor_identity`). Deliberately a separate entry point: the
+/// Orb anchor is an independent saved value, not a second name for the
+/// Expanded position.
+fn persist_orb_position(
+    stored: &mut ProductSettings,
+    position: PhysicalPosition<i32>,
+    scale_factor: f64,
+    monitor_identity: Option<String>,
+) {
+    stored.floating_orb_x = Some(physical_i32_to_logical(position.x, scale_factor));
+    stored.floating_orb_y = Some(physical_i32_to_logical(position.y, scale_factor));
+    stored.floating_orb_monitor_identity = monitor_identity;
+}
+
 fn save_current_floating_rect(window: &WebviewWindow, app_state: &AppState) -> Result<(), String> {
     let position = window.outer_position().map_err(|error| error.to_string())?;
     let scale_factor =
@@ -876,13 +908,11 @@ fn save_current_floating_rect(window: &WebviewWindow, app_state: &AppState) -> R
         .map_err(|error| error.to_string())?
         .and_then(|monitor| monitor.name().cloned());
     app_state.update(|stored| {
-        stored.x = Some(physical_i32_to_logical(position.x, scale_factor));
-        stored.y = Some(physical_i32_to_logical(position.y, scale_factor));
+        persist_expanded_position(stored, position, scale_factor, monitor_identity);
         // Resized events are the authoritative expanded content size. The
         // Win32 outer rect can include an invisible DWM frame even for this
         // frameless window; re-saving that outer size during Orb/mode changes
         // would grow the stored DIP geometry on every transition.
-        stored.monitor_identity = monitor_identity;
     })?;
     Ok(())
 }
@@ -1078,16 +1108,10 @@ pub fn handle_window_event(window: &tauri::Window, event: &WindowEvent) {
                     .and_then(|monitor| monitor.name().cloned());
                 let _ = state.update(|stored| match settings.floating_presentation {
                     FloatingPresentation::Collapsed => {
-                        stored.floating_orb_x =
-                            Some(physical_i32_to_logical(position.x, scale_factor));
-                        stored.floating_orb_y =
-                            Some(physical_i32_to_logical(position.y, scale_factor));
-                        stored.floating_orb_monitor_identity = monitor_identity;
+                        persist_orb_position(stored, *position, scale_factor, monitor_identity);
                     }
                     FloatingPresentation::Expanded => {
-                        stored.x = Some(physical_i32_to_logical(position.x, scale_factor));
-                        stored.y = Some(physical_i32_to_logical(position.y, scale_factor));
-                        stored.monitor_identity = monitor_identity;
+                        persist_expanded_position(stored, *position, scale_factor, monitor_identity);
                     }
                 });
             } else if settings.mode == ProductWindowMode::Desktop {
@@ -1167,6 +1191,40 @@ fn validate_quick_links(links: &[settings::QuickLink]) -> Result<(), String> {
 mod tests {
     use super::{product_window_resizable, validate_quick_links, window_drag_allowed};
     use crate::settings::{FloatingPresentation, ProductSettings, ProductWindowMode};
+    use tauri::PhysicalPosition;
+
+    /// The Expanded position triple has one mutation shape: `x`, `y`, and
+    /// `monitor_identity` move together or not at all, and a position helper
+    /// never touches size or the Orb family.
+    #[test]
+    fn expanded_position_helper_writes_the_triple_together() {
+        let mut stored = ProductSettings::default();
+        super::persist_expanded_position(
+            &mut stored,
+            PhysicalPosition::new(300, 150),
+            1.5,
+            Some("DISPLAY-2".into()),
+        );
+        assert_eq!((stored.x, stored.y), (Some(200), Some(100)));
+        assert_eq!(stored.monitor_identity.as_deref(), Some("DISPLAY-2"));
+        assert_eq!((stored.width, stored.height), (620, 720));
+        assert_eq!((stored.floating_orb_x, stored.floating_orb_y), (None, None));
+    }
+
+    /// Same rule for the Orb triple, in the other direction: the Expanded
+    /// position fields stay untouched.
+    #[test]
+    fn orb_position_helper_writes_the_triple_together() {
+        let mut stored = ProductSettings::default();
+        super::persist_orb_position(&mut stored, PhysicalPosition::new(300, 150), 1.5, None);
+        assert_eq!(
+            (stored.floating_orb_x, stored.floating_orb_y),
+            (Some(200), Some(100))
+        );
+        assert!(stored.floating_orb_monitor_identity.is_none());
+        assert_eq!((stored.x, stored.y), (None, None));
+        assert!(stored.monitor_identity.is_none());
+    }
 
     /// Regression guard for RC-0: the sidebar's width *is* the persisted
     /// `sidebarWidth`, so the window must expose a sizing border in Sidebar mode.
