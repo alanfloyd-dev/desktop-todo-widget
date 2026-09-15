@@ -814,13 +814,19 @@ pub fn set_floating_presentation(
                 .first()
                 .cloned()
                 .ok_or_else(|| "no display work area available".to_string())?;
-            // Derived from the Orb's saved corner rather than from `stored.x/y`:
-            // the expanded window opens against the edge the Orb was parked on, so
-            // dragging the Orb somewhere else and expanding again does not send the
-            // widget back to a stale pre-collapse position.
-            let rect = smart_expanded_rect(&settings, &areas, &fallback);
+            // The expanded window reopens at its own saved position: the Orb
+            // anchor is a separate geometry family and never redefines the
+            // Expanded rect. `expanded_restore_rect` revalidates the saved
+            // rect against the current monitor topology and only falls back
+            // to the Orb-derived placement when no position was ever saved.
+            let rect = expanded_restore_rect(&settings, &areas, &fallback);
             eprintln!(
-                "[floating-orb] apply expanded · logical={}x{} DIP · physical={},{} {}x{} · anchor={:?},{:?} · locked={} · topmost={}",
+                "[floating-orb] apply expanded · source={} · logical={}x{} DIP · physical={},{} {}x{} · anchor={:?},{:?} · locked={} · topmost={}",
+                if settings.x.is_some() && settings.y.is_some() {
+                    "saved"
+                } else {
+                    "orb-fallback"
+                },
                 settings.width,
                 settings.height,
                 rect.x,
@@ -979,13 +985,16 @@ fn ensure_logical_geometry(window: &WebviewWindow, app_state: &AppState) -> Resu
     Ok(())
 }
 
-fn apply_saved_main_rect(window: &WebviewWindow, settings: &ProductSettings) -> Result<(), String> {
-    let areas = work_areas(window)?;
-    let fallback = areas
-        .first()
-        .cloned()
-        .ok_or_else(|| "no display work area available".to_string())?;
-    let target = select_work_area(settings, &areas).unwrap_or_else(|| fallback.clone());
+/// The physical rect that restores the saved Expanded geometry: the saved
+/// monitor (identity first, coordinates as fallback) supplies the scale, the
+/// DIP values convert, and `validate_window_rect` provides the existing
+/// off-screen / topology-change recovery. Pure: no window access, no writes.
+fn saved_expanded_rect(
+    settings: &ProductSettings,
+    areas: &[WorkArea],
+    fallback: &WorkArea,
+) -> WindowRect {
+    let target = select_work_area(settings, areas).unwrap_or_else(|| fallback.clone());
     let scale_factor = normalized_scale_factor(target.scale_factor);
     let saved = WindowRect {
         x: settings
@@ -999,7 +1008,32 @@ fn apply_saved_main_rect(window: &WebviewWindow, settings: &ProductSettings) -> 
         width: logical_u32_to_physical(settings.width.clamp(360, 1100), scale_factor),
         height: logical_u32_to_physical(settings.height.clamp(500, 1200), scale_factor),
     };
-    let rect = validate_window_rect(saved, &areas, &fallback);
+    validate_window_rect(saved, areas, fallback)
+}
+
+/// The rect an expand applies. A document with a saved Expanded position
+/// restores exactly that rect; only a document that has never saved one
+/// (legacy / first collapse never taken) falls back to the Orb-derived smart
+/// placement. The Orb anchor never redefines the Expanded position.
+fn expanded_restore_rect(
+    settings: &ProductSettings,
+    areas: &[WorkArea],
+    fallback: &WorkArea,
+) -> WindowRect {
+    if settings.x.is_some() && settings.y.is_some() {
+        saved_expanded_rect(settings, areas, fallback)
+    } else {
+        smart_expanded_rect(settings, areas, fallback)
+    }
+}
+
+fn apply_saved_main_rect(window: &WebviewWindow, settings: &ProductSettings) -> Result<(), String> {
+    let areas = work_areas(window)?;
+    let fallback = areas
+        .first()
+        .cloned()
+        .ok_or_else(|| "no display work area available".to_string())?;
+    let rect = saved_expanded_rect(settings, &areas, &fallback);
     window
         .set_size(PhysicalSize::new(rect.width, rect.height))
         .and_then(|_| window.set_position(PhysicalPosition::new(rect.x, rect.y)))
@@ -1190,8 +1224,68 @@ fn validate_quick_links(links: &[settings::QuickLink]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{product_window_resizable, validate_quick_links, window_drag_allowed};
+    use super::geometry::WorkArea;
     use crate::settings::{FloatingPresentation, ProductSettings, ProductWindowMode};
     use tauri::PhysicalPosition;
+
+    const PRIMARY: WorkArea = WorkArea {
+        identity: None,
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1040,
+        scale_factor: 1.0,
+    };
+
+    /// The bug contract: expanding reopens the Expanded window at its own
+    /// saved rect even though the Orb was dragged elsewhere in between, and
+    /// the saved width/height pass through untouched. The Orb anchor never
+    /// redefines the Expanded position.
+    #[test]
+    fn expand_restores_the_saved_rect_even_after_the_orb_moved() {
+        let mut settings = ProductSettings::default();
+        settings.x = Some(120);
+        settings.y = Some(80);
+        settings.width = 800;
+        settings.height = 900;
+        settings.monitor_identity = Some("DISPLAY-1".into());
+        // Collapse saved the expanded rect; the user then dragged the Orb to
+        // the far corner, which may only move the Orb fields.
+        super::persist_orb_position(
+            &mut settings,
+            PhysicalPosition::new(1800, 900),
+            1.0,
+            Some("DISPLAY-1".into()),
+        );
+        let rect = super::expanded_restore_rect(&settings, &[PRIMARY], &PRIMARY);
+        assert_eq!((rect.x, rect.y), (120, 80));
+        assert_eq!((rect.width, rect.height), (800, 900));
+    }
+
+    /// A saved rect that is no longer visible (monitor removed / topology
+    /// change) still goes through the existing visibility validation and
+    /// lands on the recovery placement instead of the saved coordinates.
+    #[test]
+    fn expand_falls_back_when_the_saved_rect_is_no_longer_visible() {
+        let mut settings = ProductSettings::default();
+        settings.x = Some(5000);
+        settings.y = Some(5000);
+        let rect = super::expanded_restore_rect(&settings, &[PRIMARY], &PRIMARY);
+        assert_eq!((rect.x, rect.y), (32, 32));
+        assert_eq!((rect.width, rect.height), (620, 720));
+    }
+
+    /// Without a saved Expanded position the historical Orb-derived smart
+    /// placement remains exactly as before — as the fallback only.
+    #[test]
+    fn expand_without_a_saved_position_keeps_the_orb_derived_placement() {
+        let mut settings = ProductSettings::default();
+        settings.floating_orb_x = Some(1824);
+        settings.floating_orb_y = Some(944);
+        let rect = super::expanded_restore_rect(&settings, &[PRIMARY], &PRIMARY);
+        assert_eq!(rect, super::smart_expanded_rect(&settings, &[PRIMARY], &PRIMARY));
+        assert_eq!((rect.x, rect.y), (1260, 280));
+    }
 
     /// The Expanded position triple has one mutation shape: `x`, `y`, and
     /// `monitor_identity` move together or not at all, and a position helper
