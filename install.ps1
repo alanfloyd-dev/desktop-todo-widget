@@ -4,7 +4,7 @@
     Per-user install of desktop-todo-widget from a portable release payload.
 
 .DESCRIPTION
-    Copies the executable and its staged Windows App SDK runtime payload into
+    Copies the executable into
 
         %LOCALAPPDATA%\Programs\desktop-todo-widget
 
@@ -26,13 +26,14 @@
 
     Re-running the script over an existing install is the supported upgrade
     path: the running app is stopped first (only processes started from this
-    install directory), program files are replaced, and payload files that the
-    previous version installed and the new one does not still need are removed by
-    name from the recorded payload manifest.
+    install directory) and program files are replaced. Runtime payload files
+    that older versions installed beside the executable are no longer created
+    here; the uninstaller still recognizes and removes any that a previous
+    version left behind.
 
 .PARAMETER Source
-    Directory that holds the release payload: the executable plus the runtime
-    DLL/WinMD/PRI files that ship beside it. Defaults to the script's own
+    Directory that holds the release payload: the executable (plus the
+    documentation files, when present). Defaults to the script's own
     directory, so the script works when it is shipped inside the release ZIP.
 
 .PARAMETER InstallDir
@@ -79,16 +80,11 @@ if ([string]::IsNullOrWhiteSpace($Source)) {
 # produces, so shortcuts, upgrade, and uninstall have one stable target.
 $InstalledExecutableName = 'desktop-todo-widget.exe'
 $ExecutableCandidates = @('desktop-todo-widget.exe', 'alan-desktop.exe')
-# Mirrors what the product actually loads at runtime: the self-contained Windows
-# App SDK payload is copied beside the executable, and Undocked RegFree WinRT
-# activates its classes from there. `composition-host.manifest` is not part of
-# the payload — it is merged into the executable's embedded manifest at build
-# time (see src-tauri/build.rs).
-$RuntimeFileExtensions = @('.dll', '.winmd', '.pri')
-$RequiredRuntimeFiles = @('Microsoft.WindowsAppRuntime.dll', 'wuceffectsi.dll')
+# The standard-only product is a single executable: runtime payload files that
+# older versions installed beside it are deliberately not created here, so a
+# fresh install carries exactly the executable (plus documentation, when
+# present).
 $DocumentationFiles = @('README.md', 'README_ZH.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md')
-$ManifestName = 'installed-payload.txt'
-$ManifestHeader = '# desktop-todo-widget installed payload - written by install.ps1'
 $ShortcutName = 'desktop-todo-widget.lnk'
 
 function Get-NormalizedPath {
@@ -140,25 +136,7 @@ function Assert-Payload {
             "Expected one of: $($ExecutableCandidates -join ', ')`n" +
             'Extract the full release ZIP (or build with `pnpm tauri build --no-bundle`) and run this script from that directory.')
     }
-    $missing = @()
-    foreach ($required in $RequiredRuntimeFiles) {
-        if (-not (Test-Path -LiteralPath (Join-Path $SourceDir $required) -PathType Leaf)) {
-            $missing += $required
-        }
-    }
-    if ($missing.Count -gt 0) {
-        throw ("The payload in $SourceDir is incomplete; missing: $($missing -join ', ')`n" +
-            'These are the staged Windows App SDK runtime files the product loads beside the executable.')
-    }
-    $runtime = @(Get-ChildItem -LiteralPath $SourceDir -File |
-        Where-Object { $RuntimeFileExtensions -contains $_.Extension.ToLowerInvariant() })
-    if ($runtime.Count -eq 0) {
-        throw "The payload in $SourceDir has no runtime files ($($RuntimeFileExtensions -join ', '))."
-    }
-    return [pscustomobject]@{
-        Executable = $executable
-        Runtime    = $runtime
-    }
+    return $executable
 }
 
 function Get-InstalledProcesses {
@@ -212,22 +190,6 @@ function Copy-PayloadFile {
     Move-Item -LiteralPath $staging -Destination $DestinationFile -Force
 }
 
-function Read-PayloadManifest {
-    param([Parameter(Mandatory = $true)][string]$InstallDir)
-    $path = Join-Path $InstallDir $ManifestName
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return @() }
-    $entries = @()
-    foreach ($line in (Get-Content -LiteralPath $path)) {
-        $entry = $line.Trim()
-        if (-not $entry -or $entry.StartsWith('#')) { continue }
-        # Plain file names only: a manifest is not a path list, and a hostile or
-        # hand-edited entry must never be able to point outside the install dir.
-        if ($entry -ne [System.IO.Path]::GetFileName($entry)) { continue }
-        $entries += $entry
-    }
-    return $entries
-}
-
 function Install-StartMenuShortcut {
     param(
         [Parameter(Mandatory = $true)][string]$TargetExe,
@@ -265,24 +227,17 @@ try {
     Write-Host "  source : $sourceDir"
     Write-Host "  target : $installDir"
 
-    $payload = Assert-Payload -SourceDir $sourceDir
-    Write-Host "  payload: $(Split-Path -Leaf $payload.Executable) + $($payload.Runtime.Count) runtime file(s)"
+    $executable = Assert-Payload -SourceDir $sourceDir
+    Write-Host "  payload: $(Split-Path -Leaf $executable)"
 
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
     Stop-InstalledApp -InstallDir $installDir
 
-    $installed = @()
-    $executableName = Split-Path -Leaf $payload.Executable
+    $executableName = Split-Path -Leaf $executable
     $targetExe = Join-Path $installDir $InstalledExecutableName
-    Copy-PayloadFile -SourceFile $payload.Executable -DestinationFile $targetExe
-    $installed += $InstalledExecutableName
+    Copy-PayloadFile -SourceFile $executable -DestinationFile $targetExe
     if ($executableName -ne $InstalledExecutableName) {
         Write-Host "  installed as $InstalledExecutableName (build output was $executableName)"
-    }
-
-    foreach ($file in $payload.Runtime) {
-        Copy-PayloadFile -SourceFile $file.FullName -DestinationFile (Join-Path $installDir $file.Name)
-        $installed += $file.Name
     }
 
     # Documentation is optional: a raw build output has none, and its absence
@@ -291,24 +246,8 @@ try {
         $candidate = Join-Path $sourceDir $name
         if (Test-Path -LiteralPath $candidate -PathType Leaf) {
             Copy-PayloadFile -SourceFile $candidate -DestinationFile (Join-Path $installDir $name)
-            $installed += $name
         }
     }
-
-    # Upgrade cleanup, restricted to what the previous version of this script
-    # recorded as its own program payload.
-    $previous = @(Read-PayloadManifest -InstallDir $installDir)
-    $stale = @($previous | Where-Object { $installed -notcontains $_ })
-    foreach ($name in $stale) {
-        $stalePath = Join-Path $installDir $name
-        if (Test-Path -LiteralPath $stalePath -PathType Leaf) {
-            Remove-Item -LiteralPath $stalePath -Force
-            Write-Host "  removed payload file no longer shipped: $name"
-        }
-    }
-
-    $manifestLines = @($ManifestHeader) + $installed
-    Set-Content -LiteralPath (Join-Path $installDir $ManifestName) -Value $manifestLines -Encoding ASCII
 
     $shortcutInfo = 'skipped (-NoStartMenuShortcut)'
     if (-not $NoStartMenuShortcut) {

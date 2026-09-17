@@ -416,6 +416,14 @@ impl ProductSettings {
         self.desktop_width = self.desktop_width.clamp(360, 1100);
         self.desktop_height = self.desktop_height.clamp(500, 1200);
         self.sidebar_width = self.sidebar_width.clamp(320, 560);
+        // The Enhanced hosting path is retired (standard-only; `run()` in lib.rs
+        // pins the runtime decision to Standard). Fold a persisted `enhanced`
+        // here so the startup `load -> normalize -> persist` flow rewrites old
+        // documents with the persist call that already happens — one fold, no
+        // separate migration and no extra DB write. The variant itself stays
+        // parseable: a document written by an older build must keep loading
+        // until this fold has rewritten it.
+        self.rendering_backend = RenderingBackend::Standard;
         self.migrate_legacy_appearance();
         self.migrate_legacy_homepage();
         self.normalize_quick_links();
@@ -704,6 +712,81 @@ mod tests {
             serde_json::from_str::<RenderingBackend>("\"standard\"").expect("deserialize"),
             RenderingBackend::Standard
         );
+    }
+
+    /// The Enhanced hosting path is retired, but documents stored by older
+    /// builds may still say `renderingBackend: "enhanced"`. Such a document
+    /// must load, land on Standard through normalize, and be rewritten as
+    /// `"standard"` by the persist that `AppState::load` already performs —
+    /// while every other field of the document survives unchanged.
+    #[test]
+    fn stored_enhanced_backend_normalizes_to_standard_and_persists() {
+        use super::RenderingBackend;
+
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"mode":"sidebar","renderingBackend":"enhanced","x":12,"y":-4,"width":640,"height":700,"monitorIdentity":null,"sidebarSide":"right","sidebarWidth":420,"dayRollover":"02:30","weatherLocation":"","appearance":"geological_observatory"}"#,
+            )
+            .expect("legacy enhanced settings");
+        let state = AppState::load(database).expect("load");
+        let restored = state.snapshot().expect("snapshot");
+        assert_eq!(restored.rendering_backend, RenderingBackend::Standard);
+        // The fold only touches the backend; the rest of the document is intact.
+        assert_eq!(restored.mode, ProductWindowMode::Sidebar);
+        assert_eq!(restored.x, Some(12));
+        assert_eq!(restored.y, Some(-4));
+        assert_eq!(restored.width, 640);
+        assert_eq!(restored.height, 700);
+        assert_eq!(restored.sidebar_side, SidebarSide::Right);
+        assert_eq!(restored.sidebar_width, 420);
+        assert_eq!(restored.day_rollover, "02:30");
+
+        // The startup persist already rewrote the row: the stored JSON now
+        // carries `standard`, so the next startup reads Standard directly.
+        let stored = state
+            .database
+            .setting("product_settings")
+            .expect("stored")
+            .expect("value");
+        assert!(stored.contains("\"renderingBackend\":\"standard\""));
+        assert!(!stored.contains("\"enhanced\""));
+    }
+
+    /// The fold is a no-op for a document that is already Standard (a fresh
+    /// profile included), and the `update` path normalizes too, so no writer
+    /// can reintroduce the retired value into the persisted document.
+    #[test]
+    fn standard_backend_stays_standard_through_load_and_update() {
+        use super::RenderingBackend;
+
+        // No stored row: the fresh-profile path, untouched by the fold.
+        let state = AppState::load(Database::in_memory().expect("database")).expect("state");
+        assert_eq!(
+            state.snapshot().expect("snapshot").rendering_backend,
+            RenderingBackend::Standard
+        );
+        let stored = state
+            .database
+            .setting("product_settings")
+            .expect("stored")
+            .expect("value");
+        assert!(stored.contains("\"renderingBackend\":\"standard\""));
+
+        state
+            .update(|settings| settings.rendering_backend = RenderingBackend::Enhanced)
+            .expect("update");
+        assert_eq!(
+            state.snapshot().expect("snapshot").rendering_backend,
+            RenderingBackend::Standard
+        );
+        let rewritten = state
+            .database
+            .setting("product_settings")
+            .expect("stored")
+            .expect("value");
+        assert!(rewritten.contains("\"renderingBackend\":\"standard\""));
     }
 
     /// The language choice has to survive a restart, and a settings document

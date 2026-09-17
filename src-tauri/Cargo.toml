@@ -43,28 +43,16 @@ custom-protocol = ["tauri/custom-protocol"]
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38.2"
 wry = "0.55.1"
-windows-numerics = "0.2.0"
+# This is the Standard product's whole Win32 surface: the widget-frame
+# subclassing and window styles plus the WebView2 telemetry in qa_diagnostics.
+# `Win32_UI_Shell` is declared explicitly instead of relying on feature
+# unification from other crates in the dependency graph.
 windows = { version = "0.61.3", features = [
-    "Foundation",
-    "System",
-    "UI_Core",
-    "UI_Composition",
-    "UI_Composition_Desktop",
     "Win32_Foundation",
-    "Win32_Graphics_Dwm",
-    "Win32_UI_HiDpi",
-    "Win32_System_Com",
-    "Win32_System_Diagnostics_ToolHelp",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Threading",
-    "Win32_System_WinRT",
-    "Win32_System_WinRT_Composition",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows-core = "0.61.2"
-
-[patch.crates-io]
-wry = { path = "../vendor/wry" }
 
 [profile.dev]
 incremental = true

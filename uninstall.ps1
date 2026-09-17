@@ -21,9 +21,9 @@
     Deletion is deliberately narrow:
       * only files inside the resolved install directory are considered,
       * every file must look like an installed program file (the executable,
-        DLL/WinMD/PRI runtime payload, documentation, the payload manifest, or
-        the app's own log file); anything else stops the uninstall instead of
-        being deleted,
+        documentation, log files, or runtime payload files an older version
+        may have installed beside the executable); anything else stops the
+        uninstall instead of being deleted,
       * subdirectories in the install directory stop the uninstall,
       * the install directory itself is removed only once it is empty.
 
@@ -61,11 +61,13 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $DefaultInstallDirName = 'desktop-todo-widget'
-$ManifestName = 'installed-payload.txt'
 $ShortcutName = 'desktop-todo-widget.lnk'
 $UserDataDirName = 'net.alanfloyd.desktop'
 # Every file an install can legitimately leave behind. Anything else in the
-# install directory is a reason to stop, not something to delete.
+# install directory is a reason to stop, not something to delete. The runtime
+# payload extensions stay on the list for installs made by versions that
+# shipped the Windows App SDK beside the executable: the uninstaller still
+# owns and removes those files.
 $AllowedFilePatterns = @(
     '^desktop-todo-widget\.exe$',
     '^alan-desktop\.exe$',

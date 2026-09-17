@@ -15,12 +15,12 @@
 
 use crate::{
     appearance::{self, AppearanceProfiles},
-    product_window::{apply_native_composition, ProductWindowRuntime},
-    settings::{self, AppState, ProductSettings, RenderingBackend, TemperatureUnit},
+    product_window::apply_native_composition,
+    settings::{self, AppState, ProductSettings, TemperatureUnit},
     task_day,
 };
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, WebviewWindow};
+use tauri::WebviewWindow;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,9 +50,6 @@ pub struct SettingsPatch {
     /// to keep a second implementation of the same ordering rules on the Rust
     /// side for no benefit at this size.
     quick_links: Option<Vec<settings::QuickLink>>,
-    /// Persisted rendering backend preference. Applied to settings only; the
-    /// hosting backend itself is chosen at startup and needs a restart.
-    rendering_backend: Option<RenderingBackend>,
     /// Persisted UI language preference. Applied immediately on the frontend.
     language: Option<crate::locale::Language>,
 }
@@ -88,11 +85,8 @@ impl ProductViewState {
 }
 
 #[tauri::command]
-pub fn product_state(
-    state: tauri::State<'_, AppState>,
-    runtime: tauri::State<'_, ProductWindowRuntime>,
-) -> Result<ProductViewState, String> {
-    let settings = runtime.effective_settings(state.snapshot()?);
+pub fn product_state(state: tauri::State<'_, AppState>) -> Result<ProductViewState, String> {
+    let settings = state.snapshot()?;
     Ok(ProductViewState::new(&state, settings))
 }
 
@@ -147,16 +141,10 @@ pub fn update_product_settings(
         if let Some(value) = patch.sidebar_width {
             settings.sidebar_width = value.clamp(320, 560);
         }
-        if let Some(value) = patch.rendering_backend {
-            // Persisted only. The WebView hosting backend is fixed when the
-            // WebView is created, so applying it would require recreating the
-            // WebView; the UI tells the user a restart is required.
-            //
-            // Standard and Enhanced are orthogonal to the window mode: every
-            // mode runs on either backend. Do not "unify" them here.
-            // See docs/phase-7c3b4-dual-backend-release-decision.md.
-            settings.rendering_backend = value;
-        }
+        // The rendering_backend patch field was dropped in the standard-only
+        // retirement: the hosting decision is pinned to Standard at startup
+        // (see `run()` in lib.rs). Serde silently ignores the key if an older
+        // frontend still sends it.
         if let Some(value) = patch.language {
             // Persisted for the frontend, which re-renders immediately, and for
             // the native menus, which the next tray refresh rebuilds.
@@ -176,16 +164,12 @@ pub fn update_product_settings(
         &settings.appearance_profiles,
         settings.avatar_asset_id.as_deref(),
     );
-    let effective_settings = window
-        .app_handle()
-        .state::<ProductWindowRuntime>()
-        .effective_settings(settings.clone());
+    let effective_settings = settings.clone();
     apply_native_composition(
         &window,
-        &window.app_handle().state::<ProductWindowRuntime>(),
         effective_settings.mode,
         effective_settings.floating_presentation,
-        effective_settings
+        &effective_settings
             .appearance_profiles
             .for_mode(effective_settings.mode),
     )?;

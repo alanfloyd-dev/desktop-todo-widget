@@ -12,15 +12,16 @@
 
     Covered:
       * clean install (default install directory under the fake LOCALAPPDATA)
-      * fresh install writes the payload manifest and the Start Menu shortcut
-      * overwrite upgrade replaces the executable and prunes payload files the
-        new version no longer ships
+        installs only the executable and documentation — never runtime payload
+      * the Start Menu shortcut is created and points at the installed exe
+      * overwrite upgrade replaces the executable without staging leftovers
+      * an executable-only source directory installs successfully
       * uninstall keeps user data by default
       * uninstall -RemoveUserData -Force removes it; without -Force in a
         non-interactive host it is kept
-      * the safety guards: incomplete payload, missing executable, install
-        outside %LOCALAPPDATA%, uninstall of a non-install directory, and
-        uninstall of an install directory holding a foreign file
+      * the safety guards: missing executable, install outside %LOCALAPPDATA%,
+        uninstall of a non-install directory, and uninstall of an install
+        directory holding a foreign file
 
 .PARAMETER PowerShellPath
     PowerShell executable used to run the scripts under test. Defaults to
@@ -70,13 +71,9 @@ function New-Payload {
     )
     New-Item -ItemType Directory -Path $Directory -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $Directory $ExecutableName) -Value $ExecutableContent -Encoding ASCII
-    # The two names the installer treats as required runtime payload.
-    Set-Content -LiteralPath (Join-Path $Directory 'Microsoft.WindowsAppRuntime.dll') -Value 'runtime' -Encoding ASCII
-    Set-Content -LiteralPath (Join-Path $Directory 'wuceffectsi.dll') -Value 'composition' -Encoding ASCII
-    Set-Content -LiteralPath (Join-Path $Directory 'Microsoft.UI.dll') -Value 'ui' -Encoding ASCII
-    Set-Content -LiteralPath (Join-Path $Directory 'Microsoft.UI.winmd') -Value 'winmd' -Encoding ASCII
-    Set-Content -LiteralPath (Join-Path $Directory 'Microsoft.UI.pri') -Value 'pri' -Encoding ASCII
     Set-Content -LiteralPath (Join-Path $Directory 'README.md') -Value 'readme' -Encoding ASCII
+    # Extra files stand in for anything a source directory might carry besides
+    # the program files: the installer must ignore them.
     foreach ($extra in $ExtraFiles) {
         Set-Content -LiteralPath (Join-Path $Directory $extra) -Value "extra $extra" -Encoding ASCII
     }
@@ -119,7 +116,7 @@ $local = Join-Path $sandbox 'localappdata'
 $roaming = Join-Path $sandbox 'roamingappdata'
 $payloadV1 = Join-Path $sandbox 'payload-v1'
 $payloadV2 = Join-Path $sandbox 'payload-v2'
-$payloadBroken = Join-Path $sandbox 'payload-broken'
+$payloadExeOnly = Join-Path $sandbox 'payload-exe-only'
 $payloadEmpty = Join-Path $sandbox 'payload-empty'
 $installDir = Join-Path $local 'Programs\desktop-todo-widget'
 $installedExe = Join-Path $installDir 'desktop-todo-widget.exe'
@@ -138,9 +135,8 @@ try {
         -ExecutableContent 'v1 executable' -ExtraFiles @('DeprecatedFeature.dll')
     New-Payload -Directory $payloadV2 -ExecutableName 'alan-desktop.exe' `
         -ExecutableContent 'v2 executable' -ExtraFiles @('NewFeature.dll')
-    New-Payload -Directory $payloadBroken -ExecutableName 'desktop-todo-widget.exe' `
-        -ExecutableContent 'broken'
-    Remove-Item -LiteralPath (Join-Path $payloadBroken 'wuceffectsi.dll') -Force
+    New-Payload -Directory $payloadExeOnly -ExecutableName 'desktop-todo-widget.exe' `
+        -ExecutableContent 'exe only'
     New-Item -ItemType Directory -Path $payloadEmpty -Force | Out-Null
     # Simulated user data, exactly where the product keeps it.
     New-Item -ItemType Directory -Path $userDataDir -Force | Out-Null
@@ -154,13 +150,12 @@ try {
     Check 'installed executable exists' (Test-Path -LiteralPath $installedExe -PathType Leaf)
     Check 'installed executable is the payload' `
         ((Get-Content -LiteralPath $installedExe -Raw).Trim() -eq 'v1 executable')
-    Check 'required runtime payload copied' `
-        ((Test-Path -LiteralPath (Join-Path $installDir 'Microsoft.WindowsAppRuntime.dll')) -and
-         (Test-Path -LiteralPath (Join-Path $installDir 'wuceffectsi.dll')))
     Check 'optional documentation copied' (Test-Path -LiteralPath (Join-Path $installDir 'README.md'))
-    Check 'payload manifest written' (Test-Path -LiteralPath (Join-Path $installDir 'installed-payload.txt'))
-    Check 'manifest records the installed executable' `
-        ((Get-Content -LiteralPath (Join-Path $installDir 'installed-payload.txt') -Raw) -match 'desktop-todo-widget\.exe')
+    Check 'no runtime payload installed' `
+        (@(Get-ChildItem -LiteralPath $installDir -File -Force |
+            Where-Object { $_.Extension -in '.dll', '.winmd', '.pri' }).Count -eq 0)
+    Check 'extra source files are not installed' `
+        (-not (Test-Path -LiteralPath (Join-Path $installDir 'DeprecatedFeature.dll')))
     Check 'Start Menu shortcut created' (Test-Path -LiteralPath $shortcutPath -PathType Leaf)
     $shortcutTarget = $null
     if (Test-Path -LiteralPath $shortcutPath -PathType Leaf) {
@@ -177,9 +172,8 @@ try {
         -Arguments @('-Source', $payloadV2)
     Check 'upgrade exits 0' ($result.ExitCode -eq 0) $result.Output
     Check 'executable replaced' ((Get-Content -LiteralPath $installedExe -Raw).Trim() -eq 'v2 executable')
-    Check 'new payload file installed' (Test-Path -LiteralPath (Join-Path $installDir 'NewFeature.dll'))
-    Check 'dropped payload file pruned' `
-        (-not (Test-Path -LiteralPath (Join-Path $installDir 'DeprecatedFeature.dll')))
+    Check 'extra source files stay uninstalled' `
+        (-not (Test-Path -LiteralPath (Join-Path $installDir 'NewFeature.dll')))
     Check 'no staging leftovers' `
         (@(Get-ChildItem -LiteralPath $installDir -Filter '*.installing' -Force).Count -eq 0)
     Check 'upgrade left user data alone' (Test-Path -LiteralPath (Join-Path $userDataDir 'alan-desktop.sqlite3'))
@@ -227,9 +221,10 @@ try {
     Check 'that failure explains what was expected' ($result.Output -match 'No release executable')
 
     $result = Invoke-UnderTest -ScriptPath $installScript -LocalAppData $local -RoamingAppData $roaming `
-        -Arguments @('-Source', $payloadBroken)
-    Check 'install refuses an incomplete runtime payload' ($result.ExitCode -ne 0)
-    Check 'that failure names the missing runtime file' ($result.Output -match 'wuceffectsi\.dll')
+        -Arguments @('-Source', $payloadExeOnly)
+    Check 'install succeeds with an executable-only payload' ($result.ExitCode -eq 0) $result.Output
+    Check 'that install copied no runtime payload' `
+        (-not (Test-Path -LiteralPath (Join-Path $installDir 'Microsoft.WindowsAppRuntime.dll')))
 
     $outside = Join-Path $sandbox 'outside-install'
     $result = Invoke-UnderTest -ScriptPath $installScript -LocalAppData $local -RoamingAppData $roaming `

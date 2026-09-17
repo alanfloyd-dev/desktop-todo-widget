@@ -127,8 +127,6 @@ function browserState(): ProductViewState {
     settings: {
       geometryUnitsVersion: 1,
       mode,
-      // Browser preview is not a hosted window; it always uses the compatibility path.
-      renderingBackend: "standard",
       x: null,
       y: null,
       width: window.innerWidth,

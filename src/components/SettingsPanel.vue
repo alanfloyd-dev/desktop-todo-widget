@@ -17,7 +17,6 @@ import type {
   ProductSettings,
   ProductWindowMode,
   QuickLink,
-  RenderingBackend,
   TemperatureUnit,
   WeatherViewState,
 } from "../types";
@@ -52,7 +51,6 @@ const emit = defineEmits<{
     displayName: string;
     avatarAssetId: string | null;
     quickLinks: QuickLink[];
-    renderingBackend: RenderingBackend;
   }];
 }>();
 
@@ -257,17 +255,6 @@ function moveLink(id: string, delta: -1 | 1) {
 }
 
 const developerOpen = ref(false);
-/**
- * Rendering backend draft.
- *
- * The hosting backend is fixed when the window's WebView is created, so this
- * value only takes effect after a restart. That is stated inline on the row
- * rather than with a modal or a banner.
- */
-const renderingBackend = ref<RenderingBackend>(props.settings.renderingBackend);
-const renderingBackendChanged = computed(
-  () => renderingBackend.value !== props.settings.renderingBackend,
-);
 
 /**
  * Language draft.
@@ -305,7 +292,6 @@ function save() {
     displayName: displayName.value,
     avatarAssetId: avatarAssetId.value,
     quickLinks: quickLinks.value.map((link) => ({ ...link })),
-    renderingBackend: renderingBackend.value,
   });
 }
 
@@ -717,36 +703,6 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
             </button>
           </div>
         </div>
-        <div class="settings-row appearance-background-row">
-          <span>
-            <strong>{{ t("settings.rendering") }}</strong>
-            <small>
-              {{
-                renderingBackend === "enhanced"
-                  ? t("settings.renderingEnhancedHint")
-                  : t("settings.renderingStandardHint")
-              }}
-              <template v-if="renderingBackendChanged"> {{ t("settings.renderingRestart") }}</template>
-            </small>
-          </span>
-          <div class="appearance-options" role="group" :aria-label="t('settings.renderingAriaLabel')">
-            <button
-              type="button"
-              :class="{ active: renderingBackend === 'standard' }"
-              @click="renderingBackend = 'standard'"
-            >
-              {{ t("settings.renderingStandard") }}
-            </button>
-            <button
-              type="button"
-              :class="{ active: renderingBackend === 'enhanced' }"
-              @click="renderingBackend = 'enhanced'"
-            >
-              {{ t("settings.renderingEnhanced") }}
-            </button>
-          </div>
-        </div>
-
         <div class="settings-row appearance-background-row">
           <span><strong>{{ t("settings.background") }}</strong><small>{{ t("settings.backgroundHint") }}</small></span>
           <div class="appearance-options" role="group" :aria-label="t('settings.backgroundAriaLabel')">

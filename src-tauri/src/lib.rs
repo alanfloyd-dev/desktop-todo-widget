@@ -14,10 +14,6 @@ mod tasks;
 mod weather;
 mod window_mode;
 
-#[cfg(target_os = "windows")]
-#[path = "../../tools/native-acrylic-poc/src/winappsdk.rs"]
-mod winappsdk;
-
 use product_window::ProductWindowRuntime;
 use tauri::Manager;
 use window_mode::NativeWindowState;
@@ -73,55 +69,31 @@ fn install_widget_frame(window: &tauri::WebviewWindow) -> Result<(), std::io::Er
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let qa_diagnostics = qa_diagnostics::QaDiagnostics::from_process_args();
-    qa_diagnostics.apply_webview_hosting_environment();
     qa_diagnostics::warn_if_release_without_embedded_frontend(&qa_diagnostics);
 
     // --- Rendering backend selection ---------------------------------------
-    // The hosting backend is fixed when the WebView is created, so it must be
-    // resolved before the Tauri builder does that below. The persisted product
-    // setting is the source of truth; the QA flag only exists to force the
-    // composition path in test runs.
+    // Standard-only retirement: the hosting decision is permanently Standard
+    // and the composition path is gone. The persisted backend is still read
+    // so the log records when a stored document named Enhanced — that line is
+    // the only trace such a document leaves, and it must stay answerable from
+    // the log alone.
     let early_data_dir = app_data_dir();
     let persisted_backend = match &early_data_dir {
         Some(dir) => settings::AppState::read_rendering_backend(dir),
         None => settings::RenderingBackend::default(),
     };
-    let qa_forced = qa_diagnostics.composition_controller_requested();
-    #[cfg(target_os = "windows")]
-    let enhanced_requested = qa_forced || persisted_backend.uses_composition_hosting();
-    #[cfg(not(target_os = "windows"))]
-    let enhanced_requested = false;
     qa_diagnostics.record_rendering_backend(
         persisted_backend.as_str(),
-        if enhanced_requested {
-            "enhanced"
+        "standard",
+        if persisted_backend.uses_composition_hosting() {
+            "standard_only_ignored_enhanced_request"
         } else {
-            "standard"
+            "standard_only"
         },
-        if qa_forced { "qa_override" } else { "persisted_setting" },
     );
 
-    // The runtime carries the hosting decision: the native material host may only
-    // be driven when the WebView is actually composited into this app's visual
-    // tree (see `apply_native_composition`).
-    let product_runtime = ProductWindowRuntime::new(
-        qa_diagnostics.native_material_off(),
-        qa_diagnostics.startup_material_bypassed(),
-        qa_diagnostics.window_to_visual_requested(),
-        enhanced_requested,
-    );
+    let product_runtime = ProductWindowRuntime::new();
 
-    #[cfg(target_os = "windows")]
-    if enhanced_requested {
-        use platform::windows::composition_host;
-        // Load the Windows App Runtime before any window/WebView exists: the
-        // composition factory later runs inside Wry's WebView creation call
-        // stack, where LoadLibrary deadlocks on the Windows loader lock.
-        composition_host::preload_windows_app_runtime()
-            .expect("preload Phase 7C.2 Windows App Runtime");
-        composition_host::register_wry_hooks(&product_runtime.native_material_store());
-        eprintln!("[phase7c2] enabled=true scope=main default_windowed_unchanged=true");
-    }
     tauri::Builder::default()
         .manage(NativeWindowState::default())
         .manage(product_runtime)
@@ -181,26 +153,13 @@ pub fn run() {
             // enforced at the window procedure instead of set once.
             #[cfg(target_os = "windows")]
             install_widget_frame(&window)?;
-            if diagnostics.window_to_visual_requested() {
-                product_window::restore_window_to_visual_qa(
-                    &window,
-                    &app.state::<settings::AppState>(),
-                    &app.state::<NativeWindowState>(),
-                    &app.state::<ProductWindowRuntime>(),
-                )
-            } else {
-                product_window::restore_product_window(
-                    &window,
-                    &app.state::<settings::AppState>(),
-                    &app.state::<NativeWindowState>(),
-                    &app.state::<ProductWindowRuntime>(),
-                )
-            }
+            product_window::restore_product_window(
+                &window,
+                &app.state::<settings::AppState>(),
+                &app.state::<NativeWindowState>(),
+                &app.state::<ProductWindowRuntime>(),
+            )
             .map_err(std::io::Error::other)?;
-            #[cfg(target_os = "windows")]
-            app.state::<ProductWindowRuntime>()
-                .attach_composition_controller(&window)
-                .map_err(std::io::Error::other)?;
             qa_diagnostics::record_webview_state(
                 &window,
                 &app.state::<qa_diagnostics::QaDiagnostics>(),
@@ -224,8 +183,6 @@ pub fn run() {
             product_commands::show_product_context_menu,
             qa_diagnostics::qa_frontend_ready,
             qa_diagnostics::qa_frontend_input,
-            qa_diagnostics::qa_diagnostic_mode,
-            product_window::qa_native_material_control,
             diagnostics::copyable_diagnostics,
             reviews::review_report,
             tasks::today_tasks,
@@ -247,10 +204,5 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building desktop-todo-widget")
-        .run(|app, event| {
-            if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
-                app.state::<ProductWindowRuntime>()
-                    .shutdown_native_material();
-            }
-        });
+        .run(|_, _| {});
 }

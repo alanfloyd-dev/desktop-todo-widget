@@ -11,10 +11,6 @@ use std::{
 use tauri::{Manager, WebviewWindow};
 
 pub struct QaDiagnostics {
-    native_material_off: bool,
-    native_material_late: bool,
-    window_to_visual: bool,
-    composition_controller: bool,
     log_path: Option<PathBuf>,
     write_lock: Mutex<()>,
     frontend_ready: AtomicBool,
@@ -22,107 +18,39 @@ pub struct QaDiagnostics {
 
 impl QaDiagnostics {
     pub fn from_process_args() -> Self {
-        let native_material_off =
-            std::env::args_os().any(|argument| argument == "--qa-native-material-off");
-        let native_material_late =
-            std::env::args_os().any(|argument| argument == "--qa-native-material-late");
-        let window_to_visual =
-            std::env::args_os().any(|argument| argument == "--qa-window-to-visual");
-        let composition_controller =
-            std::env::args_os().any(|argument| argument == "--qa-composition-controller");
-        let log_name = if native_material_off {
-            "phase7b-qa-material-off.log"
-        } else if window_to_visual {
-            "phase7b-qa-window-to-visual.log"
-        } else if native_material_late {
-            "phase7b-qa-material-late.log"
-        } else {
-            "phase7b-qa-material-on.log"
-        };
-        let log_path = std::env::current_exe()
-            .ok()
-            .and_then(|executable| executable.parent().map(|parent| parent.join(log_name)));
+        let log_path = std::env::current_exe().ok().and_then(|executable| {
+            executable.parent().map(|parent| parent.join("qa-diagnostics.log"))
+        });
         if let Some(path) = &log_path {
             let _ = File::create(path);
         }
         install_panic_logging(log_path.clone());
         let diagnostics = Self {
-            native_material_off,
-            native_material_late,
-            window_to_visual,
-            composition_controller,
             log_path,
             write_lock: Mutex::new(()),
             frontend_ready: AtomicBool::new(false),
         };
         diagnostics.record(format!(
-            "qa_session_start=true native_material_off={native_material_off} native_material_late={native_material_late} window_to_visual={window_to_visual} composition_controller={composition_controller} frontend_asset_mode={}",
+            "qa_session_start=true frontend_asset_mode={}",
             frontend_asset_mode()
         ));
         diagnostics.record("webview_created=false webview_navigation_started=false webview_navigation_completed=false frontend_ready=false");
         diagnostics
     }
 
-    pub fn native_material_off(&self) -> bool {
-        self.native_material_off
-    }
-
-    pub fn native_material_late(&self) -> bool {
-        self.native_material_late || self.window_to_visual
-    }
-
-    pub fn window_to_visual_requested(&self) -> bool {
-        self.window_to_visual
-    }
-
-    pub fn composition_controller_requested(&self) -> bool {
-        self.composition_controller
-    }
-
     /// Records which rendering backend the app decided to host with.
     ///
-    /// Kept as a dedicated log line because "which controller type did this build
-    /// actually create" is the first question in every hosting investigation, and
-    /// it must be answerable from the log alone.
+    /// Kept as a dedicated log line because "which backend did this build
+    /// actually choose" must stay answerable from the log alone; it also
+    /// records when a stored document still names the retired Enhanced value.
     pub fn record_rendering_backend(&self, requested: &str, effective: &str, source: &str) {
         self.record(format!(
             "[rendering] requested_backend={requested} effective_backend={effective} selection_source={source}"
         ));
     }
 
-    pub fn startup_material_bypassed(&self) -> bool {
-        self.native_material_off || self.native_material_late || self.window_to_visual
-    }
-
-    pub fn mode_name(&self) -> &'static str {
-        if self.native_material_off {
-            "off"
-        } else if self.native_material_late || self.window_to_visual {
-            "late"
-        } else {
-            "early"
-        }
-    }
-
-    pub fn apply_webview_hosting_environment(&self) {
-        if !self.window_to_visual {
-            return;
-        }
-        self.record("[p7b-wtv] requested=true");
-        std::env::set_var(
-            "COREWEBVIEW2_FORCED_HOSTING_MODE",
-            "COREWEBVIEW2_HOSTING_MODE_WINDOW_TO_VISUAL",
-        );
-        let env_value =
-            std::env::var("COREWEBVIEW2_FORCED_HOSTING_MODE").unwrap_or_else(|_| "<unset>".into());
-        let applied = env_value == "COREWEBVIEW2_HOSTING_MODE_WINDOW_TO_VISUAL";
-        self.record("[p7b-wtv] requested_hosting_mode=window-to-visual");
-        self.record(format!("[p7b-wtv] env_value={env_value}"));
-        self.record(format!("[p7b-wtv] env_applied_before_webview={applied}"));
-    }
-
     pub fn record(&self, message: impl AsRef<str>) {
-        eprintln!("[phase7b-qa] {}", message.as_ref());
+        eprintln!("[qa] {}", message.as_ref());
         let Ok(_guard) = self.write_lock.lock() else {
             return;
         };
@@ -188,8 +116,7 @@ pub fn record_webview_state(window: &WebviewWindow, diagnostics: &QaDiagnostics)
     #[cfg(target_os = "windows")]
     {
         use webview2_com::Microsoft::Web::WebView2::Win32::{
-            ICoreWebView2CompositionController, ICoreWebView2Controller, ICoreWebView2_2,
-            COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN,
+            ICoreWebView2Controller, ICoreWebView2_2, COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN,
         };
         use windows::{core::Interface, Win32::Foundation::RECT};
         use windows_core::BOOL;
@@ -198,34 +125,16 @@ pub fn record_webview_state(window: &WebviewWindow, diagnostics: &QaDiagnostics)
         let outcome = window.with_webview(move |webview| unsafe {
             let diagnostics = app.state::<QaDiagnostics>();
             let controller: ICoreWebView2Controller = webview.controller();
-            let composition_controller = controller
-                .cast::<ICoreWebView2CompositionController>()
-                .is_ok();
             let mut visible = BOOL(0);
             let mut controller_bounds = RECT::default();
             let visible_result = controller.IsVisible(&mut visible);
             let bounds_result = controller.Bounds(&mut controller_bounds);
             diagnostics.record(format!(
-                "webview2_controller_exists=true controller_api=ICoreWebView2Controller composition_controller={} webview2_visible={} webview2_bounds={} controller_query_ok={}",
-                composition_controller,
+                "webview2_controller_exists=true controller_api=ICoreWebView2Controller webview2_visible={} webview2_bounds={} controller_query_ok={}",
                 visible.0 != 0,
                 format_rect(controller_bounds),
                 visible_result.is_ok() && bounds_result.is_ok()
             ));
-
-            if diagnostics.window_to_visual_requested() {
-                let env_value = std::env::var("COREWEBVIEW2_FORCED_HOSTING_MODE")
-                    .unwrap_or_else(|_| "<unset>".into());
-                diagnostics.record(format!("[p7b-wtv] env_value_after_webview={env_value}"));
-                diagnostics.record(
-                    "[p7b-wtv] runtime_support_detection=not_available_in_webview2_api",
-                );
-                diagnostics.record("[p7b-wtv] actual_hosting_mode=not_queryable");
-                diagnostics.record("[p7b-wtv] window_to_visual_confirmed=false");
-                diagnostics.record(
-                    "[p7b-wtv] window_to_visual_not_active=not_determinable_from_controller_api",
-                );
-            }
 
             let core = controller.CoreWebView2();
             let runtime_version = core
@@ -240,10 +149,10 @@ pub fn record_webview_state(window: &WebviewWindow, diagnostics: &QaDiagnostics)
                 });
             match runtime_version {
                 Ok(version) => diagnostics.record(format!(
-                    "[p7b-wtv] selected_webview2_runtime=system-selected runtime_version={version}"
+                    "[webview2] selected_webview2_runtime=system-selected runtime_version={version}"
                 )),
                 Err(error) => diagnostics.record(format!(
-                    "[p7b-wtv] selected_webview2_runtime=system-selected runtime_version=unavailable hresult=0x{:08X}",
+                    "[webview2] selected_webview2_runtime=system-selected runtime_version=unavailable hresult=0x{:08X}",
                     error.code().0 as u32
                 )),
             }
@@ -386,11 +295,6 @@ pub fn qa_frontend_input(state: tauri::State<'_, QaDiagnostics>, kind: &str) {
         _ => "other",
     };
     state.record(format!("frontend_input_received={kind}"));
-}
-
-#[tauri::command]
-pub fn qa_diagnostic_mode(state: tauri::State<'_, QaDiagnostics>) -> &'static str {
-    state.mode_name()
 }
 
 pub fn frontend_asset_mode() -> &'static str {

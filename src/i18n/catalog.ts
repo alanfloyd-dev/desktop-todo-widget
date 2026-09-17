@@ -12,8 +12,7 @@
  * Not translated, by design:
  *   - user content (task titles, category names, display name, homepage label)
  *   - weather location labels returned by the geocoding provider
- *   - technology and brand names: WebView2, Standard, Enhanced, Acrylic,
- *     GitHub, Open-Meteo, SQLite
+ *   - technology and brand names: WebView2, Glass, GitHub, Open-Meteo, SQLite
  *   - machine-readable values (dates in `YYYY-MM-DD`, colour codes, CSS px)
  */
 export type Locale = "en" | "zh-Hans";
@@ -39,8 +38,8 @@ export const en: Record<string, string> = {
   "menu.ariaLabel": "Window menu",
   "menu.windowMode": "Window mode",
   "menu.mode.sidebar": "Sidebar",
-  "menu.mode.floating": "Floating (Acrylic)",
-  "menu.mode.desktop": "Desktop (Acrylic unavailable)",
+  "menu.mode.floating": "Floating",
+  "menu.mode.desktop": "Desktop",
   "menu.side": "Side",
   "menu.side.left": "Left",
   "menu.side.right": "Right",
@@ -239,14 +238,6 @@ export const en: Record<string, string> = {
   "settings.appearanceFor": "Appearance for",
   "settings.appearanceForHint": "Each window mode keeps its own appearance",
   "settings.appearanceForAriaLabel": "Window mode whose appearance is being edited",
-  "settings.rendering": "Rendering",
-  "settings.renderingStandardHint": "Best compatibility and accessibility.",
-  "settings.renderingEnhancedHint":
-    "Acrylic and transparent window effects. Screen-reader accessibility is currently limited.",
-  "settings.renderingRestart": "Restart the app to apply this change.",
-  "settings.renderingAriaLabel": "Rendering backend",
-  "settings.renderingStandard": "Standard",
-  "settings.renderingEnhanced": "Enhanced transparency",
   "settings.background": "Background",
   "settings.backgroundHint": "Material style",
   "settings.backgroundAriaLabel": "Background style",
@@ -360,8 +351,8 @@ export const zhHans: Record<string, string> = {
   "menu.ariaLabel": "窗口菜单",
   "menu.windowMode": "窗口模式",
   "menu.mode.sidebar": "侧边栏",
-  "menu.mode.floating": "悬浮（Acrylic）",
-  "menu.mode.desktop": "桌面（暂不支持 Acrylic）",
+  "menu.mode.floating": "悬浮",
+  "menu.mode.desktop": "桌面",
   "menu.side": "停靠方向",
   "menu.side.left": "左侧",
   "menu.side.right": "右侧",
@@ -541,13 +532,6 @@ export const zhHans: Record<string, string> = {
   "settings.appearanceFor": "外观设置",
   "settings.appearanceForHint": "每种窗口模式各自保存外观",
   "settings.appearanceForAriaLabel": "正在编辑外观的窗口模式",
-  "settings.rendering": "渲染",
-  "settings.renderingStandardHint": "兼容性与辅助功能最佳。",
-  "settings.renderingEnhancedHint": "Acrylic 与透明窗口效果。屏幕阅读器辅助功能目前受限。",
-  "settings.renderingRestart": "重启应用后生效。",
-  "settings.renderingAriaLabel": "渲染后端",
-  "settings.renderingStandard": "Standard",
-  "settings.renderingEnhanced": "Enhanced 透明",
   "settings.background": "背景",
   "settings.backgroundHint": "材质样式",
   "settings.backgroundAriaLabel": "背景样式",

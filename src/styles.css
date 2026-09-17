@@ -652,6 +652,17 @@ button {
   text-transform: uppercase;
 }
 
+/*
+ * The display name is user content of unbounded length sharing one row with
+ * the settings gear. Shrinking with an ellipsis keeps a long name from
+ * wrapping the identity taller or colliding with the gear's fixed box.
+ */
+.profile-identity > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 button.profile-identity {
   padding: 0;
   border: 0;
@@ -835,12 +846,6 @@ button.profile-identity {
 
 .mode-sidebar .review-row {
   grid-template-columns: 1fr;
-}
-
-.mode-sidebar .signature {
-  align-items: flex-start;
-  flex-direction: column;
-  gap: 14px;
 }
 
 .mode-desktop .product-content {
@@ -1743,7 +1748,10 @@ button.profile-identity {
     justify-self: start;
   }
 
-  .signature {
+  /* Sidebar keeps the shared identity/gear row at narrow widths; Floating and
+     Desktop keep their stacked footer. */
+  .mode-floating .signature,
+  .mode-desktop .signature {
     align-items: flex-start;
     flex-direction: column;
     gap: 14px;

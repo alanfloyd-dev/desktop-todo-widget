@@ -1,14 +1,11 @@
 use crate::{
     appearance::{self, AppearanceSettings},
-    platform,
     settings::{
         self, AppState, FloatingPresentation, ProductSettings, ProductWindowMode, SidebarSide,
     },
     window_mode::{self, NativeWindowState},
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(target_os = "windows")]
-use std::sync::Arc;
 #[cfg(target_os = "windows")]
 use tauri::window::{Effect, EffectsBuilder};
 use tauri::{Manager, PhysicalPosition, PhysicalSize, WebviewWindow, WindowEvent};
@@ -27,71 +24,13 @@ pub const ORB_SIZE_DIP: u32 = 56;
 #[derive(Default)]
 pub struct ProductWindowRuntime {
     applying: AtomicBool,
-    qa_native_material_permanently_off: bool,
-    qa_native_material_bypassed: AtomicBool,
-    qa_force_floating_expanded: bool,
-    /// Whether this process actually hosts the WebView through the
-    /// CompositionController.
-    ///
-    /// The native material host sets a `DesktopWindowTarget` on the top-level
-    /// HWND. That is only valid when the WebView is composited into the app's own
-    /// visual tree; driving it while the WebView is windowed (a child HWND)
-    /// replaces the WebView's presented surface and starves it. This flag is what
-    /// keeps the two hosting paths apart.
-    composition_hosting: bool,
-    #[cfg(target_os = "windows")]
-    native_material: platform::windows::composition_host::NativeWindowContextStore,
 }
 
 impl ProductWindowRuntime {
-    pub fn new(
-        qa_native_material_permanently_off: bool,
-        initial_bypass: bool,
-        qa_force_floating_expanded: bool,
-        composition_hosting: bool,
-    ) -> Self {
+    pub fn new() -> Self {
         Self {
             applying: AtomicBool::new(false),
-            qa_native_material_permanently_off,
-            qa_native_material_bypassed: AtomicBool::new(initial_bypass),
-            qa_force_floating_expanded,
-            composition_hosting,
-            #[cfg(target_os = "windows")]
-            native_material: Arc::new(Default::default()),
         }
-    }
-
-    /// Shared handle to the platform composition host, used by the pre-WebView
-    /// Wry hooks.
-    #[cfg(target_os = "windows")]
-    pub fn native_material_store(
-        &self,
-    ) -> platform::windows::composition_host::NativeWindowContextStore {
-        Arc::clone(&self.native_material)
-    }
-
-    /// Applies the post-WebView CompositionController settings.
-    #[cfg(target_os = "windows")]
-    pub fn attach_composition_controller(&self, window: &WebviewWindow) -> Result<(), String> {
-        platform::windows::composition_host::attach_controller(&self.native_material, window)
-    }
-
-    #[cfg(target_os = "windows")]
-    pub fn shutdown_native_material(&self) {
-        platform::windows::composition_host::shutdown(&self.native_material);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    pub fn shutdown_native_material(&self) {}
-
-    pub(crate) fn effective_settings(&self, mut settings: ProductSettings) -> ProductSettings {
-        if self.qa_force_floating_expanded {
-            settings.mode = ProductWindowMode::Floating;
-            settings.floating_presentation = FloatingPresentation::Expanded;
-            settings.width = 642;
-            settings.height = 750;
-        }
-        settings
     }
 }
 
@@ -105,67 +44,22 @@ impl Drop for ApplyingGuard<'_> {
 
 pub(crate) fn apply_native_composition(
     window: &WebviewWindow,
-    runtime: &ProductWindowRuntime,
     mode: ProductWindowMode,
     presentation: FloatingPresentation,
     appearance: &AppearanceSettings,
 ) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        if runtime.qa_native_material_bypassed.load(Ordering::Acquire) {
-            window
-                .set_effects(None)
-                .map_err(|error| error.to_string())?;
-            platform::windows::composition_host::shutdown(&runtime.native_material);
-            window
-                .app_handle()
-                .state::<crate::qa_diagnostics::QaDiagnostics>()
-                .record("native_material_bypassed=true");
-            return Ok(());
-        }
         let requested_glass = appearance.background_type == appearance::BackgroundType::Glass;
-        let native_host = match (mode, presentation) {
-            (ProductWindowMode::Floating, FloatingPresentation::Expanded) => {
-                platform::windows::composition_host::NativeHost::FloatingExpanded
-            }
-            (ProductWindowMode::Floating, FloatingPresentation::Collapsed) => {
-                platform::windows::composition_host::NativeHost::FloatingCollapsed
-            }
-            (ProductWindowMode::Sidebar, _) => {
-                platform::windows::composition_host::NativeHost::Sidebar
-            }
-            (ProductWindowMode::Desktop, _) => {
-                platform::windows::composition_host::NativeHost::Desktop
-            }
-        };
         window
             .app_handle()
             .state::<crate::qa_diagnostics::QaDiagnostics>()
             .record(format!(
-                "native_material_bypassed=false requested_glass={requested_glass} native_host={native_host:?} composition_hosting={}",
-                runtime.composition_hosting
+                "native_material_bypassed=false requested_glass={requested_glass} backend=standard"
             ));
-        // The native material host (DesktopWindowTarget + DesktopAcrylicController)
-        // belongs to the CompositionController hosting path, where the WebView is
-        // composited into the app's own visual tree. Driving it while the WebView
-        // is windowed — the Standard path — puts a composition target on the
-        // parent of the WebView's child HWND: the window then presents only the
-        // acrylic fill (blank frosted glass with a fully mounted Vue app behind
-        // it) and Chromium treats the view as occluded, throttling rendering and
-        // resource loading into multi-second stalls. The Standard path therefore
-        // stays CSS-only, which is what the appearance-composition line below has
-        // always reported.
         if mode == ProductWindowMode::Sidebar
             && appearance.background_type == appearance::BackgroundType::Glass
         {
-            if runtime.composition_hosting {
-                platform::windows::composition_host::apply_material(
-                    &runtime.native_material,
-                    window,
-                    requested_glass,
-                    native_host,
-                )?;
-            }
             window
                 .set_effects(EffectsBuilder::new().effect(Effect::Acrylic).build())
                 .map_err(|error| error.to_string())?;
@@ -176,22 +70,14 @@ pub(crate) fn apply_native_composition(
             window
                 .set_effects(None)
                 .map_err(|error| error.to_string())?;
-            if runtime.composition_hosting {
-                platform::windows::composition_host::apply_material(
-                    &runtime.native_material,
-                    window,
-                    requested_glass,
-                    native_host,
-                )?;
-            }
             let fallback = if mode == ProductWindowMode::Desktop
                 && appearance.background_type == appearance::BackgroundType::Glass
             {
                 // Desktop is child-hosted under the shell, and
                 // DesktopAcrylicController needs top-level HWND semantics, so the
                 // native Acrylic path is unreachable here by design rather than by
-                // omission — Enhanced Desktop is still supported, it just falls
-                // back to translucent Graphite. See docs/desktop-mode.md.
+                // omission — Desktop falls back to translucent Graphite. See
+                // docs/desktop-mode.md.
                 "translucent-graphite"
             } else if mode == ProductWindowMode::Floating
                 && presentation == FloatingPresentation::Collapsed
@@ -209,82 +95,9 @@ pub(crate) fn apply_native_composition(
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (window, runtime, mode, presentation, appearance);
+        let _ = (window, mode, presentation, appearance);
     }
     Ok(())
-}
-
-#[tauri::command]
-pub fn qa_native_material_control(
-    window: WebviewWindow,
-    diagnostics: tauri::State<'_, crate::qa_diagnostics::QaDiagnostics>,
-    action: &str,
-) -> Result<(), String> {
-    if !diagnostics.native_material_late() {
-        return Err("manual material control requires --qa-native-material-late".into());
-    }
-    let action = match action {
-        "attach" => "attach",
-        "detach" => "detach",
-        _ => return Err("unknown QA material action".into()),
-    };
-    diagnostics.record(format!(
-        "native_{action}_requested=true timestamp_ms={}",
-        crate::qa_diagnostics::timestamp_ms()
-    ));
-    let app = window.app_handle().clone();
-    window
-        .run_on_main_thread(move || {
-            let diagnostics = app.state::<crate::qa_diagnostics::QaDiagnostics>();
-            let runtime = app.state::<ProductWindowRuntime>();
-            let thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
-            diagnostics.record(format!(
-                "native_{action}_thread={thread} timestamp_ms={}",
-                crate::qa_diagnostics::timestamp_ms()
-            ));
-            if action == "attach" {
-                if runtime.qa_native_material_permanently_off {
-                    diagnostics.record("native_attach_started=false reason=permanently-off");
-                    return;
-                }
-                runtime
-                    .qa_native_material_bypassed
-                    .store(false, Ordering::Release);
-            } else {
-                runtime
-                    .qa_native_material_bypassed
-                    .store(true, Ordering::Release);
-            }
-            diagnostics.record(format!(
-                "native_{action}_started=true timestamp_ms={}",
-                crate::qa_diagnostics::timestamp_ms()
-            ));
-            let result = (|| -> Result<(), String> {
-                let window = app
-                    .get_webview_window("main")
-                    .ok_or_else(|| "main window unavailable".to_string())?;
-                let settings = runtime.effective_settings(app.state::<AppState>().snapshot()?);
-                apply_native_composition(
-                    &window,
-                    &runtime,
-                    settings.mode,
-                    settings.floating_presentation,
-                    &settings.appearance_profiles.for_mode(settings.mode),
-                )?;
-                diagnostics.record(platform::windows::composition_host::diagnostic_summary(
-                    &runtime.native_material,
-                ));
-                Ok(())
-            })();
-            match result {
-                Ok(()) => diagnostics.record(format!("native_{action}_completed=true")),
-                Err(error) => diagnostics.record(format!(
-                    "native_{action}_completed=false reason={}",
-                    error.replace(['\r', '\n'], " ")
-                )),
-            }
-        })
-        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -297,7 +110,7 @@ pub fn request_window_drag(
         return Ok(());
     }
     eprintln!(
-        "[window-drag] requested=true mode={:?} locked={} composition_hosting=true",
+        "[window-drag] requested=true mode={:?} locked={}",
         settings.mode, settings.locked
     );
     window.start_dragging().map_err(|error| error.to_string())
@@ -379,46 +192,6 @@ pub fn restore_product_window(
     apply_product_mode(window, app_state, native_state, runtime, mode)
 }
 
-pub fn restore_window_to_visual_qa(
-    window: &WebviewWindow,
-    app_state: &AppState,
-    native_state: &NativeWindowState,
-    runtime: &ProductWindowRuntime,
-) -> Result<(), String> {
-    if runtime.applying.swap(true, Ordering::AcqRel) {
-        return Err("window mode transition already in progress".into());
-    }
-    let _guard = ApplyingGuard(&runtime.applying);
-    let settings = runtime.effective_settings(app_state.snapshot()?);
-
-    window_mode::apply_adapter_mode(window, native_state, "normal")?;
-    window
-        .set_decorations(false)
-        .and_then(|_| window.set_shadow(true))
-        .and_then(|_| window.set_always_on_top(false))
-        .and_then(|_| window.set_resizable(true))
-        .map_err(|error| error.to_string())?;
-    apply_minimum_size(window, 360, 500)?;
-    window
-        .set_size(PhysicalSize::new(642, 750))
-        .map_err(|error| error.to_string())?;
-    apply_native_composition(
-        window,
-        runtime,
-        ProductWindowMode::Floating,
-        FloatingPresentation::Expanded,
-        settings
-            .appearance_profiles
-            .for_mode(ProductWindowMode::Floating),
-    )?;
-
-    window
-        .app_handle()
-        .state::<crate::qa_diagnostics::QaDiagnostics>()
-        .record("[p7b-wtv] forced_geometry=true mode=FloatingExpanded size=642x750");
-    Ok(())
-}
-
 pub fn apply_product_mode(
     window: &WebviewWindow,
     app_state: &AppState,
@@ -439,7 +212,6 @@ pub fn apply_product_mode(
         // Acrylic is not a reliable composition path.
         apply_native_composition(
             window,
-            runtime,
             mode,
             settings.floating_presentation,
             settings.appearance_profiles.for_mode(mode),
@@ -550,27 +322,9 @@ pub fn apply_product_mode(
     if mode != ProductWindowMode::Desktop {
         apply_native_composition(
             window,
-            runtime,
             mode,
             settings.floating_presentation,
             settings.appearance_profiles.for_mode(mode),
-        )?;
-    }
-    // A Desktop widget is a child of `SHELLDLL_DefView`, so it sits below every
-    // top-level window — including the Win32 window WebView2 keeps for a
-    // composition-hosted WebView, which would otherwise win the mouse hit test and
-    // leave the visible widget completely inert. This runs last, after every
-    // style/frame change of the transition, because each of them lets WebView2
-    // re-apply its own bounds and visibility.
-    //
-    // The repair moves that runtime window off the virtual screen without hiding
-    // it; hiding restores the hit test but stops WebView2 delivering forwarded
-    // input to the page. See platform/windows/composition_host/input_target.rs.
-    #[cfg(target_os = "windows")]
-    if runtime.composition_hosting {
-        platform::windows::composition_host::sync_input_target(
-            &runtime.native_material,
-            mode == ProductWindowMode::Desktop,
         )?;
     }
     Ok(())
@@ -657,7 +411,6 @@ pub fn set_floating_presentation(
     let updated = app_state.snapshot()?;
     apply_native_composition(
         window,
-        runtime,
         updated.mode,
         updated.floating_presentation,
         updated.appearance_profiles.for_mode(updated.mode),
@@ -893,13 +646,6 @@ pub fn handle_window_event(window: &tauri::Window, event: &WindowEvent) {
     };
 
     match event {
-        WindowEvent::Focused(active) => {
-            #[cfg(target_os = "windows")]
-            platform::windows::composition_host::set_input_active(&runtime.native_material, *active);
-        }
-        WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed => {
-            runtime.shutdown_native_material();
-        }
         WindowEvent::Moved(position) => {
             // Win32 can deliver a queued move from the previous presentation
             // after an Orb/mode transition has already moved the same HWND.
@@ -952,16 +698,6 @@ pub fn handle_window_event(window: &tauri::Window, event: &WindowEvent) {
                 });
             } else if settings.mode == ProductWindowMode::Desktop {
                 let _ = save_current_desktop_rect(&webview, &state);
-                // WebView2 positions its own window from the parent window's client
-                // origin, so a move — including the lifecycle recovery write that
-                // bypasses `apply_product_mode` — can put it back over the widget.
-                #[cfg(target_os = "windows")]
-                if runtime.composition_hosting {
-                    let _ = platform::windows::composition_host::sync_input_target(
-                        &runtime.native_material,
-                        true,
-                    );
-                }
             }
         }
         WindowEvent::Resized(size) => {
