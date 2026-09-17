@@ -33,22 +33,21 @@ It focuses on lightweight task management, tray-first interaction, customizable 
 
 Releases are published on [GitHub Releases](https://github.com/alanfloyd-dev/desktop-todo-widget/releases).
 
-**Current release: v1.0.1** — `desktop-todo-widget-v1.0.1-windows-x64.zip`. Extract it and run:
+**Current release: v1.1.0** — `desktop-todo-widget-v1.1.0-windows-x64.zip`. Extract it and run:
 
 `desktop-todo-widget.exe`
 
-The v1.0.1 archive also includes `install.ps1` and `uninstall.ps1` for optional per-user installation and removal (see [Install](#install)).
+The v1.1.0 archive also includes `install.ps1` and `uninstall.ps1` for optional per-user installation and removal (see [Install](#install)).
 
 The portable workflow remains supported: extracting the ZIP and running the executable requires no installation.
 
-**Previous release: v1.0.0** — `desktop-todo-widget-v1.0.0-windows-x64.zip`.
+**Previous release: v1.0.1** — `desktop-todo-widget-v1.0.1-windows-x64.zip`.
 
-See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the v1.0.1 changes.
+See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the v1.1.0 changes.
 
 ### Windows compatibility
 
-- Tested on Windows 11.
-- Windows 10 1809+ is expected to work based on the underlying platform requirements, but has not yet been fully validated.
+- Windows 11 is currently validated. Windows 10 compatibility is not yet formally validated.
 - WebView2 Runtime is required.
 
 ## Install

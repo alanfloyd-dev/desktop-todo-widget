@@ -33,22 +33,21 @@
 
 正式版本发布在 [GitHub Releases](https://github.com/alanfloyd-dev/desktop-todo-widget/releases)。
 
-**当前发布版本：v1.0.1** —— `desktop-todo-widget-v1.0.1-windows-x64.zip`。解压后运行：
+**当前发布版本：v1.1.0** —— `desktop-todo-widget-v1.1.0-windows-x64.zip`。解压后运行：
 
 `desktop-todo-widget.exe`
 
-v1.0.1 压缩包同时包含 `install.ps1` 与 `uninstall.ps1`，可选用于当前用户的安装与卸载（见[安装](#安装)）。
+v1.1.0 压缩包同时包含 `install.ps1` 与 `uninstall.ps1`，可选用于当前用户的安装与卸载（见[安装](#安装)）。
 
 便携使用方式仍然保留：解压 ZIP 后直接运行可执行文件即可，无需安装。
 
-**上一版本：v1.0.0** —— `desktop-todo-widget-v1.0.0-windows-x64.zip`。
+**上一版本：v1.0.1** —— `desktop-todo-widget-v1.0.1-windows-x64.zip`。
 
-v1.0.1 的变更见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+v1.1.0 的变更见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
 ### Windows 兼容性
 
-- 已在 Windows 11 上测试。
-- 根据底层平台要求，Windows 10 1809+ 预计可以运行，但目前尚未完成完整验证。
+- 目前已在 Windows 11 上完成验证；Windows 10 兼容性尚未正式验证。
 - 需要 WebView2 Runtime。
 
 ## 安装
