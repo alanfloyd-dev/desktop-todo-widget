@@ -131,7 +131,7 @@ See [docs/desktop-mode.md](docs/desktop-mode.md) for the attach/detach lifecycle
 
 ## Rendering
 
-The product has a single windowed WebView2 backend (`ICoreWebView2Controller`): there is one hosting path, no user-selectable backend, and full Windows UI Automation exposure. Window materials are resolved by the Tauri window-effects request plus CSS material layers; see [Appearance profiles](#appearance-profiles).
+The product has a single windowed WebView2 backend (`ICoreWebView2Controller`): there is one hosting path, no user-selectable backend, and full Windows UI Automation exposure. Window materials are rendered entirely by CSS material layers over a transparent window; see [Appearance profiles](#appearance-profiles).
 
 ## Appearance profiles
 

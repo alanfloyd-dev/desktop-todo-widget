@@ -1266,15 +1266,22 @@ mod tests {
         let gear_rule = css_rule(styles, ".signature .footer-settings-button {");
         assert!(gear_rule.contains("width: 30px") && gear_rule.contains("height: 30px"));
         assert!(gear_rule.contains("flex: none"));
-        assert!(gear_rule.contains("color: var(--faint)"), "the gear rests low-contrast");
+        // Near-white at rest: the glyph must stay legible over translucent and
+        // wallpaper backgrounds without reading as a primary action.
+        assert!(
+            gear_rule.contains("color: rgba(255, 255, 255, 0.92)"),
+            "the gear rests near-white so it stays visible over any background"
+        );
         let icon_rule = css_rule(styles, ".footer-settings-icon {");
         assert!(icon_rule.contains("width: 15px") && icon_rule.contains("height: 15px"));
         let feedback = css_rule(styles, ".signature .footer-settings-button:hover,");
         assert!(feedback.contains(":focus-visible"));
         assert!(
-            feedback.contains("background:") && feedback.contains("border-color:"),
+            feedback.contains("background:") && feedback.contains("color: #fff"),
             "hover and keyboard focus need a visible response"
         );
+        let pressed = css_rule(styles, ".signature .footer-settings-button:active {");
+        assert!(pressed.contains("background:"), "pressing the gear needs feedback");
     }
 
     /// The gear's label exists in both languages and matches the native menu's

@@ -4,9 +4,9 @@
 
 Glass · Graphite Frost is the first-install default; the earlier opaque graphite look remains selectable as Solid · Graphite. The Tauri window and WebView2 controller are transparent, and `html`, `body`, `#app`, the product root, and the material container remain transparent. The Vue material then adds a semi-transparent graphite tint/overlay below a fully opaque content layer. Solid forces its background layer to opacity 1.
 
-The WebView is hosted the one windowed way Tauri/Wry provides, and window materials are resolved by the Tauri window-effects request plus the CSS material layers.
+The WebView is hosted the one windowed way Tauri/Wry provides, and window materials are owned entirely by the CSS material layers over a transparent window: no native window effect is applied in any mode.
 
-Sidebar Glass additionally issues Tauri's DWM Acrylic request beside the CSS graphite tint. That request is not a visually verified native backdrop on the tested Windows 11 24H2 system — API success is not treated as material success — so Sidebar Glass must not be read as a guarantee of cross-HWND blur. CSS `backdrop-filter` remains only a progressive in-WebView enhancement. Desktop clears the effect before Phase 1 Shell reparenting and always uses the translucent Graphite fallback. When a requested image or wallpaper is unavailable, the same rendered fallback keeps the rest of the app usable.
+Sidebar Glass renders through the same CSS graphite tint as the other modes. CSS `backdrop-filter` remains only a progressive in-WebView enhancement and is not treated as material success. Desktop always uses the translucent Graphite fallback — a `SHELLDLL_DefView` child is not a top-level HWND and cannot host backdrop effects. When a requested image or wallpaper is unavailable, the same rendered fallback keeps the rest of the app usable.
 
 ## Backgrounds and local privacy
 

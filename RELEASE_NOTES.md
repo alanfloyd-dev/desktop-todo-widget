@@ -9,7 +9,7 @@ Rendering architecture simplification and stability release.
 - **Upstream Wry restored.** The vendored, patched Wry copy was removed; the build uses the stock crates.io release again.
 - **Leaner installs.** A fresh install places the executable (and optional documentation) only. Installs upgraded from v1.0.1 may keep the old runtime files until uninstall; the uninstaller recognizes and removes them.
 - **Automatic settings migration.** Profiles saved with the Enhanced backend load normally, run on Standard, and are rewritten to the Standard value on first launch. No action is required, and nothing else in your profile changes.
-- **Consistent product surface.** Mode names no longer carry material annotations (Sidebar / Floating / Desktop), the Settings gear in the expanded footer now sits next to your profile identity, and Glass, Solid, Gradient, Image, and Wallpaper remain the background options. Sidebar Glass uses a window effect internally — an implementation detail, not a separate backend.
+- **Consistent product surface.** Mode names no longer carry material annotations (Sidebar / Floating / Desktop), the Settings gear in the expanded footer now sits next to your profile identity, and Glass, Solid, Gradient, Image, and Wallpaper remain the background options. All modes render their materials through the same CSS layers over a transparent window.
 - **Clearer contribution boundaries.** The Windows native layer is documented as frozen-by-default, and the bilingual contribution guide now covers backend policy, testing expectations, repository hygiene, and AI-assisted work.
 
 The net effect is reduced maintenance surface and fewer environment dependencies — this release does not claim performance changes.

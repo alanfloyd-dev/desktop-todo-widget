@@ -6,8 +6,6 @@ use crate::{
     window_mode::{self, NativeWindowState},
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(target_os = "windows")]
-use tauri::window::{Effect, EffectsBuilder};
 use tauri::{Manager, PhysicalPosition, PhysicalSize, WebviewWindow, WindowEvent};
 
 mod geometry;
@@ -50,47 +48,36 @@ pub(crate) fn apply_native_composition(
 ) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        // One native-effect policy for every mode and material: the window
+        // stays transparent and the CSS material layers own the look. The
+        // former acrylic window request rendered as flat gray on systems
+        // where the backdrop source fails, so no native effect is applied.
         let requested_glass = appearance.background_type == appearance::BackgroundType::Glass;
+        let fallback = if mode == ProductWindowMode::Desktop && requested_glass {
+            // Desktop is child-hosted under the shell; a `SHELLDLL_DefView`
+            // child is not a top-level HWND and cannot host backdrop effects.
+            // See docs/desktop-mode.md.
+            "translucent-graphite"
+        } else if mode == ProductWindowMode::Floating
+            && presentation == FloatingPresentation::Collapsed
+            && requested_glass
+        {
+            "transparent-orb-tint"
+        } else {
+            "selected-css-material"
+        };
         window
             .app_handle()
             .state::<crate::qa_diagnostics::QaDiagnostics>()
             .record(format!(
-                "native_material_bypassed=false requested_glass={requested_glass} backend=standard"
+                "native_effects_cleared=true requested_glass={requested_glass} backend=standard css={fallback}"
             ));
-        if mode == ProductWindowMode::Sidebar
-            && appearance.background_type == appearance::BackgroundType::Glass
-        {
-            window
-                .set_effects(EffectsBuilder::new().effect(Effect::Acrylic).build())
-                .map_err(|error| error.to_string())?;
-            eprintln!(
-                "[appearance-composition] mode={mode:?} · webview=transparent · native=Acrylic · css=graphite-tint"
-            );
-        } else {
-            window
-                .set_effects(None)
-                .map_err(|error| error.to_string())?;
-            let fallback = if mode == ProductWindowMode::Desktop
-                && appearance.background_type == appearance::BackgroundType::Glass
-            {
-                // Desktop is child-hosted under the shell, and
-                // DesktopAcrylicController needs top-level HWND semantics, so the
-                // native Acrylic path is unreachable here by design rather than by
-                // omission — Desktop falls back to translucent Graphite. See
-                // docs/desktop-mode.md.
-                "translucent-graphite"
-            } else if mode == ProductWindowMode::Floating
-                && presentation == FloatingPresentation::Collapsed
-                && appearance.background_type == appearance::BackgroundType::Glass
-            {
-                "transparent-orb-tint"
-            } else {
-                "selected-css-material"
-            };
-            eprintln!(
-                "[appearance-composition] mode={mode:?} · webview=transparent · native=none · css={fallback}"
-            );
-        }
+        window
+            .set_effects(None)
+            .map_err(|error| error.to_string())?;
+        eprintln!(
+            "[appearance-composition] mode={mode:?} · webview=transparent · native=none · css={fallback}"
+        );
     }
 
     #[cfg(not(target_os = "windows"))]

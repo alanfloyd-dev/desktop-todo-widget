@@ -131,7 +131,7 @@ Desktop 始终使用已文档化的半透明 Graphite 外观。这是设计上�
 
 ## 渲染
 
-产品只有一个窗口化 WebView2 后端（`ICoreWebView2Controller`）：只有一条宿主路径，没有用户可选的渲染后端，并完整暴露 Windows UI Automation。窗口材质由 Tauri 窗口效果请求加上 CSS 材质层共同决定；参见[外观配置](#appearance-profiles)。
+产品只有一个窗口化 WebView2 后端（`ICoreWebView2Controller`）：只有一条宿主路径，没有用户可选的渲染后端，并完整暴露 Windows UI Automation。窗口材质完全由透明窗口之上的 CSS 材质层渲染；参见[外观配置](#appearance-profiles)。
 
 ## Appearance profiles
 

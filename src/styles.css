@@ -753,6 +753,8 @@ button.profile-identity {
  * `.signature button` (the shared footer button rule) is less specific than
  * `.signature .footer-settings-button`, so this block owns the gear's padding,
  * border, and resting colour without editing the collapse affordance's rules.
+ * The glyph strokes `currentColor`, so near-white at rest keeps it legible over
+ * translucent and wallpaper backgrounds without becoming a primary action.
  */
 .signature .footer-settings-button {
   display: grid;
@@ -763,7 +765,7 @@ button.profile-identity {
   place-items: center;
   border: 1px solid transparent;
   border-radius: 3px;
-  color: var(--faint);
+  color: rgba(255, 255, 255, 0.92);
   background: transparent;
   cursor: pointer;
 }
@@ -786,10 +788,13 @@ button.profile-identity {
 
 .signature .footer-settings-button:hover,
 .signature .footer-settings-button:focus-visible {
-  border-color: var(--line-strong);
-  color: var(--mineral);
-  background: rgba(129, 185, 223, 0.1);
+  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
   outline: none;
+}
+
+.signature .footer-settings-button:active {
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .mode-sidebar .product-content {
@@ -1746,15 +1751,6 @@ button.profile-identity {
 
   .weather-provider-row button {
     justify-self: start;
-  }
-
-  /* Sidebar keeps the shared identity/gear row at narrow widths; Floating and
-     Desktop keep their stacked footer. */
-  .mode-floating .signature,
-  .mode-desktop .signature {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 14px;
   }
 
   .task-row {
