@@ -8,7 +8,7 @@
 
 **Desktop** is Windows Shell integration and is a supported v1 mode. The same Tauri HWND and WebView2 controller are retained while the bounded, frameless Widget is converted into a child of the interactive desktop host. Its geometry is independent from Floating mode and clamped within the host client area, leaving the real wallpaper, desktop icons, and native desktop surface available outside the Widget. It is draggable and resizable while unlocked, and it never uses always-on-top as a substitute.
 
-Appearance does not alter this parenting route. Desktop clears top-level Acrylic before `WS_CHILD` reparenting and uses a transparent WebView with the documented translucent Graphite fallback; it does not claim unreliable child-window backdrop blur, and native Acrylic is unavailable in this mode by design because a Shell child has no top-level HWND semantics. Switching Orb → Desktop or Desktop → Floating changes presentation through the existing mode state machine without copying the 56 DIP size into Desktop or expanded-Floating geometry.
+Appearance does not alter this parenting route. Desktop clears top-level window effects before `WS_CHILD` reparenting and uses a transparent WebView with the documented translucent Graphite fallback; it does not claim unreliable child-window backdrop blur, because a Shell child has no top-level HWND semantics. Switching Orb → Desktop or Desktop → Floating changes presentation through the existing mode state machine without copying the 56 DIP size into Desktop or expanded-Floating geometry.
 
 ## Relevant Shell windows
 

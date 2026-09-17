@@ -4,10 +4,7 @@
 
 Glass · Graphite Frost is the first-install default; the earlier opaque graphite look remains selectable as Solid · Graphite. The Tauri window and WebView2 controller are transparent, and `html`, `body`, `#app`, the product root, and the material container remain transparent. The Vue material then adds a semi-transparent graphite tint/overlay below a fully opaque content layer. Solid forces its background layer to opacity 1.
 
-What the native layer does depends on the rendering backend, because `RenderingBackend` decides how the WebView is hosted:
-
-- **Enhanced** (composition-hosted) composites the WebView into the app's own `Windows.UI.Composition` visual tree, so the composition host can attach a `DesktopAcrylicController`. It does so for exactly one case: **expanded Floating with a Glass background**. Sidebar, the collapsed Orb, and Desktop resolve to their CSS fallbacks, and a machine where the platform reports Desktop Acrylic as unsupported falls back the same way.
-- **Standard** (windowed) stays CSS-only. Driving the native material host over a windowed WebView puts a composition target on the parent of the WebView's child HWND, which presents the acrylic fill without the content behind it and makes Chromium treat the view as occluded.
+The WebView is hosted the one windowed way Tauri/Wry provides, and window materials are resolved by the Tauri window-effects request plus the CSS material layers.
 
 Sidebar Glass additionally issues Tauri's DWM Acrylic request beside the CSS graphite tint. That request is not a visually verified native backdrop on the tested Windows 11 24H2 system — API success is not treated as material success — so Sidebar Glass must not be read as a guarantee of cross-HWND blur. CSS `backdrop-filter` remains only a progressive in-WebView enhancement. Desktop clears the effect before Phase 1 Shell reparenting and always uses the translucent Graphite fallback. When a requested image or wallpaper is unavailable, the same rendered fallback keeps the rest of the app usable.
 
@@ -35,4 +32,4 @@ Sidebar and Desktop always show the full Widget. Mode transitions retain their e
 
 Copied diagnostics may report background type, availability, requested/resolved contrast, avatar configured yes/no, Floating presentation, and logical Orb bounds. They never include profile text, Quick Link URLs, managed IDs, asset filenames/paths, wallpaper path, image bytes, or sampled content.
 
-Native Acrylic availability is one case only: expanded Floating Glass on the Enhanced backend. Desktop never uses it, because a `SHELLDLL_DefView` child is not a top-level HWND and the native backdrop path requires top-level window semantics; Desktop therefore uses the documented translucent Graphite fallback. Current-wallpaper mode is a separate rendered image background, not native transparency, and the wallpaper is reread on app/settings load rather than watched continuously. See [native-composition.md](native-composition.md) and [phase-7c3b4-dual-backend-release-decision.md](phase-7c3b4-dual-backend-release-decision.md) for the hosting evidence behind this split.
+Desktop always uses the documented translucent Graphite fallback, because a `SHELLDLL_DefView` child is not a top-level HWND and window backdrop effects require top-level window semantics. Current-wallpaper mode is a separate rendered image background, not native transparency, and the wallpaper is reread on app/settings load rather than watched continuously.

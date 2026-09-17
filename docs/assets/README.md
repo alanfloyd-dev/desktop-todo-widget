@@ -8,7 +8,6 @@ Current assets:
 
 - `demo.gif` — inline README demo
 - `demo.mp4` — higher-quality recording
-- `floating-acrylic.png` — Floating (expanded) with native Acrylic on the Enhanced backend
 - `orb.png` — Floating collapsed to the Orb
 - `sidebar.png` — Sidebar docked to a screen edge
 - `desktop.png` — Desktop mode hosted on the desktop

@@ -16,10 +16,6 @@ It focuses on lightweight task management, tray-first interaction, customizable 
 
 [Watch the MP4 recording](docs/assets/demo.mp4)
 
-<p align="center">
-  <a href="docs/assets/floating-acrylic.png"><img src="docs/assets/floating-acrylic.png" width="400" alt="Floating mode with native Acrylic"></a>
-</p>
-
 <table>
   <tr>
     <th align="center">Orb</th>
@@ -68,7 +64,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 What `install.ps1` does:
 
-- copies the executable and its staged Windows App SDK runtime payload into `%LOCALAPPDATA%\Programs\desktop-todo-widget\`,
+- copies the executable into `%LOCALAPPDATA%\Programs\desktop-todo-widget\`,
 - installs the executable as `desktop-todo-widget.exe` whatever the build output's internal name was,
 - creates a per-user Start Menu shortcut unless `-NoStartMenuShortcut` is given,
 - supports re-running as an in-place upgrade: it stops a running instance started from that directory, replaces program files, and prunes payload files the new build no longer ships.
@@ -82,7 +78,7 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1                  # keep
 powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -RemoveUserData  # warns, then removes the data too
 ```
 
-`uninstall.ps1` stops the app if it is running, removes the Start Menu shortcut and the program files, and keeps `%APPDATA%\net.alanfloyd.desktop\` unless `-RemoveUserData` is passed. That flag prints the exact paths before deleting and asks for confirmation; `-Force` skips the prompt for scripted use, and a host that cannot prompt keeps the data. Deletion is bounded: every file must be inside the resolved install directory and must look like a program file (executable, runtime payload, documentation, payload manifest, or the app's own log), and anything unexpected — a foreign file or a subdirectory — stops the uninstall instead of being deleted.
+`uninstall.ps1` stops the app if it is running, removes the Start Menu shortcut and the program files, and keeps `%APPDATA%\net.alanfloyd.desktop\` unless `-RemoveUserData` is passed. That flag prints the exact paths before deleting and asks for confirmation; `-Force` skips the prompt for scripted use, and a host that cannot prompt keeps the data. Deletion is bounded: every file must be inside the resolved install directory and must look like a program file (executable, documentation, log files, or runtime payload files an older version may have installed), and anything unexpected — a foreign file or a subdirectory — stops the uninstall instead of being deleted.
 
 Both scripts are verified by a simulation harness that runs them against a throwaway sandbox with a fake `%LOCALAPPDATA%`, `%APPDATA%`, payload, and user-data directory: clean install, overwrite upgrade, both uninstall modes, and the refusal paths.
 
@@ -116,34 +112,27 @@ The portable ZIP remains the primary distribution; nothing about extracting and 
 
 **Sidebar** — edge-oriented widget mode. Occupies the monitor work-area height, docks to the left or right edge, and remembers side and width. Dragging Floating near an edge enters Sidebar.
 
-**Floating** — a movable, frameless window and the first-run default. A profile that has never been used opens it **expanded**, so a first run shows the widget itself — date line, tasks, footer, and the Settings gear — instead of a 56 DIP Orb that is easy to miss in a screen corner. It can collapse to the Orb and expand again, and it keeps its expanded size and Orb anchor as independent saved values. The Enhanced rendering backend supports native Acrylic in this mode.
+**Floating** — a movable, frameless window and the first-run default. A profile that has never been used opens it **expanded**, so a first run shows the widget itself — date line, tasks, footer, and the Settings gear — instead of a 56 DIP Orb that is easy to miss in a screen corner. It can collapse to the Orb and expand again, and it keeps its expanded size and Orb anchor as independent saved values.
 
 **Desktop** — a desktop-hosted frameless widget. It is reparented as a child of the Windows desktop host, so the wallpaper, desktop icons, and the native desktop context menu stay usable around it. It is movable and resizable when unlocked, with geometry independent from Floating, and always-on-top is unavailable.
 
 ### First run
 
-The first run is the only time the product chooses a presentation: a profile with no stored settings document yet is created with Floating expanded, the documented default size, and the **Gradient** material on the Standard rendering backend. Gradient is the documented graphite palette (`#11191e` → `#213747` at 135°) at the documented opacity, and it is the fresh default because the Standard backend has no native Acrylic: a tint over an arbitrary wallpaper competes with the widget's own text, while the Gradient keeps a defined surface that reads the same over dark, light, saturated, and textured desktops. An existing profile is never re-defaulted — it is loaded exactly as stored, including its Floating presentation and its material — so upgrading cannot change the state a user left the widget in. The visible Settings gear is present from that first expanded frame.
+The first run is the only time the product chooses a presentation: a profile with no stored settings document yet is created with Floating expanded, the documented default size, and the **Gradient** material. Gradient is the documented graphite palette (`#11191e` → `#213747` at 135°) at the documented opacity, and it is the fresh default because a translucent tint over an arbitrary wallpaper competes with the widget's own text, while the Gradient keeps a defined surface that reads the same over dark, light, saturated, and textured desktops. An existing profile is never re-defaulted — it is loaded exactly as stored, including its Floating presentation and its material — so upgrading cannot change the state a user left the widget in. The visible Settings gear is present from that first expanded frame.
 
-### Native Acrylic is unavailable in Desktop mode
+### Desktop material fallback
 
-This is a design and platform constraint, not a regression:
+Desktop uses its documented translucent Graphite material instead of Glass. This is a design and platform constraint, not a regression:
 
 - Desktop is hosted as a child window under the Windows desktop hierarchy (`SHELLDLL_DefView`), which is not a documented public embedding API.
-- The native Acrylic path requires top-level HWND semantics; a composition-hosted backdrop cannot be attached to that child window.
-- Desktop therefore uses the documented translucent Graphite fallback, and the native menu labels it `Desktop (Acrylic unavailable)`.
+- Window backdrop effects need top-level HWND semantics; a `SHELLDLL_DefView` child is not one.
+- Desktop therefore always uses the documented translucent Graphite fallback.
 
 See [docs/desktop-mode.md](docs/desktop-mode.md) for the attach/detach lifecycle and host discovery details.
 
-## Rendering backends
+## Rendering
 
-The WebView2 hosting backend is chosen in Settings and applies after a restart. It is orthogonal to the window mode: Sidebar, Floating, and Desktop all work on either backend. **Standard** is the v1 default.
-
-| Backend | Hosting | Notes |
-| --- | --- | --- |
-| **Standard** | Ordinary windowed WebView2 (`ICoreWebView2Controller`) | Compatibility-oriented and the recommended choice when composition features are unnecessary. Exposes the WebView content to Windows UI Automation. |
-| **Enhanced** | Composition-hosted WebView2 (`ICoreWebView2CompositionController`) | Enables native Acrylic in Floating. A deeper Windows-specific implementation, and its conventional UI Automation / accessibility behavior is more limited. |
-
-See [docs/phase-7c3b4-dual-backend-release-decision.md](docs/phase-7c3b4-dual-backend-release-decision.md) and [docs/native-composition.md](docs/native-composition.md).
+The product has a single windowed WebView2 backend (`ICoreWebView2Controller`): there is one hosting path, no user-selectable backend, and full Windows UI Automation exposure. Window materials are resolved by the Tauri window-effects request plus CSS material layers; see [Appearance profiles](#appearance-profiles).
 
 ## Appearance profiles
 
@@ -208,9 +197,8 @@ High level: Vue 3 + TypeScript render the product surface and own presentation s
 - **Tauri** — application shell, window/tray lifecycle, IPC commands and events.
 - **Rust** — product settings, SQLite repository and migrations, task lifecycle, reviews, weather adapter, appearance validation.
 - **Vue 3 + TypeScript** — presentation, per-mode layout, settings, review, weather display.
-- **WebView2** — windowed (`Standard`) or composition-hosted (`Enhanced`) rendering surface.
+- **WebView2** — windowed rendering surface.
 - **SQLite** — local task/history/category/weather storage; typed JSON settings in `app_settings`.
-- **Windows Composition APIs** — the Enhanced backend's composition host, Desktop Acrylic controller, and visual tree.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/](docs/) for the module-by-module detail.
 
@@ -233,14 +221,6 @@ cargo test --manifest-path src-tauri/Cargo.toml
 pnpm tauri build --no-bundle
 ```
 
-The Windows build also stages the self-contained Windows App SDK payload beside the executable. `build.rs` fails with the exact command if it is missing, because the Enhanced (composition-hosted) backend needs it at runtime:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/windows-app-sdk/prepare-runtime-payload.ps1
-```
-
-The payload is not committed; [docs/windows-app-sdk-runtime.md](docs/windows-app-sdk-runtime.md) is the authoritative description of its provenance and version policy.
-
 ### Verification
 
 Four scripts cover the parts of this project that unit tests cannot reach. All of them stop any running instance first, and none of them touches a profile without a verified copy:
@@ -258,15 +238,14 @@ pwsh -File scripts/verify-install-scripts.ps1     # install / upgrade / uninstal
 
 `pnpm tauri:dev` runs the Vite dev server for frontend work. Production builds embed the compiled frontend and serve it through the Tauri custom protocol (`custom-protocol` feature), so a release build never depends on a dev server.
 
-Release builds are linked as a Windows GUI-subsystem application (`#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` in `src-tauri/src/main.rs`), so double-clicking the built executable does not open a console window. Debug builds keep the console, so `eprintln!` diagnostics stay visible during development. In every profile the app also writes its diagnostics to `phase7b-qa-*.log` beside the executable, and panic reports are appended to that same file, so a release crash is still recorded without a console.
+Release builds are linked as a Windows GUI-subsystem application (`#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` in `src-tauri/src/main.rs`), so double-clicking the built executable does not open a console window. Debug builds keep the console, so `eprintln!` diagnostics stay visible during development. In every profile the app also writes its diagnostics to `qa-diagnostics.log` beside the executable, and panic reports are appended to that same file, so a release crash is still recorded without a console.
 
-`pnpm tauri build --no-bundle` produces the executable and its runtime payload, and `bundle.active` is `false`: the Tauri bundler is disabled, and installation is the per-user script described in [Install](#install) rather than a generated MSI/EXE package.
+`pnpm tauri build --no-bundle` produces the executable, and `bundle.active` is `false`: the Tauri bundler is disabled, and installation is the per-user script described in [Install](#install) rather than a generated MSI/EXE package.
 
 ## Known limitations
 
-- **Desktop Acrylic** — unavailable by design. Desktop is hosted as a child of the Windows desktop hierarchy while the native Acrylic path needs top-level HWND semantics; Desktop uses the translucent Graphite fallback instead.
-- **Enhanced accessibility** — composition hosting means the Enhanced backend offers more limited conventional Windows UI Automation behavior than Standard. Use Standard if you rely on screen readers or automation tools.
-- **Windows-specific implementation** — Enhanced depends on Windows/WebView2/Tauri-specific behavior and may need compatibility updates as those platforms evolve.
+- **Desktop material** — Desktop always uses the translucent Graphite fallback. It is hosted as a child of the Windows desktop hierarchy while window backdrop effects need top-level HWND semantics.
+- **Windows-specific implementation** — the product depends on Windows/WebView2/Tauri-specific behavior and may need compatibility updates as those platforms evolve.
 - **Desktop host is undocumented** — `Progman`, `WorkerW`, and `SHELLDLL_DefView` topology can change across Windows updates and Explorer restarts.
 - **Scope** — Windows 11 validated, no updater and no bundled MSI/EXE package (installation is the per-user script in [Install](#install)), no sync, and no localization beyond English and Simplified Chinese.
 
@@ -274,7 +253,6 @@ Release builds are linked as a Windows GUI-subsystem application (`#![cfg_attr(n
 
 Planned after v1 stabilization:
 
-- Evaluate extracting the Windows Composition / Acrylic hosting work into a standalone reusable project or library.
 - Reports: broader factual review surfaces on the existing task history.
 - Componentization: smaller, clearer frontend and Rust boundaries.
 - Settings organization: group the current settings surface more deliberately.
@@ -290,7 +268,6 @@ Contributions are welcome. Short version:
 - Explain platform-specific behavior and the Windows/WebView2 assumptions behind it.
 - Add tests where practical; native mode changes still need the manual mode-transition checks.
 - Preserve user data. Migrations must be idempotent, and destructive migrations are not acceptable.
-- Do not regress Standard mode while changing Enhanced.
 - AI-assisted pull requests are welcome, but you must review, test, and understand what you submit.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).

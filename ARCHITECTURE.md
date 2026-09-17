@@ -1,6 +1,6 @@
 # desktop-todo-widget architecture
 
-The v1 module map. Product behaviour is described in [README.md](README.md); the Windows research and phase evidence behind the native boundary live in [docs/](docs/).
+The v1 module map. Product behaviour is described in [README.md](README.md); feature documentation lives in [docs/](docs/).
 
 ```text
 Vue / TypeScript
@@ -24,7 +24,6 @@ Rust product boundary
 Frozen Phase 1 native boundary
   window_mode.rs       HWND, SetParent, styles, z-order, Shell hooks
   platform/windows/widget_frame.rs         taskbar/Alt+Tab exclusion (widget semantics)
-  platform/windows/composition_host/       Enhanced-backend composition hosting and material
 ```
 
 ## Product and native separation
@@ -43,14 +42,9 @@ All widget and tray actions use the same string command IDs and `dispatch_produc
 
 Lock disables drag initiation and native resizing. It does not enable click-through, so content, links, settings, and the context menu remain interactive.
 
-## Rendering backends
+## Rendering
 
-`RenderingBackend` is orthogonal to the window mode and is fixed when the WebView is created, so changing it needs a restart.
-
-- **Standard** (v1 default): Tauri/Wry create the ordinary windowed `ICoreWebView2Controller`. The window's material is CSS-only, because driving the native material host over a windowed WebView puts a composition target on the parent of the WebView's child HWND.
-- **Enhanced**: the vendored Wry patch creates `ICoreWebView2CompositionController` and the WebView is composited into the app's own `Windows.UI.Composition` visual tree. Only this path reaches the `DesktopAcrylicController`, and only for expanded Floating with a Glass background; Sidebar, collapsed Orb, and Desktop resolve to their documented CSS fallbacks. The composition host also owns the spatial input bridge and the geometry/DPI policy for that tree.
-
-`src-tauri/src/platform/windows/composition_host/` contains that host; it is Windows-only code behind a platform boundary, and `docs/native-composition.md` and `docs/windows-app-sdk-runtime.md` describe its runtime dependency.
+The product has a single windowed WebView2 backend. Tauri/Wry create the ordinary windowed `ICoreWebView2Controller`, and window materials are resolved by the Tauri window-effects request plus CSS material layers — Sidebar Glass requests the Tauri acrylic window effect with the CSS graphite tint; the collapsed Orb and Desktop resolve to their documented CSS fallbacks. There is no user-selectable backend and no second hosting path.
 
 ## Persistence and migration
 
@@ -70,9 +64,9 @@ The calendar date and task day are intentionally separate. The UI header uses th
 
 `reviews.rs` is a read-only projection over raw `tasks` rows. Each request calculates Daily, Monday–Sunday Weekly, or calendar-month bounds, queries `scheduled_date` inside those bounds, and aggregates final task statuses plus task-day and category distributions in memory. `completed_at` and `carried_from` remain available as history facts; a carried source counts as `carried` on its own scheduled day, while its successor is an independent row on its successor day. No report snapshots, percentages, scores, or other derived values are persisted.
 
-The typed product-settings document stored in `app_settings` contains mode, the rendering backend, independent expanded-Floating/Desktop geometry, an independent Floating Orb anchor, monitor identity, sidebar state, lock/topmost flags, day rollover, language, normalized weather settings, per-mode appearance profiles, avatar asset ID, Quick Links, and profile fields. Product geometry is persisted in logical pixels (DIP). Missing fields merge centralized defaults, so no SQLite migration is required and schema 3 remains authoritative.
+The typed product-settings document stored in `app_settings` contains mode, independent expanded-Floating/Desktop geometry, an independent Floating Orb anchor, monitor identity, sidebar state, lock/topmost flags, day rollover, language, normalized weather settings, per-mode appearance profiles, avatar asset ID, Quick Links, and profile fields. Product geometry is persisted in logical pixels (DIP). Missing fields merge centralized defaults, so no SQLite migration is required and schema 3 remains authoritative. Documents written by very old builds may still carry a rendering-backend field; it parses, normalizes to Standard, and is rewritten on the next startup.
 
-Appearance is split into a transparent native/WebView surface, transparent DOM roots, background/backdrop/tint material layers, and a fully opaque content layer, with one stored profile per window mode. On the Enhanced backend, expanded Floating Glass reaches the native Desktop Acrylic controller through the composition host; Sidebar Glass keeps the Tauri acrylic request plus the CSS graphite tint; the collapsed Orb disables the effect and the native shadow; Desktop clears the effect before Phase 1 Shell reparenting and always uses the translucent Graphite fallback, because a `SHELLDLL_DefView` child is not a top-level HWND and cannot host a native backdrop. Rust validates/clamps the settings, reads the Windows wallpaper once on demand, copies selected PNG/JPEG/WebP files into app data with generated IDs, and returns data URLs rather than private paths. Missing or corrupt assets resolve to safe transparent graphite Glass.
+Appearance is split into a transparent native/WebView surface, transparent DOM roots, background/backdrop/tint material layers, and a fully opaque content layer, with one stored profile per window mode. Sidebar Glass keeps the Tauri acrylic window effect plus the CSS graphite tint; the collapsed Orb disables the effect and the native shadow; Desktop clears the effect before Phase 1 Shell reparenting and always uses the translucent Graphite fallback, because a `SHELLDLL_DefView` child is not a top-level HWND and cannot host a native backdrop. Rust validates/clamps the settings, reads the Windows wallpaper once on demand, copies selected PNG/JPEG/WebP files into app data with generated IDs, and returns data URLs rather than private paths. Missing or corrupt assets resolve to safe transparent graphite Glass.
 
 Auto contrast uses a centralized representative-luminance calculation. Solid colors and gradient stops are deterministic; image/wallpaper data are sampled once with a 32×32 browser canvas when loaded or changed. A small hysteresis band prevents threshold flicker. Manual Light and Dark remain explicit overrides.
 
@@ -93,3 +87,11 @@ Public issue diagnostics use an explicit allowlist. They include runtime/window/
 ## Scope boundary
 
 v1 stops at factual local Review and Reports. Charts, evaluative trends, AI summaries, hourly/multi-day weather products, downloadable themes, autostart, complex tray behavior, auto-hide, notifications, calendar integration, and sync remain later work. [FUTURE.md](FUTURE.md) tracks the deferred list.
+
+## Historical note
+
+Earlier versions included an experimental Enhanced rendering backend using composition-hosted WebView2 and Native Acrylic/HostBackdrop, with a vendored Wry patch and a self-contained Windows App SDK runtime payload.
+
+It was retired after Standard rendering became sufficient for all supported product modes, while providing lower maintenance cost and fewer environment-dependent failures.
+
+The previous implementation remains available in Git history and release tags.

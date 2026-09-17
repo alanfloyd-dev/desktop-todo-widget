@@ -16,10 +16,6 @@
 
 [观看 MP4 录屏](docs/assets/demo.mp4)
 
-<p align="center">
-  <a href="docs/assets/floating-acrylic.png"><img src="docs/assets/floating-acrylic.png" width="400" alt="Floating 模式的原生 Acrylic"></a>
-</p>
-
 <table>
   <tr>
     <th align="center">Orb</th>
@@ -68,7 +64,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 `install.ps1` 会：
 
-- 把可执行文件及其随附的 Windows App SDK 运行时 payload 复制到 `%LOCALAPPDATA%\Programs\desktop-todo-widget\`；
+- 把可执行文件复制到 `%LOCALAPPDATA%\Programs\desktop-todo-widget\`；
 - 无论构建产物内部的名称是什么，都安装为 `desktop-todo-widget.exe`；
 - 创建一份当前用户的开始菜单快捷方式，除非传入 `-NoStartMenuShortcut`；
 - 支持重复执行即原地升级：先停止从该目录启动的正在运行的实例，再替换程序文件，并清理新版本不再随附的 payload 文件。
@@ -82,7 +78,7 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1                  # 保�
 powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -RemoveUserData  # 先警告，再一并删除数据
 ```
 
-`uninstall.ps1` 会在需要时停止正在运行的实例，删除开始菜单快捷方式和程序文件，并在未传入 `-RemoveUserData` 时保留 `%APPDATA%\net.alanfloyd.desktop\`。该参数会在删除前打印确切路径并要求确认；`-Force` 用于脚本化场景跳过确认，而在无法进行交互提示的宿主中会保留数据。删除范围是严格受限的：每个文件都必须位于解析出的安装目录内，并且必须是程序文件（可执行文件、运行时 payload、文档、payload 清单，或应用自身的日志文件）；一旦出现意外内容 —— 陌生的文件或子目录 —— 卸载会停止，而不是把它删掉。
+`uninstall.ps1` 会在需要时停止正在运行的实例，删除开始菜单快捷方式和程序文件，并在未传入 `-RemoveUserData` 时保留 `%APPDATA%\net.alanfloyd.desktop\`。该参数会在删除前打印确切路径并要求确认；`-Force` 用于脚本化场景跳过确认，而在无法进行交互提示的宿主中会保留数据。删除范围是严格受限的：每个文件都必须位于解析出的安装目录内，并且必须是程序文件（可执行文件、文档、日志文件，或旧版本可能安装过的运行时 payload 文件）；一旦出现意外内容 —— 陌生的文件或子目录 —— 卸载会停止，而不是把它删掉。
 
 两个脚本都由一个模拟验证脚本在一次性沙箱中运行验证：使用伪造的 `%LOCALAPPDATA%`、`%APPDATA%`、payload 和用户数据目录，覆盖全新安装、覆盖升级、两种卸载方式，以及各项拒绝路径。
 
@@ -116,34 +112,27 @@ pwsh -File scripts/verify-install-scripts.ps1
 
 **Sidebar** — 面向屏幕边缘的窗口模式。占满显示器工作区高度，停靠在左边缘或右边缘，并记住停靠侧和宽度。把 Floating 拖到边缘附近即可进入 Sidebar。
 
-**Floating** — 可移动的无边框窗口，也是首次运行的默认模式。全新（从未使用过的）配置会以**展开**状态打开它，因此首次启动就能看到小组件本身 —— 日期行、任务、页脚和设置齿轮 —— 而不是屏幕角落里一个容易被忽略的 56 DIP Orb。它可以折叠为 Orb 再展开，并且把展开后的尺寸和 Orb 锚点作为两个相互独立的值保存下来。Enhanced 渲染后端在该模式下支持原生 Acrylic。
+**Floating** — 可移动的无边框窗口，也是首次运行的默认模式。全新（从未使用过的）配置会以**展开**状态打开它，因此首次启动就能看到小组件本身 —— 日期行、任务、页脚和设置齿轮 —— 而不是屏幕角落里一个容易被忽略的 56 DIP Orb。它可以折叠为 Orb 再展开，并且把展开后的尺寸和 Orb 锚点作为两个相互独立的值保存下来。
 
 **Desktop** — 由桌面宿主的无边框小组件。它会被重新挂载为 Windows 桌面宿主的子窗口，因此其周围的壁纸、桌面图标和原生桌面右键菜单仍然可用。解锁状态下可移动、可调整大小，几何信息独立于 Floating，且不提供始终置顶。
 
 ### 首次运行
 
-首次运行是产品唯一一次自行决定展示状态的时机：当配置文档尚不存在时，新建的文档以 Floating 展开、默认尺寸、**渐变（Gradient）**材质和 Standard 渲染后端开始。渐变使用的就是项目既有的石墨色板（`#11191e` → `#213747`，135°）与既有不透明度；把它作为全新配置的默认材质，是因为 Standard 后端没有原生 Acrylic：在任意壁纸之上只做一层色调，会和组件自身的文字争夺可读性，而渐变让界面保持一个确定的形状，在暗色、浅色、高饱和和复杂纹理桌面上观感一致。已存在的配置永远不会被重新套用默认值 —— 它会原样加载，包括它的 Floating 展示状态与材质 —— 因此升级不会改变用户上次离开时的状态。可见的设置齿轮从第一帧展开界面起就存在。
+首次运行是产品唯一一次自行决定展示状态的时机：当配置文档尚不存在时，新建的文档以 Floating 展开、默认尺寸、**渐变（Gradient）**材质开始。渐变使用的就是项目既有的石墨色板（`#11191e` → `#213747`，135°）与既有不透明度；把它作为全新配置的默认材质，是因为在任意壁纸之上只做一层色调，会和组件自身的文字争夺可读性，而渐变让界面保持一个确定的形状，在暗色、浅色、高饱和和复杂纹理桌面上观感一致。已存在的配置永远不会被重新套用默认值 —— 它会原样加载，包括它的 Floating 展示状态与材质 —— 因此升级不会改变用户上次离开时的状态。可见的设置齿轮从第一帧展开界面起就存在。
 
-### Desktop 模式下无法使用原生 Acrylic
+### Desktop 的材质回退
 
-这是设计上与平台上的限制，不是功能退化：
+Desktop 始终使用已文档化的半透明 Graphite 外观。这是设计上与平台上的限制，不是功能退化：
 
 - Desktop 以子窗口形式托管在 Windows 桌面层级之下（`SHELLDLL_DefView`），而这并不是一个公开文档化的嵌入 API。
-- 原生 Acrylic 路径需要顶层 HWND 语义；合成托管的背景无法附加到该子窗口上。
-- 因此 Desktop 使用已文档化的半透明 Graphite 回退外观，原生菜单中将其标注为 `Desktop (Acrylic unavailable)`。
+- 窗口背景效果需要顶层 HWND 语义；`SHELLDLL_DefView` 子窗口不具备。
+- 因此 Desktop 始终使用已文档化的半透明 Graphite 回退外观。
 
 挂载/卸载生命周期与宿主发现细节参见 [docs/desktop-mode.md](docs/desktop-mode.md)。
 
-## Rendering backends
+## 渲染
 
-WebView2 的宿主方式在设置中选择，重启后生效。它与窗口模式相互独立：Sidebar、Floating 和 Desktop 在两种后端上都能工作。**Standard** 是 v1 的默认选项。
-
-| 后端 | 宿主方式 | 说明 |
-| --- | --- | --- |
-| **Standard** | 普通窗口化 WebView2（`ICoreWebView2Controller`） | 以兼容性为取向；在不需要合成特性时是推荐选择。会把 WebView 内容暴露给 Windows UI Automation。 |
-| **Enhanced** | 合成托管的 WebView2（`ICoreWebView2CompositionController`） | 在 Floating 中启用原生 Acrylic。是更深入的 Windows 特定实现，其常规 UI Automation / 辅助功能行为也更受限。 |
-
-参见 [docs/phase-7c3b4-dual-backend-release-decision.md](docs/phase-7c3b4-dual-backend-release-decision.md) 与 [docs/native-composition.md](docs/native-composition.md)。
+产品只有一个窗口化 WebView2 后端（`ICoreWebView2Controller`）：只有一条宿主路径，没有用户可选的渲染后端，并完整暴露 Windows UI Automation。窗口材质由 Tauri 窗口效果请求加上 CSS 材质层共同决定；参见[外观配置](#appearance-profiles)。
 
 ## Appearance profiles
 
@@ -208,9 +197,8 @@ Quick Links 是用户自行管理的“名称 / URL”组合，作为产品的�
 - **Tauri** — 应用外壳、窗口/托盘生命周期、IPC 命令与事件。
 - **Rust** — 产品设置、SQLite 仓储与迁移、任务生命周期、回顾、天气适配器、外观校验。
 - **Vue 3 + TypeScript** — 界面呈现、各模式布局、设置、回顾、天气展示。
-- **WebView2** — 窗口化（`Standard`）或合成托管（`Enhanced`）的渲染表面。
+- **WebView2** — 窗口化的渲染表面。
 - **SQLite** — 本地任务/历史/分类/天气存储；`app_settings` 中存放带类型的 JSON 设置。
-- **Windows Composition APIs** — Enhanced 后端的合成宿主、Desktop Acrylic 控制器和视觉树。
 
 逐模块的细节参见 [ARCHITECTURE.md](ARCHITECTURE.md) 与 [docs/](docs/)。
 
@@ -233,14 +221,6 @@ cargo test --manifest-path src-tauri/Cargo.toml
 pnpm tauri build --no-bundle
 ```
 
-Windows 构建还会把自包含的 Windows App SDK payload 部署到与可执行文件相同的目录中。如果该 payload 缺失，`build.rs` 会直接失败并给出确切的命令，因为 Enhanced（合成托管）后端在运行期需要它：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File tools/windows-app-sdk/prepare-runtime-payload.ps1
-```
-
-该 payload 不会被提交到仓库；其来源与版本策略的权威说明见 [docs/windows-app-sdk-runtime.md](docs/windows-app-sdk-runtime.md)。
-
 ### 验证
 
 有四个脚本覆盖单元测试无法触达的部分。它们都会先停止正在运行的实例，并且在没有经过校验的副本之前，绝不会改动任何配置目录：
@@ -259,15 +239,14 @@ pwsh -File scripts/verify-install-scripts.ps1     # 在一次性沙箱中验证�
 
 `pnpm tauri:dev` 会为前端开发启动 Vite 开发服务器。生产构建会把编译好的前端嵌入其中，并通过 Tauri 自定义协议（`custom-protocol` 特性）提供，因此发布构建从不依赖开发服务器。
 
-发布构建会以 Windows GUI 子系统链接（`src-tauri/src/main.rs` 中的 `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`），因此双击构建出的可执行文件不会再弹出控制台窗口。调试构建仍保留控制台，开发期间的 `eprintln!` 诊断信息依旧可见。在任何构建配置下，应用都会把诊断信息写入可执行文件旁边的 `phase7b-qa-*.log`，panic 报告也会追加到同一个文件，因此即使没有控制台，发布版本的崩溃依然会被记录。
+发布构建会以 Windows GUI 子系统链接（`src-tauri/src/main.rs` 中的 `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`），因此双击构建出的可执行文件不会再弹出控制台窗口。调试构建仍保留控制台，开发期间的 `eprintln!` 诊断信息依旧可见。在任何构建配置下，应用都会把诊断信息写入可执行文件旁边的 `qa-diagnostics.log`，panic 报告也会追加到同一个文件，因此即使没有控制台，发布版本的崩溃依然会被记录。
 
-`pnpm tauri build --no-bundle` 产出可执行文件及其运行时 payload，且 `bundle.active` 为 `false`：Tauri 打包器处于关闭状态，安装方式为[安装](#安装)中描述的按用户脚本，而不是生成的 MSI/EXE 安装包。
+`pnpm tauri build --no-bundle` 产出可执行文件，且 `bundle.active` 为 `false`：Tauri 打包器处于关闭状态，安装方式为[安装](#安装)中描述的按用户脚本，而不是生成的 MSI/EXE 安装包。
 
 ## Known limitations
 
-- **Desktop Acrylic** — 设计上不可用。Desktop 以子窗口形式托管在 Windows 桌面窗口层级之下，而原生 Acrylic 路径需要顶层 HWND 语义；因此 Desktop 改用半透明的 Graphite 回退外观。
-- **Enhanced 的辅助功能** — 合成托管意味着 Enhanced 后端在常规 Windows UI Automation 行为上比 Standard 更受限。如果你依赖屏幕阅读器或自动化工具，请使用 Standard。
-- **Windows 特定实现** — Enhanced 依赖 Windows/WebView2/Tauri 的特定行为，随着这些平台演进可能需要进行兼容性更新。
+- **Desktop 材质** — Desktop 始终使用半透明 Graphite 回退外观。它以子窗口形式托管在 Windows 桌面窗口层级之下，而窗口背景效果需要顶层 HWND 语义。
+- **Windows 特定实现** — 产品依赖 Windows/WebView2/Tauri 的特定行为，随着这些平台演进可能需要进行兼容性更新。
 - **Desktop 宿主未公开文档化** — `Progman`、`WorkerW` 和 `SHELLDLL_DefView` 的拓扑结构可能随 Windows 更新和 Explorer 重启而变化。
 - **范围** — 已验证 Windows 11，没有更新程序，也没有打包的 MSI/EXE 安装包（安装方式为[安装](#安装)中的按用户脚本），没有同步，也没有英文和简体中文之外的其他本地化。
 
@@ -275,7 +254,6 @@ pwsh -File scripts/verify-install-scripts.ps1     # 在一次性沙箱中验证�
 
 计划在 v1 稳定之后进行：
 
-- 评估把 Windows Composition / Acrylic 托管相关工作抽取为可独立复用的项目或库。
 - 报表：在现有任务历史之上提供更丰富的事实性回顾界面。
 - 组件化：让前端与 Rust 的边界更小、更清晰。
 - 设置组织：更审慎地对当前设置界面进行分组。
@@ -291,7 +269,6 @@ pwsh -File scripts/verify-install-scripts.ps1     # 在一次性沙箱中验证�
 - 说明平台特定的行为，以及其背后的 Windows/WebView2 假设。
 - 在可行的范围内补充测试；原生窗口模式的改动仍然需要手工执行模式切换检查。
 - 保护用户数据。迁移必须是幂等的，不接受破坏性迁移。
-- 在修改 Enhanced 时不要使 Standard 模式退化。
 - 欢迎 AI 辅助的 pull request，但你必须审查、测试并理解你提交的内容。
 
 参见 [CONTRIBUTING.md](CONTRIBUTING.md)。
