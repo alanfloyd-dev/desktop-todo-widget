@@ -86,6 +86,8 @@ Public issue diagnostics use an explicit allowlist. They include runtime/window/
 
 ## Scope boundary
 
+The planned v1.2.0 [Application Lifecycle & Maintenance Architecture](docs/application-lifecycle.md) defines install, update, recovery, receipts, Windows integration, and uninstall. Its [protocol v1 contract](docs/maintenance-protocol-v1.md) is a design, not implemented functionality. It preserves the Standard-only rendering architecture and the frozen native boundary.
+
 v1 stops at factual local Review and Reports. Charts, evaluative trends, AI summaries, hourly/multi-day weather products, downloadable themes, autostart, complex tray behavior, auto-hide, notifications, calendar integration, and sync remain later work. [FUTURE.md](FUTURE.md) tracks the deferred list.
 
 ## Historical note

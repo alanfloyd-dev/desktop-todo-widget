@@ -6,17 +6,13 @@ This file is a roadmap and idea list, not a specification. Nothing here is promi
 
 ## Directions
 
-### Updater — Planned
+### Application lifecycle management — Planned for v1.2.0
 
-Goal: a one-click update experience for non-technical users.
+Goal: introduce installation maintenance, including authenticated updates, recovery, installation receipts, Windows Installed apps integration, and uninstall with local data retained by default.
 
-Likely scope:
+The [Application Lifecycle & Maintenance Architecture](docs/application-lifecycle.md) and [Maintenance protocol v1](docs/maintenance-protocol-v1.md) define the design. The main app owns GitHub/Gitee/Auto discovery and downloads; a small offline native `desktop-todo-maintenance.exe` owns replacement, HealthAck, runtime rollback and idempotent uninstall. Signed manifests and both sources are first-release requirements, not optional later additions.
 
-- The app checks for a new version, shows release information, downloads it, and verifies what it downloaded.
-- A small updater helper with a visible progress UI waits for the app to exit, installs/replaces the program files, rolls back on failure, and restarts the app.
-- The first version stays restrained; the split between "app decides" and "helper installs" is what should survive later growth.
-
-Possible later: stable/beta channels, mirror sources, background downloads, resumable downloads, signature verification, automatic checks. See the packaging note in [README.md](README.md#roadmap).
+v1.1.x and earlier require one manual upgrade to v1.2.0, the first self-maintaining release. This is currently documentation only. Beta channels, background/resumable downloads and automatic checks remain later work.
 
 ### Review export — Planned
 
