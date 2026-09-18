@@ -254,7 +254,7 @@ Manual bootstrap accepts the ZIP-only distribution; sibling manifest/signature a
 
 Install states: ValidatePackage -> ConfirmLocation/Adoption -> Lock -> WaitForExistingApp -> Stage/Backup -> InstallRuntime -> Verify -> Probation -> Reconcile -> WriteReceipt -> Complete. Journal each mutation; on failure restore a verified prior install or remove only newly created owned resources. Never remove retained business data. Adopt the default v1.1 install explicitly, preserve shortcut choice and data, and leave unknown historical files alone. Reject an existing managed `Uninstalling`/`RecoveryRequired` state until recovered.
 
-Future `install.ps1` becomes a thin bootstrap to `desktop-todo-maintenance.exe --install`; `uninstall.ps1` becomes a compatibility wrapper to the same uninstaller, with a documented legacy fallback only for pre-maintenance installations. Current scripts are not changed here. The release ZIP remains flat with its six existing files plus helper; signed manifest and signature are sibling release assets. Do not include the ZIP hash-bearing manifest inside the same ZIP and create a circular hash dependency.
+Future `install.ps1` becomes a thin bootstrap to `desktop-todo-maintenance.exe --install`; `uninstall.ps1` becomes a compatibility wrapper to the same uninstaller, with a documented legacy fallback only for pre-maintenance installations. Current scripts are not changed here. The release ZIP remains flat with its seven existing files plus helper; signed manifest and signature are sibling release assets. Do not include the ZIP hash-bearing manifest inside the same ZIP and create a circular hash dependency.
 
 ## 16. Release / CI requirements
 
@@ -262,7 +262,7 @@ Implement a reproducible packaging workflow later:
 
 1. Check immutable tag/commit and agreement of all version sources; run relevant Rust/frontend/install regression checks.
 2. Build main app once with embedded frontend (`custom-protocol`) and native helper once for Windows x64. Inspect PE versions and Standard-only dependencies.
-3. Assemble flat seven-file ZIP; hash final ZIP bytes and each updater-managed EXE. Generate `.zip.sha256` and manifest bytes once, then sign those exact bytes using protected release credentials.
+3. Assemble flat eight-file ZIP; hash final ZIP bytes and each updater-managed EXE. Generate `.zip.sha256` and manifest bytes once, then sign those exact bytes using protected release credentials.
 4. Upload **identical** ZIP, sidecar, manifest and signature to GitHub and Gitee. Never rebuild or reserialize per source. Keep signing secrets outside repository/logs and deny signing to untrusted PR jobs.
 5. Download every remote artifact and verify size, hashes, signature, names and equality across mirrors. Persist a release verification report tied to build commit and artifact digests.
 6. Only after both are verified expose the version to updater discovery. Use adapter-recognized publication eligibility/draft handling; protocol 1 must not rely on a host's arbitrary latest ordering. A failed mirror publication leaves the new release ineligible and the previous eligible version unchanged.

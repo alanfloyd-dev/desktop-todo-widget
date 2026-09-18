@@ -274,6 +274,8 @@ pwsh -File scripts/verify-install-scripts.ps1     # 在一次性沙箱中验证�
 
 ## License
 
-MIT — 参见 [LICENSE](LICENSE)。Copyright (c) 2026 Alan Floyd.
+本项目采用 [MIT License](LICENSE) 开源。
+简体中文参考译文见 [LICENSE_ZH.md](LICENSE_ZH.md)，如有歧义以英文原文为准。
+Copyright (c) 2026 Alan Floyd.
 
 依赖许可证与来源说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

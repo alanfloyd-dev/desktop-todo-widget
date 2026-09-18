@@ -273,6 +273,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Alan Floyd.
+MIT — see [LICENSE](LICENSE) (Simplified Chinese reference translation: [LICENSE_ZH.md](LICENSE_ZH.md)). Copyright (c) 2026 Alan Floyd.
 
 Dependency licenses and provenance notes are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
