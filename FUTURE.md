@@ -6,13 +6,15 @@ This file is a roadmap and idea list, not a specification. Nothing here is promi
 
 ## Directions
 
-### Application lifecycle management — Planned for v1.2.0
+### Application lifecycle management — In progress (v1.2.0)
 
 Goal: introduce installation maintenance, including authenticated updates, recovery, installation receipts, Windows Installed apps integration, and uninstall with local data retained by default.
 
-The [Application Lifecycle & Maintenance Architecture](docs/application-lifecycle.md) and [Maintenance protocol v1](docs/maintenance-protocol-v1.md) define the design. The main app owns GitHub/Gitee/Auto discovery and downloads; a small offline native `desktop-todo-maintenance.exe` owns replacement, HealthAck, runtime rollback and idempotent uninstall. Signed manifests and both sources are first-release requirements, not optional later additions.
+**Phase 1 is implemented** (manual trusted bootstrap with v1.1 adoption, the installation receipt, launch admission, Windows Installed apps registration, Start Menu reconciliation, interrupted-install recovery, and native uninstall keeping local data by default — see [Application Lifecycle & Maintenance Architecture](docs/application-lifecycle.md) for the recorded semantics and deviations). The main app's Settings expose the managed uninstall entry, which hands off to the same native helper that Windows Installed apps uses.
 
-v1.1.x and earlier require one manual upgrade to v1.2.0, the first self-maintaining release. This is currently documentation only. Beta channels, background/resumable downloads and automatic checks remain later work.
+**Phase 2 — the signed updater — is not implemented.** The [Maintenance protocol v1](docs/maintenance-protocol-v1.md) keeps it as design: the main app will own GitHub/Gitee/Auto discovery and downloads; a small offline native `desktop-todo-maintenance.exe` will own replacement, HealthAck, runtime rollback. Signed manifests and both sources are first-release requirements for automatic updates, not optional later additions.
+
+Reaching a formal v1.2.0 release still requires release preparation: the version bump plus verification that `ProductVersion`, `Receipt.currentVersion`, the Installed-apps `DisplayVersion`, and the release version all agree, and the flat eight-file release payload check. Beta channels, background/resumable downloads and automatic checks remain later work.
 
 ### Review export — Planned
 

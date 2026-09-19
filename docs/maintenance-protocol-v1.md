@@ -1,6 +1,8 @@
 # Maintenance protocol v1
 
-Status: **design contract for v1.2.0; no shipping implementation**. See [Application Lifecycle & Maintenance Architecture](application-lifecycle.md) for ownership, state machines, recovery and rollout decisions. Examples use synthetic sizes/hashes; they are not installable release metadata.
+Status: **contract for v1.2.0**. The Phase 1 subset below is implemented (commit `b381963`); the signed-update subset remains design until Phase 2. See [Application Lifecycle & Maintenance Architecture](application-lifecycle.md) for ownership, state machines, recovery and rollout decisions. Examples use synthetic sizes/hashes; they are not installable release metadata.
+
+**Implemented in Phase 1:** the `InstallationReceipt` codec and its validation, the manual bootstrap install transaction (with the bootstrap trust exception), the idempotent uninstall transaction with keep/remove local-data semantics, launch admission against the receipt, and Windows integration reconciliation. **Still design:** `UpdateManifest` and signature envelopes, release sources, package download/staging, `UpdateSession`, HealthAck, rollback, and key rotation.
 
 ## Encoding and validation
 
@@ -72,6 +74,13 @@ The receipt does not carry an arbitrary deletion list. Runtime hashes describe o
 
 For the initial manual trusted bootstrap, committedManifestSha256 and installed manifest/signature evidence may be absent: the ZIP does not contain the sibling release assets. Its validated local preimage hashes support recovery, not publisher authentication. The first self-update still requires a signed target manifest and retains the bootstrap preimage for rollback; successful commit establishes signed installed-release evidence. See [bootstrap trust boundary](application-lifecycle.md#15-installtransaction-and-bootstrap).
 
+**Phase 1 implementation decisions (binding for the implemented codec):**
+
+- The receipt uses `deny_unknown_fields` with a closed resource/lifecycle enum. This is deliberately stricter than the generic extension-field rule above: for the receipt specifically, an unknown field or identity indicates a foreign or future schema and must fail deserialization rather than be ignored, because receipt fields carry deletion-adjacent authority.
+- An `Installing` receipt is published before the first mutation and carries the **target version** in `currentVersion`; `currentVersion` is nullable only in that initial state. The Installing receipt is the durable crash marker: rerunning the same trusted installer resumes it (keeping `installationId`), and a receipt claiming a newer version than the installer refuses as a downgrade.
+- Support-resource ownership from a previous receipt is inherited across reinstall only for compiled-known support identities whose on-disk file still matches the recorded size and SHA256; everything else becomes unowned. Unknown resources are never adopted into any recorded list.
+- Local SHA256 fingerprints in `runtimeResources`/`supportResources` are recovery/ownership evidence only, exactly as the design states; publisher authentication never derives from them.
+
 ## UpdateSession and journal
 
 Location is derived from canonical maintenance root plus validated session UUID. The handoff may carry `--update --session-id <UUID>`; there is no arbitrary `--execute-script` or authoritative `--install-root`. `--install`, `--uninstall`, and `--recover --session-id <UUID>` select fixed operations. The selected operation must agree with the persisted session type.
@@ -98,6 +107,8 @@ Location is derived from canonical maintenance root plus validated session UUID.
 Session writes follow write-new-generation -> flush -> atomic publish. Persist intent before mutation and result after verifying the actual state. Recovery handles a missing result as ambiguous intent by inspecting old/new/backup hashes. Torn or conflicting generations never get merged speculatively. Keep source and destination file handles/identities through critical operations wherever Windows API semantics allow.
 
 UninstallSession shares envelope fields and logging, but has cleanup progress per owned identity and current-interaction data consent instead of update target/hash/probation. Consent records are audit metadata, not authority after restart. RecoverySession records the parent interrupted session and decision; it does not introduce a more permissive path policy.
+
+**Phase 1 implementation decision (binding):** the implemented uninstall transaction realizes this contract without a full session envelope — the `Installing`/`Uninstalling` receipt plus a minimal active-uninstall journal are the durable state, the transaction is idempotent and resumable (an interrupted run is finished by the next helper invocation), and deletion authority always derives from a valid receipt plus fresh consent, never from the journal.
 
 ## HealthAck
 

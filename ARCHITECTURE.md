@@ -24,6 +24,15 @@ Rust product boundary
 Frozen Phase 1 native boundary
   window_mode.rs       HWND, SetParent, styles, z-order, Shell hooks
   platform/windows/widget_frame.rs         taskbar/Alt+Tab exclusion (widget semantics)
+
+Maintenance subsystem (v1.2 Phase 1 — implemented)
+  maintenance_admission.rs  launch admission (Managed/Unmanaged/Development),
+                            canonical-root helper handoff, uninstall entry
+  maintenance/              offline core + native helper crate (no Tauri/network/SQLite):
+                            receipt codec, path policy, locking, install/uninstall
+                            transactions, Windows integration reconciliation;
+                            QA feature is compile-time gated and absent from
+                            production binaries
 ```
 
 ## Product and native separation
@@ -76,6 +85,10 @@ Public issue diagnostics use an explicit allowlist. They include runtime/window/
 
 ## Startup order
 
+0. **Maintenance admission** — resolve canonical roots, classify the launch
+   (Managed / Unmanaged / Development), refuse broken managed state before any
+   diagnostics write or database access, and hold the shared application lease
+   until exit ([docs/application-lifecycle.md](docs/application-lifecycle.md)).
 1. Resolve app-data and run idempotent SQLite migration.
 2. Load or create the typed settings document (Floating + collapsed Orb + Glass defaults, day rollover 04:00).
 3. Install the tray menu.
@@ -86,7 +99,7 @@ Public issue diagnostics use an explicit allowlist. They include runtime/window/
 
 ## Scope boundary
 
-The planned v1.2.0 [Application Lifecycle & Maintenance Architecture](docs/application-lifecycle.md) defines install, update, recovery, receipts, Windows integration, and uninstall. Its [protocol v1 contract](docs/maintenance-protocol-v1.md) is a design, not implemented functionality. It preserves the Standard-only rendering architecture and the frozen native boundary.
+The v1.2.0 [Application Lifecycle & Maintenance Architecture](docs/application-lifecycle.md) defines install, update, recovery, receipts, Windows integration, and uninstall. Its Phase 1 subset — manual bootstrap with v1.1 adoption, the installation receipt, launch admission, Windows integration, and native uninstall with keep/remove local-data semantics — is implemented and verified; the Phase 2 signed updater (discovery, manifests, download/staging, UpdateSession, HealthAck, rollback) remains design only ([protocol v1 contract](docs/maintenance-protocol-v1.md)). The maintenance architecture preserves the Standard-only rendering architecture and the frozen native boundary.
 
 v1 stops at factual local Review and Reports. Charts, evaluative trends, AI summaries, hourly/multi-day weather products, downloadable themes, autostart, complex tray behavior, auto-hide, notifications, calendar integration, and sync remain later work. [FUTURE.md](FUTURE.md) tracks the deferred list.
 

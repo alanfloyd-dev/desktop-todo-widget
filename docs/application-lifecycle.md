@@ -1,8 +1,8 @@
 # Application Lifecycle & Maintenance Architecture
 
-Status: **v1.2.0 design; not implemented**. Audited 2026-09-18 against v1.1.0 commit `6c1de930ee82116198e592a38086adf3dcc62923`.
+Status: **Phase 1 implemented** — installation lifecycle, receipt, launch admission, manual bootstrap with v1.1 adoption, reinstall semantics, interrupted-install recovery, and native keep/remove-data uninstall implemented in commit `b381963` on top of v1.1.0 (`6c1de930ee82116198e592a38086adf3dcc62923`). **The Phase 2 signed updater (§6–§10, §16) is not implemented** and its sections remain design. Deviations between this document and the Phase 1 implementation are recorded inline as "Phase 1 notes"; the source-level audit in §2 describes the v1.1.0 baseline and is kept as the historical record.
 
-This document defines installation, Windows registration, update, recovery, and uninstall as one application lifecycle. It follows the existing flat `docs/` structure. Wire contracts are in [Maintenance protocol v1](maintenance-protocol-v1.md). The audit below describes shipping behavior; subsequent sections are requirements for future implementation, not claims about v1.1.0.
+This document defines installation, Windows registration, update, recovery, and uninstall as one application lifecycle. It follows the existing flat `docs/` structure. Wire contracts are in [Maintenance protocol v1](maintenance-protocol-v1.md). The §2 audit describes v1.1.0 shipping behavior. Sections §3–§18 mix the standing design with "Phase 1 notes" that record how a requirement was actually implemented; anything outside those notes and outside the implemented status above is still future work.
 
 ## 1. Goals and non-goals
 
@@ -112,6 +112,14 @@ Lifecycle values: `Installing`, `Installed`, `Updating`, `Uninstalling`, `Recove
 
 Safety precedence is **compiled safety policy > canonical installation validation > receipt assertions**. Reject mismatched appId, malformed UUIDs, unsupported schema, duplicate identities, conflicting root/version evidence, and roots outside policy. Receipt text claiming `C:\Windows` cannot authorize access there. Unknown receipt schema is preserved for a newer helper/manual repair, not interpreted as an empty resource list.
 
+**Phase 1 notes (implemented).** The receipt is the installation's durable state machine, enforced by one codec:
+
+- `deny_unknown_fields` is deliberate and stricter than the generic extension-field allowance in [protocol v1](maintenance-protocol-v1.md): an unknown field, resource identity, or lifecycle value fails deserialization, so a forged or future-schema receipt can never smuggle new authority into the current binary.
+- An `Installing` receipt is published **before** the first filesystem mutation and is the durable crash marker of an interrupted bootstrap. Normal launch is refused in every transitional state; rerunning the same trusted payload resumes the transaction (idempotently, keeping the existing `installationId`), and any other recovery belongs to the helper. No separate install journal exists.
+- Same-version reinstall keeps the installation id and increments `receiptGeneration`. A receipt claiming a **newer** version than the running installer refuses as a downgrade; installing the same or a newer version normally is allowed.
+- Support-resource ownership carries across reinstall only when the identity is compiled-known **and** the file on disk still matches the recorded SHA256 fingerprint; otherwise the record is dropped and the file becomes unowned. Unknown files are never adopted, and a receipt can never widen the compiled deletion authority (the resource enum is closed at deserialization).
+- After the manual bootstrap `committedManifestSha256` stays empty and `activeSessionId`/`lastCompletedSessionId` stay unset; no signed evidence is fabricated.
+
 ## 6. Manifest, trust, protocol evolution
 
 Protocol 1 requires signed raw manifest bytes, flat ZIP, Windows x64, fixed managed files, offline native helper, persistent journal, safe replacement, HealthAck, and runtime rollback. `schemaVersion` answers whether the fields can be read; `updaterProtocol` answers whether the operation can be executed safely. Check both independently in main app and helper. Parseability does not confer protocol compatibility.
@@ -157,6 +165,12 @@ Use `ReplaceFileW(target, replacement, backup, ...)` for an existing managed tar
 
 Microsoft documents partial-failure distinctions for errors 1175, 1176, and 1177. On any failure inspect target/replacement/backup identities and hashes rather than assuming the old layout remains. `REPLACEFILE_WRITE_THROUGH` is unsupported; durable journal writes need their own flush discipline. Validate behavior on supported Windows/filesystems before implementation is accepted. [Microsoft ReplaceFileW reference](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew).
 
+**Phase 1 notes (implemented).** Phase 1 does not use `ReplaceFileW` (that belongs to the update transaction). Its shared file primitives, which the update transaction will reuse, are:
+
+- Deletion uses POSIX semantics (`FILE_DISPOSITION_INFO_EX`, with a legacy-disposition fallback for older systems), so the directory entry disappears atomically with the call and no delete-pending ghost name can block an immediate recreate or replace.
+- Same-volume replacement is centralized in one primitive: `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)` with a bounded retry ladder (a sub-100 ms cap) restricted to ACCESS_DENIED/sharing-class errors only. External/system-level sharing conflicts — real-time scanning, indexing, or shell activity around a file that was just created, renamed, or registered — can hold files for longer than any reasonable ladder; those surface as a precise per-file error, and the documented recovery is to rerun the legal entry point (bootstrap retry or uninstall resume), never an unbounded wait. The primitive holds no destination handle across the replacement call; long-lived external sharing conflicts are surfaced rather than hidden behind an unbounded wait.
+- Failed atomic writes remove their own unpublished temporary file so the next lifecycle starts clean.
+
 Executing from the session copy releases the installed helper image for replacement/deletion. The runner remains the **old protocol implementation** until the transaction ends. Keep its hash and original installation binding in the journal; recovery must never execute an arbitrary path from session JSON. The runner can leave its own locked EXE for the next verified Maintenance invocation to remove after its process exits. Do not use a shell command assembled from paths or admin-only reboot deletion as the normal cleanup route.
 
 ## 9. Durable journals and RecoveryTransaction
@@ -196,6 +210,15 @@ The live lock ends on crash, but the active journal/receipt remains: an abandone
 
 Only a helper-authorized probation/rollback child can enter while closed. Generate at least 256 random bits, pass through that child's environment (never normal command line), bind it to the current session and process creation, consume once, and clear it before launching descendants. Environment and user-owned files are coordination, not a security boundary against malicious software already running as the same user. The design prevents unsafe remote payloads, wrong paths, stale coordination and accidental concurrent launches; it does not claim resistance to an attacker fully controlling that user's processes.
 
+**Phase 1 notes (implemented).** Launch admission is live for ordinary starts:
+
+- Admission is the first thing `run()` does — before any diagnostics write and before the early rendering-backend database read — and it is check-only: it never repairs a receipt.
+- Classification: `Managed` (valid `Installed` receipt and the process runs from the canonical install root), `Unmanaged` (no receipt and no helper in the canonical root — legacy/custom/portable/development copies run normally and are never auto-adopted), `Development` (a valid canonical receipt exists but this process is not the installed runtime: dev loop, test harness, or a portable copy beside a managed install; allowed, holds the lease, is not the managed runtime).
+- Fail-closed refusals (never downgraded to Unmanaged): malformed receipt, unsupported schema, appId/root mismatches, unsafe state, every transitional lifecycle, an active uninstall journal, and **helper present without a receipt** (broken managed state). Refusals show a native error and exit non-zero.
+- The app holds the shared application lease until process exit, so a maintenance transaction cannot start while any instance runs; a running transaction's gate, conversely, refuses normal launch before the database is opened.
+- The Settings uninstall entry exists only for `Managed` instances. The frontend receives a minimal `{ mode }` view and never sees the receipt, paths, or maintenance files; `start_uninstall` takes no path argument — the helper identity is compiled policy (admission's install root + fixed name), validated as a regular unlinked non-reparse file, spawned without waiting, and the app then exits through its normal exit path.
+- Known Folder resolution failure in the main app degrades to the pre-maintenance behavior without a lease (logged); the helper, by contrast, fails closed when it cannot resolve canonical roots. This asymmetry is deliberate: the app preserves legacy compatibility, the maintenance tool must never guess a target.
+
 ## 12. Path safety
 
 Every operation independently derives canonical roots from Windows Known Folders and compiled policy. Protocol 1 refuses custom/system/root/profile-wide destinations, UNC/device paths, alternate data streams, traversal, reserved DOS names, trailing-dot/space aliases, reparse points/junctions/symlinks within managed trees, and unexpected hard links on managed files. Validate volume, final resolved handle path, owner/ACL and file type. Validate existing parents when a leaf is absent. Receipt/session/CLI paths must agree with these derivations.
@@ -223,6 +246,13 @@ Preserve the receipt and active uninstall journal until all requested owned clea
 
 Deletion of personal data needs consent from the current native interaction; saved booleans in a mutable journal cannot authorize it after a crash. On resume reconfirm, defaulting to keep. An interrupted data deletion is irreversible and must be reported as partial; uninstall is cleanup-oriented, not rollback-oriented.
 
+**Phase 1 notes (implemented).**
+
+- The running helper copies itself to a session runner and exits before the transaction continues (the same runner-handoff design the update transaction reuses), so the installed helper image is never deleted while executing and destructive consent is never transferred through files or arguments.
+- `Uninstalling` is itself resumable: an interrupted run leaves the receipt and the active uninstall journal in place, refuses ordinary launch and bootstrap while they exist, and the next helper run resumes to completion.
+- Unknown resources are authority-bounded preservation, and **retaining a non-empty root because an unknown file or sentinel remains is a successful cleanup outcome**, not a failure.
+- Deferred ephemeral cleanup is accepted policy: session-runner copies and state logs survive a completed uninstall until a later verified maintenance invocation removes them; they live entirely under the maintenance state root and are disclosed, not hidden.
+
 **Conservative Discovery Mode:** for absent/corrupt receipts, disable automatic update and data deletion. Validate only the canonical default installation and independently corroborated exact known EXE/helper names, matching shortcut target, matching uninstall entry, and known maintenance session directories. Names alone in an arbitrary directory are insufficient evidence. Preserve unknown schemas/resources, unverified documents, and historical SDK leftovers. Do not recurse into directories merely because a receipt mentions them. If ownership cannot be established, report manual repair instead of deleting. Receipt loss may reduce completeness, never deletion safety.
 
 ## 14. Windows integration reconciliation
@@ -246,6 +276,8 @@ Do not expose QuietUninstallString initially. Helpers use CreateProcess with exp
 
 Steady-state invariant: **normalized EXE ProductVersion = receipt.currentVersion = Windows DisplayVersion** (stable `1.2.0` equals PE numeric `1.2.0.0` after specified normalization). Partial transitions are marked and recoverable. Reconciliation must read back all required fields. If it fails after HealthAck, retain Committing state and backups; retry on recovery, report maintenance incomplete, and do not announce success. Receipt and registry are not atomically updated together.
 
+The Phase 1 implementation commit still carries the 1.1.0 version sources everywhere; the 1.2.0 bump belongs to release preparation, which must re-verify the full invariant including the release version itself before publishing.
+
 ## 15. InstallTransaction and bootstrap
 
 `v1.1.x or earlier -> one manual trusted install -> v1.2.0 -> future Maintenance updates`. No purposeless bootstrap-only bridge release is needed. The initial v1.2.0 installation is the trust bootstrap: because the Maintenance helper itself is being introduced by that package, its embedded key store cannot authenticate the provenance of the package that supplied it. The user must obtain the first managed release through a trusted distribution path and may verify the published package hash independently. After installation, all self-updates require manifests authenticated by the embedded TrustedKeyStore. Authenticode can strengthen initial provenance later, independently of update-manifest signing.
@@ -255,6 +287,8 @@ Manual bootstrap accepts the ZIP-only distribution; sibling manifest/signature a
 Install states: ValidatePackage -> ConfirmLocation/Adoption -> Lock -> WaitForExistingApp -> Stage/Backup -> InstallRuntime -> Verify -> Probation -> Reconcile -> WriteReceipt -> Complete. Journal each mutation; on failure restore a verified prior install or remove only newly created owned resources. Never remove retained business data. Adopt the default v1.1 install explicitly, preserve shortcut choice and data, and leave unknown historical files alone. Reject an existing managed `Uninstalling`/`RecoveryRequired` state until recovered.
 
 Future `install.ps1` becomes a thin bootstrap to `desktop-todo-maintenance.exe --install`; `uninstall.ps1` becomes a compatibility wrapper to the same uninstaller, with a documented legacy fallback only for pre-maintenance installations. Current scripts are not changed here. The release ZIP remains flat with its seven existing files plus helper; signed manifest and signature are sibling release assets. Do not include the ZIP hash-bearing manifest inside the same ZIP and create a circular hash dependency.
+
+**Phase 1 notes (implemented).** `install.ps1` is already the thin bootstrap: a payload carrying the helper is delegated (no paths passed — the helper derives the payload from its own location and the roots from Known Folders), exit codes propagate, and a custom destination is refused for managed payloads. A helper-less payload keeps the legacy direct-install path for pre-maintenance use, guarded: it refuses any install directory that already carries a receipt, so a pre-maintenance payload can never downgrade or trample a managed installation. `uninstall.ps1` is untouched legacy; it already refuses managed directories because the receipt matches none of its owned-file patterns. The supported destination is the single canonical per-user root; custom LOCALAPPDATA descendants remain a legacy-payload-only capability and are not adopted into the managed lifecycle.
 
 ## 16. Release / CI requirements
 
@@ -308,4 +342,23 @@ Required acceptance gates for future implementation:
 - Confirm tasks/settings/history/images hashes unchanged by helper update/rollback, external wallpaper unchanged, shared WebView2 untouched, and exact ownership deletion with leftovers reported.
 - Smoke all three Standard modes to detect lifecycle regressions without refactoring the frozen native boundary.
 
-Implementation slices: (1) resource/path/receipt/lock primitives with Windows fault tests; (2) native install/uninstall/recovery and bootstrap; (3) signed protocol and provider adapters; (4) update/HealthAck/rollback with self-replacement QA; (5) release signing/mirror gate and Settings/About UI. None of these slices is implemented by this document. Do not publish self-update until all mandatory safety gates pass.
+Implementation slices are: (1) resource/path/receipt/lock primitives with Windows fault tests; (2) native install/uninstall/recovery and bootstrap; (3) signed protocol and provider adapters; (4) update/HealthAck/rollback with self-replacement QA; (5) release signing/mirror gate and Settings/About UI. Slices (1), (2), and the Phase 1 uninstall-entry portion of (5) are implemented. Slices (3), (4), and the release-signing/mirror portion of (5) remain future work. Do not publish self-update until all mandatory safety gates pass.
+
+### Phase 1 remaining hardening
+
+Recorded so they are not lost with the implementation handoff; none blocks the Phase 1 acceptance:
+
+- Retain validated preimages across interrupted installs for rollback-style recovery (currently only the Installing receipt marks the crash point; full preimage evidence belongs to the update machinery).
+- QA isolation must cover WebView2 profile storage in addition to SQLite before a test instance runs against a managed install.
+- Path validation does not yet verify the final handle's path, owner, and writable ACL; directory deletion still uses a metadata-checked path-based removal instead of a handle operation.
+- The attack-test matrix (junction/reparse swaps, hard-link races, leaf replacement, cross-session locks, helper-crash cleanup) is a foundation, not full coverage; runtime hash verification and deletion still use separate opens.
+- Legacy-instance detection is name/image-path based and intentionally fails closed; races and renamed portable copies sharing the database need review.
+- The native consent/progress dialogs need a manual visual walkthrough; the Settings entry needs no new features but future polish belongs to the normal UI track.
+- Release preparation must verify the flat eight-file payload and the four-way version invariant (`ProductVersion` = `Receipt.currentVersion` = Installed-apps `DisplayVersion` = release version).
+
+### QA isolation principles (standing)
+
+- QA capability is compile-time gated (`qa` / `maintenance-qa` features). Production binaries cannot recognize a QA identity, cannot be redirected to QA roots, and contain no test seams; this is verified per release-style build.
+- Every QA harness that can mutate filesystem or registry state runs under a hard interlock: an explicit QA identity, sandbox roots inside the dedicated QA namespace under the real LocalAppData Known Folder, install/data roots that can never alias production, QA-only registry namespaces, and a runtime probe proving the helper binary is a QA build. Any unmet condition refuses the harness before the first mutation.
+- The real production installation is snapshotted before and verified after every QA run; a changed production state fails acceptance unconditionally.
+- Environment-redirected locations (for example a fake `%LOCALAPPDATA%` for legacy-path script tests) are never relied upon for helper or app code, which always resolve canonical roots from Known Folders.
