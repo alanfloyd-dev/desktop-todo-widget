@@ -18,14 +18,16 @@
 
 <table>
   <tr>
+    <th align="center">Desktop</th>
+    <th align="center">Floating</th>
     <th align="center">Orb</th>
     <th align="center">Sidebar</th>
-    <th align="center">Desktop</th>
   </tr>
   <tr>
-    <td align="center"><a href="docs/assets/orb.png"><img src="docs/assets/orb.png" width="72" alt="悬浮 Orb"></a></td>
-    <td align="center"><a href="docs/assets/sidebar.png"><img src="docs/assets/sidebar.png" width="190" alt="Sidebar 模式"></a></td>
-    <td align="center"><a href="docs/assets/desktop.png"><img src="docs/assets/desktop.png" width="220" alt="Desktop 模式"></a></td>
+    <td align="center"><a href="docs/assets/desktop-mode-zh.png"><img src="docs/assets/desktop-mode-zh.png" width="220" alt="Desktop 模式"></a></td>
+    <td align="center"><a href="docs/assets/floating-mode-zh.png"><img src="docs/assets/floating-mode-zh.png" width="220" alt="Floating 模式"></a></td>
+    <td align="center"><a href="docs/assets/orb-mode-zh.png"><img src="docs/assets/orb-mode-zh.png" width="72" alt="悬浮 Orb"></a></td>
+    <td align="center"><a href="docs/assets/sidebar-mode-zh.png"><img src="docs/assets/sidebar-mode-zh.png" width="190" alt="Sidebar 模式"></a></td>
   </tr>
 </table>
 

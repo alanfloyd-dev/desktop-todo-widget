@@ -18,14 +18,16 @@ It focuses on lightweight task management, tray-first interaction, customizable 
 
 <table>
   <tr>
+    <th align="center">Desktop</th>
+    <th align="center">Floating</th>
     <th align="center">Orb</th>
     <th align="center">Sidebar</th>
-    <th align="center">Desktop</th>
   </tr>
   <tr>
-    <td align="center"><a href="docs/assets/orb.png"><img src="docs/assets/orb.png" width="72" alt="Floating Orb"></a></td>
-    <td align="center"><a href="docs/assets/sidebar.png"><img src="docs/assets/sidebar.png" width="190" alt="Sidebar mode"></a></td>
-    <td align="center"><a href="docs/assets/desktop.png"><img src="docs/assets/desktop.png" width="220" alt="Desktop mode"></a></td>
+    <td align="center"><a href="docs/assets/desktop-mode.png"><img src="docs/assets/desktop-mode.png" width="220" alt="Desktop mode"></a></td>
+    <td align="center"><a href="docs/assets/floating-mode.png"><img src="docs/assets/floating-mode.png" width="220" alt="Floating mode"></a></td>
+    <td align="center"><a href="docs/assets/orb-mode.png"><img src="docs/assets/orb-mode.png" width="72" alt="Floating Orb"></a></td>
+    <td align="center"><a href="docs/assets/sidebar-mode.png"><img src="docs/assets/sidebar-mode.png" width="190" alt="Sidebar mode"></a></td>
   </tr>
 </table>
 
