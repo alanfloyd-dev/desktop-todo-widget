@@ -194,6 +194,16 @@ export interface WeatherViewState {
   lastRefresh: string;
 }
 
+/**
+ * Launch-admission classification reported by the Rust backend (the source of
+ * truth). The frontend never inspects receipts, paths or maintenance files.
+ */
+export type MaintenanceMode = "managed" | "unmanaged" | "development";
+
+export interface MaintenanceAdmissionState {
+  mode: MaintenanceMode;
+}
+
 export interface ProductViewState {
   settings: ProductSettings;
   desktopExperimental: boolean;

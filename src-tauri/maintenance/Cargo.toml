@@ -1,0 +1,40 @@
+[package]
+name = "desktop-todo-maintenance"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+name = "desktop_todo_maintenance"
+
+[[bin]]
+name = "desktop-todo-maintenance"
+path = "src/main.rs"
+
+[features]
+# Explicitly opt-in; production binaries cannot redirect maintenance paths.
+qa = []
+
+[build-dependencies]
+tauri-winres = "0.3.6"
+
+[dependencies]
+chrono = { version = "0.4", features = ["clock"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+winreg = "0.55"
+windows = { version = "0.61.3", features = [
+  "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Threading",
+  "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls",
+  "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_System_Com_StructuredStorage"
+] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

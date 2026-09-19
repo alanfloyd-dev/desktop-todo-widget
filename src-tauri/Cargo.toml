@@ -39,10 +39,18 @@ uuid = { version = "1", features = ["v4"] }
 # `build.rs` cannot add it: a build script may only enable features of its own
 # package, never a dependency feature such as `tauri/custom-protocol`.
 custom-protocol = ["tauri/custom-protocol"]
+# QA-only bootstrap override: lets the product binary resolve the maintenance
+# QA sandbox (DTW_MAINTENANCE_QA_ID) so isolated bootstrap round-trips can run
+# the real admission path without touching the production canonical roots.
+# Never enabled for release/packaging builds.
+maintenance-qa = ["desktop-todo-maintenance/qa"]
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38.2"
 wry = "0.55.1"
+# Shared maintenance core: canonical roots, receipt codec and the launch
+# admission/lease primitives. No Tauri, network or SQLite dependency.
+desktop-todo-maintenance = { path = "maintenance" }
 # This is the Standard product's whole Win32 surface: the widget-frame
 # subclassing and window styles plus the WebView2 telemetry in qa_diagnostics.
 # `Win32_UI_Shell` is declared explicitly instead of relying on feature
@@ -53,6 +61,13 @@ windows = { version = "0.61.3", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows-core = "0.61.2"
+
+[target.'cfg(windows)'.dev-dependencies]
+# The `qa` feature exists only so admission tests can build sandbox Paths
+# under the repository target directory. Dev-dependency features never reach
+# a production build, so shipped binaries cannot be redirected by the QA
+# environment variable.
+desktop-todo-maintenance = { path = "maintenance", features = ["qa"] }
 
 [profile.dev]
 incremental = true

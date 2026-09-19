@@ -2,11 +2,33 @@ mod appearance;
 mod database;
 mod diagnostics;
 mod locale;
+#[cfg(target_os = "windows")]
+mod maintenance_admission;
+// Non-Windows compilation stub: the product ships on Windows only. The
+// commands exist so the invoke handler stays one list; they always refuse,
+// and there is no admission state behind them.
+#[cfg(not(target_os = "windows"))]
+mod maintenance_admission {
+    #[derive(serde::Serialize)]
+    pub struct AdmissionView {
+        pub mode: &'static str,
+    }
+    #[tauri::command]
+    pub fn maintenance_admission_state() -> AdmissionView {
+        AdmissionView { mode: "unmanaged" }
+    }
+    #[tauri::command]
+    pub fn start_uninstall() -> Result<(), &'static str> {
+        Err("unsupported-platform")
+    }
+}
 mod platform;
 mod product_commands;
 mod product_settings_commands;
 mod product_window;
 mod qa_diagnostics;
+#[cfg(test)]
+mod qa_fixture;
 mod reviews;
 mod settings;
 mod task_day;
@@ -22,15 +44,14 @@ use window_mode::NativeWindowState;
 ///
 /// The rendering backend has to be read from the database before the Tauri
 /// builder creates the config window, but `AppHandle::path()` is only available
-/// afterwards. This reproduces the platform location Tauri uses for the
-/// configured bundle identifier; `setup` asserts the two agree so a future
-/// identifier or platform change cannot silently point the early read at the
-/// wrong file.
+/// afterwards. This delegates to the shared canonical data-root resolver — the
+/// same Known Folder derivation the maintenance helper and the launch
+/// admission use, and the same platform location Tauri uses for the configured
+/// bundle identifier. `setup` asserts the two agree so a future identifier or
+/// platform change cannot silently point the early read at the wrong file.
 #[cfg(target_os = "windows")]
 fn app_data_dir() -> Option<std::path::PathBuf> {
-    std::env::var_os("APPDATA")
-        .map(std::path::PathBuf::from)
-        .map(|roaming| roaming.join("net.alanfloyd.desktop"))
+    desktop_todo_maintenance::paths::canonical_data_root().ok()
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -68,8 +89,24 @@ fn install_widget_frame(window: &tauri::WebviewWindow) -> Result<(), std::io::Er
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Maintenance admission precedes every diagnostics write and the early
+    // rendering-backend database read: while a maintenance transaction holds
+    // the gate or durable maintenance state is active, business
+    // initialization — including any database open — must not run
+    // (docs/application-lifecycle.md §11). Admission is check-only: it never
+    // repairs a receipt, and a present-but-invalid receipt refuses the
+    // launch instead of degrading to unmanaged.
+    #[cfg(target_os = "windows")]
+    let admission = maintenance_admission::admit_or_report();
+
     let qa_diagnostics = qa_diagnostics::QaDiagnostics::from_process_args();
     qa_diagnostics::warn_if_release_without_embedded_frontend(&qa_diagnostics);
+    #[cfg(target_os = "windows")]
+    qa_diagnostics.record(format!(
+        "maintenance_admission={:?} installationId={}",
+        admission.context,
+        admission.installation_id.as_deref().unwrap_or("-")
+    ));
 
     // --- Rendering backend selection ---------------------------------------
     // Standard-only retirement: the hosting decision is permanently Standard
@@ -94,11 +131,16 @@ pub fn run() {
 
     let product_runtime = ProductWindowRuntime::new();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(NativeWindowState::default())
         .manage(product_runtime)
         .manage(qa_diagnostics)
-        .manage(weather::WeatherRuntime::default())
+        .manage(weather::WeatherRuntime::default());
+    // The admission record — and with it the shared application lease — must
+    // live until process exit so maintenance cannot start mid-session.
+    #[cfg(target_os = "windows")]
+    let builder = builder.manage(admission);
+    builder
         .on_page_load(|webview, payload| {
             let diagnostics = webview
                 .app_handle()
@@ -200,7 +242,9 @@ pub fn run() {
             weather::open_weather_attribution,
             window_mode::set_window_mode,
             window_mode::window_diagnostics,
-            window_mode::start_win_d_trace
+            window_mode::start_win_d_trace,
+            maintenance_admission::maintenance_admission_state,
+            maintenance_admission::start_uninstall
         ])
         .build(tauri::generate_context!())
         .expect("error while building desktop-todo-widget")

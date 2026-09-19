@@ -14,6 +14,7 @@ import type {
   AppearanceSettings,
   AssetPayload,
   LocationCandidate,
+  MaintenanceAdmissionState,
   ProductSettings,
   ProductWindowMode,
   QuickLink,
@@ -255,6 +256,66 @@ function moveLink(id: string, delta: -1 | 1) {
 }
 
 const developerOpen = ref(false);
+
+/**
+ * Launch-admission classification from the Rust backend.
+ *
+ * The uninstall entry is a managed-installation capability: it renders only
+ * when this instance admitted as `managed`. An unmanaged, legacy, or
+ * development copy gets no entry at all (rather than a disabled one) because
+ * there is genuinely nothing for the maintenance tool to uninstall — and the
+ * backend would refuse anyway. `null` means the state has not arrived (or the
+ * panel runs in a plain browser preview), which also hides the entry.
+ */
+const admissionMode = ref<MaintenanceAdmissionState["mode"] | null>(null);
+const uninstallConfirming = ref(false);
+const uninstallStarting = ref(false);
+const uninstallError = ref("");
+
+onMounted(async () => {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  try {
+    admissionMode.value = (
+      await invoke<MaintenanceAdmissionState>("maintenance_admission_state")
+    ).mode;
+  } catch {
+    admissionMode.value = null;
+  }
+});
+
+/// Maps the backend's pinned refusal codes to localized copy. Any failure
+/// leaves the app running and the entry usable.
+function uninstallErrorLabel(code: unknown): string {
+  const text = String(code);
+  if (text.includes("already-started")) return t("settings.application.error.busy");
+  if (text.includes("not-managed")) return t("settings.application.error.notManaged");
+  return t("settings.application.error.launchFailed");
+}
+
+function beginUninstall() {
+  if (admissionMode.value !== "managed" || uninstallStarting.value) return;
+  uninstallError.value = "";
+  uninstallConfirming.value = true;
+}
+
+function cancelUninstall() {
+  uninstallConfirming.value = false;
+  uninstallError.value = "";
+}
+
+async function confirmUninstall() {
+  if (admissionMode.value !== "managed" || uninstallStarting.value) return;
+  uninstallStarting.value = true;
+  uninstallError.value = "";
+  try {
+    // The backend launches the canonical maintenance helper and then exits
+    // the app. On success there is nothing left to render into.
+    await invoke("start_uninstall");
+  } catch (code) {
+    uninstallError.value = uninstallErrorLabel(code);
+    uninstallStarting.value = false;
+  }
+}
 
 /**
  * Language draft.
@@ -805,6 +866,47 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
         </label>
         <button type="button" class="reset-appearance" @click="resetAppearance">{{ t("settings.resetAppearance") }}</button>
       </section>
+
+      <!--
+        Managed installations only: an unmanaged or development copy does not
+        own the maintenance uninstaller, so the entry is absent instead of
+        disabled. The lightweight confirm only announces the handoff — the
+        keep/delete choice and every destructive step live in the native
+        maintenance tool, never duplicated here.
+      -->
+      <template v-if="admissionMode === 'managed'">
+        <div class="settings-section-heading settings-major-heading">
+          <strong>{{ t("settings.application.heading") }}</strong>
+        </div>
+        <section class="application-settings" :aria-label="t('settings.application.heading')">
+          <div class="settings-row">
+            <span>
+              <strong>{{ t("settings.application.uninstall") }}</strong>
+              <small>{{ t("settings.application.uninstallHint") }}</small>
+            </span>
+            <button
+              type="button"
+              :disabled="uninstallStarting"
+              @click="beginUninstall"
+            >{{ t("settings.application.uninstall") }}</button>
+          </div>
+          <div v-if="uninstallConfirming" class="quick-link-editor">
+            <p class="uninstall-confirm-body">
+              <strong>{{ t("settings.application.confirmTitle") }}</strong>
+              {{ t("settings.application.confirmBody") }}
+            </p>
+            <div class="quick-link-editor-actions">
+              <button type="button" :disabled="uninstallStarting" @click="confirmUninstall">
+                {{ uninstallStarting ? t("settings.application.starting") : t("settings.application.confirmContinue") }}
+              </button>
+              <button type="button" :disabled="uninstallStarting" @click="cancelUninstall">
+                {{ t("quickLinks.cancel") }}
+              </button>
+            </div>
+          </div>
+          <p v-if="uninstallError" class="settings-error" role="alert">{{ uninstallError }}</p>
+        </section>
+      </template>
     </div>
 
     <button type="button" class="save-settings" @click="save">{{ t("settings.save") }}</button>

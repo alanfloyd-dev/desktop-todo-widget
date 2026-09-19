@@ -22,6 +22,7 @@ name = "alan-desktop"
 version = "1.1.0"
 dependencies = [
  "chrono",
+ "desktop-todo-maintenance",
  "reqwest",
  "rusqlite",
  "serde",
@@ -588,6 +589,20 @@ dependencies = [
  "quote",
  "rustc_version",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "desktop-todo-maintenance"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri-winres",
+ "uuid",
+ "windows",
+ "winreg",
 ]
 
 [[package]]

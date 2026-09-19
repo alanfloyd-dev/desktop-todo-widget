@@ -4,41 +4,42 @@
     Per-user install of desktop-todo-widget from a portable release payload.
 
 .DESCRIPTION
-    Copies the executable into
+    Since v1.2.0 a release payload carries the maintenance helper, and this
+    script is only a thin bootstrap: it checks the most basic payload
+    prerequisites, then hands the whole installation to the helper
+    (desktop-todo-maintenance.exe --install), which owns the canonical install
+    root validation, resource ownership, the InstallationReceipt, the Start
+    Menu shortcut, and the Windows uninstall registration. The script
+    propagates the helper's exit code and never reports success when the
+    helper failed.
+
+    A payload without the helper (pre-maintenance releases, raw build output)
+    keeps the legacy direct-copy behavior below, except that it refuses to
+    touch an installation that already carries an installation receipt: a
+    managed installation can only be updated by a current managed payload.
+
+    The canonical managed install root is
 
         %LOCALAPPDATA%\Programs\desktop-todo-widget
 
-    and, unless -NoStartMenuShortcut is given, creates a per-user Start Menu
-    shortcut. Nothing here needs administrator rights:
-
-      * no system-wide Program Files directory,
-      * no registry writes, no uninstall entry, no PATH changes,
-      * no machine-wide or service state of any kind.
-
-    What it never touches is user data. Tasks, settings, appearance profiles,
-    Quick Links, and the weather cache live in
+    and nothing here needs administrator rights. What an install never touches
+    is user data. Tasks, settings, appearance profiles, Quick Links, and the
+    weather cache live in
 
         %APPDATA%\net.alanfloyd.desktop
 
     which an install (including an upgrade over a running install) leaves exactly
-    as it is. uninstall.ps1 preserves it too unless -RemoveUserData is passed
-    explicitly.
-
-    Re-running the script over an existing install is the supported upgrade
-    path: the running app is stopped first (only processes started from this
-    install directory) and program files are replaced. Runtime payload files
-    that older versions installed beside the executable are no longer created
-    here; the uninstaller still recognizes and removes any that a previous
-    version left behind.
+    as it is.
 
 .PARAMETER Source
-    Directory that holds the release payload: the executable (plus the
-    documentation files, when present). Defaults to the script's own
+    Directory that holds the release payload. Defaults to the script's own
     directory, so the script works when it is shipped inside the release ZIP.
 
 .PARAMETER InstallDir
-    Destination directory. Must be inside %LOCALAPPDATA%; the default is the
-    documented install location.
+    Destination directory for legacy (helper-less) payloads. Must be inside
+    %LOCALAPPDATA%; the default is the documented install location. Managed
+    payloads always install to the canonical root; a custom directory is
+    refused.
 
 .PARAMETER NoStartMenuShortcut
     Do not create the per-user Start Menu shortcut.
@@ -50,8 +51,7 @@
     powershell -ExecutionPolicy Bypass -File .\install.ps1 -Source .\unzipped -NoStartMenuShortcut
 
 .NOTES
-    This is a design-stage script for the v1.0.1 install path. See README.md
-    ("Install") for the user-facing description.
+    See README.md ("Install") for the user-facing description.
 #>
 [CmdletBinding()]
 param(
@@ -80,12 +80,19 @@ if ([string]::IsNullOrWhiteSpace($Source)) {
 # produces, so shortcuts, upgrade, and uninstall have one stable target.
 $InstalledExecutableName = 'desktop-todo-widget.exe'
 $ExecutableCandidates = @('desktop-todo-widget.exe', 'alan-desktop.exe')
+# A payload that carries the maintenance helper is a managed release: the whole
+# installation is delegated to that helper (Maintenance Protocol 1 bootstrap).
+$ManagedHelperName = 'desktop-todo-maintenance.exe'
+$CanonicalInstallLeaf = 'Programs\desktop-todo-widget'
 # The standard-only product is a single executable: runtime payload files that
 # older versions installed beside it are deliberately not created here, so a
 # fresh install carries exactly the executable (plus documentation, when
 # present).
-$DocumentationFiles = @('README.md', 'README_ZH.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md')
+$DocumentationFiles = @('README.md', 'README_ZH.md', 'LICENSE', 'LICENSE_ZH.md', 'THIRD_PARTY_NOTICES.md')
 $ShortcutName = 'desktop-todo-widget.lnk'
+# The marker file a managed installation owns; its presence puts the install
+# directory under Maintenance Protocol 1 ownership.
+$ReceiptName = 'installation-receipt.json'
 
 function Get-NormalizedPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -221,6 +228,61 @@ try {
     $installDir = Assert-PerUserInstallDir -Path $InstallDir
     if ($sourceDir -eq $installDir) {
         throw "Source and install directory are the same directory ($sourceDir); nothing to install."
+    }
+
+    # --- managed payload: thin bootstrap into the maintenance helper ----------
+    # The helper derives the payload directory from its own location and the
+    # canonical roots from Windows Known Folders, so this script passes no
+    # paths to it and never reimplements installation itself.
+    $helperPath = Join-Path $sourceDir $ManagedHelperName
+    if (Test-Path -LiteralPath $helperPath -PathType Leaf) {
+        $canonicalInstallDir = Get-NormalizedPath (Join-Path $env:LOCALAPPDATA $CanonicalInstallLeaf)
+        if ($installDir -ine $canonicalInstallDir) {
+            throw ("Managed payloads install only to the canonical per-user location.`n" +
+                "  expected : $canonicalInstallDir`n" +
+                "  requested: $installDir`n" +
+                'Custom install locations are not supported for managed installations.')
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $sourceDir $InstalledExecutableName) -PathType Leaf)) {
+            throw ("Managed payload incomplete: expected $InstalledExecutableName beside $ManagedHelperName in $sourceDir.`n" +
+                'Extract the full release ZIP and run this script from that directory.')
+        }
+
+        Write-Host 'desktop-todo-widget install (managed)'
+        Write-Host "  source : $sourceDir"
+        Write-Host "  target : $canonicalInstallDir"
+        Write-Host '  handing off to the maintenance helper'
+
+        $arguments = @('--install')
+        if ($NoStartMenuShortcut) { $arguments += '--no-start-menu-shortcut' }
+        # Start-Process (not `&`): the helper is a GUI-subsystem executable, so
+        # a plain invocation would return before it finishes. -Wait + -PassThru
+        # gives the real exit code back.
+        $process = Start-Process -FilePath $helperPath -ArgumentList $arguments `
+            -WorkingDirectory $sourceDir -Wait -PassThru
+        $helperExitCode = $process.ExitCode
+        if ($helperExitCode -ne 0) {
+            throw ("the maintenance helper exited with code $helperExitCode; the installation was not completed. " +
+                'See its error dialog for the reason. Recovery logs live under the app''s maintenance directory.')
+        }
+
+        Write-Host ''
+        Write-Host 'Installed desktop-todo-widget as a managed installation.'
+        Write-Host "  program   : $(Join-Path $canonicalInstallDir $InstalledExecutableName)"
+        Write-Host '  user data : preserved (never touched by install) - %APPDATA%\net.alanfloyd.desktop'
+        Write-Host '  uninstall : Windows Settings > Apps > Installed apps > desktop-todo-widget'
+        exit 0
+    }
+
+    # --- legacy payload (pre-maintenance release or raw build output) ---------
+    # A managed installation is never updated by a legacy payload: its receipt
+    # puts the directory under maintenance ownership, and silently replacing
+    # its runtime would desynchronize the receipt and the Windows registration.
+    $receiptMarker = Join-Path $installDir $ReceiptName
+    if (Test-Path -LiteralPath $receiptMarker -PathType Leaf) {
+        throw ("This installation is already managed (an installation receipt exists in $installDir).`n" +
+            'A payload without desktop-todo-maintenance.exe cannot update it. ' +
+            'Install a current managed release payload, or run the installed maintenance helper.')
     }
 
     Write-Host 'desktop-todo-widget install'

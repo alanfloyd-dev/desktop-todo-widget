@@ -473,6 +473,18 @@ onMounted(async () => {
   window.addEventListener("blur", closeMenu);
   window.addEventListener("keydown", handleKey);
   if (nativeBridgeAvailable) {
+    // QA-only hook (live only in maintenance-qa builds, where the backend adds
+    // the `qa_handoff` field): drive the production Settings uninstall command
+    // path end to end — `maintenance_admission_state`, then `start_uninstall`.
+    // The production bundle never contains the field, so this stays inert.
+    void invoke<{ mode: string; qa_handoff?: boolean }>("maintenance_admission_state").then(
+      (admission) => {
+        if (!admission.qa_handoff) return;
+        window.setTimeout(() => {
+          void invoke("start_uninstall").catch(() => {});
+        }, 1500);
+      },
+    );
     unlistenSettings = await listen("open-settings", () => {
       settingsOpen.value = true;
       reviewOpen.value = false;
