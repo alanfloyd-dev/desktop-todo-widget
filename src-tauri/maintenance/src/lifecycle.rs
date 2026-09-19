@@ -242,25 +242,37 @@ fn copy_verified(source: &Path, destination: &Path, expected: &FileRecord) -> Re
     result
 }
 
-/// True when semantic version `a` is strictly newer than `b`. A parse failure
-/// reports "newer" so an unparseable comparison refuses the operation; in
-/// practice `Receipt::validate` rejects malformed versions before this runs.
-fn version_greater(a: &str, b: &str) -> bool {
-    let parse = |v: &str| -> Option<(u32, u32, u32)> {
-        let parts: Vec<&str> = v.split('.').collect();
-        if parts.len() != 3 {
-            return None;
-        }
-        Some((
-            parts[0].parse().ok()?,
-            parts[1].parse().ok()?,
-            parts[2].parse().ok()?,
-        ))
-    };
-    match (parse(a), parse(b)) {
-        (Some(a), Some(b)) => a > b,
-        _ => true,
-    }
+/// The one canonical comparison lives in `crate::version`; the manual
+/// bootstrap only refuses downgrades through it. Unparseable input fails
+/// closed (reports as a downgrade), never silently allows.
+
+/// Compiled-known base names whose crash-residue temporaries
+/// (`.{uuid}.tmp` from atomic_write, `.{uuid}.installing` from copy_verified)
+/// a transaction may clean from the canonical roots. Derived from the closed
+/// resource policy plus the fixed metadata file names — never from directory
+/// contents.
+fn transaction_temp_stems() -> Vec<&'static str> {
+    let mut stems: Vec<&'static str> = [
+        Resource::MainExecutable,
+        Resource::MaintenanceHelper,
+        Resource::Readme,
+        Resource::ReadmeZh,
+        Resource::License,
+        Resource::LicenseZh,
+        Resource::ThirdPartyNotices,
+    ]
+    .into_iter()
+    .map(|resource| paths::filename_stem(resource.filename()))
+    .collect();
+    stems.push("installation-receipt");
+    stems.push("active-uninstall");
+    stems
+}
+
+fn clean_stale_temps(paths: &Paths) {
+    let stems = transaction_temp_stems();
+    paths::remove_stale_temps(paths.install(), &stems);
+    paths::remove_stale_temps(paths.state(), &stems);
 }
 
 /// Manual trusted bootstrap only. Network updates are deliberately absent.
@@ -283,6 +295,7 @@ pub fn install(paths: &Paths, source: &Path, shortcut: bool) -> Result<Receipt> 
     let _gate = Gate::acquire(paths)?;
     let _app = lock::exclusive_app(paths)?;
     require_no_legacy_processes(paths)?;
+    clean_stale_temps(paths);
     if paths.state().join("active-uninstall.json").exists() {
         return Err(Error::new(
             ErrorKind::InvalidInstallation,
@@ -293,7 +306,7 @@ pub fn install(paths: &Paths, source: &Path, shortcut: bool) -> Result<Receipt> 
     if let Some(version) = old.as_ref().and_then(|r| r.current_version.as_deref()) {
         // A manual bootstrap may reinstall the same release or install a newer
         // one; downgrades are refused (uninstall first).
-        if version_greater(version, PRODUCT_VERSION) {
+        if crate::version::is_downgrade(version, PRODUCT_VERSION) {
             return Err(Error::new(
                 ErrorKind::InvalidInstallation,
                 format!(
@@ -482,6 +495,7 @@ pub fn uninstall_locked(paths: &Paths, mode: DataMode) -> Result<Outcome> {
     validate_journal(paths)?;
     let _app = lock::exclusive_app(paths)?;
     require_no_legacy_processes(paths)?;
+    clean_stale_temps(paths);
     let mut receipt = match Receipt::load(paths) {
         Ok(r) => r,
         Err(e)
@@ -655,14 +669,37 @@ mod tests {
     use super::*;
     #[test]
     fn version_ordering_is_semantic_and_fails_closed() {
-        assert!(version_greater("1.3.0", "1.2.9"));
-        assert!(version_greater("1.10.0", "1.9.0"));
-        assert!(version_greater("2.0.0", "1.99.99"));
-        assert!(!version_greater("1.1.0", "1.1.0"));
-        assert!(!version_greater("1.0.9", "1.1.0"));
+        // The canonical policy lives in crate::version; the bootstrap's
+        // downgrade refusal must keep these exact semantics.
+        assert!(crate::version::is_downgrade("1.3.0", "1.2.9"));
+        assert!(crate::version::is_downgrade("1.10.0", "1.9.0"));
+        assert!(crate::version::is_downgrade("2.0.0", "1.99.99"));
+        assert!(!crate::version::is_downgrade("1.1.0", "1.1.0"));
+        assert!(!crate::version::is_downgrade("1.0.9", "1.1.0"));
         // Unparseable input must refuse the operation, never silently allow it.
-        assert!(version_greater("1.2", "1.1.0"));
-        assert!(version_greater("banana", "1.1.0"));
+        assert!(crate::version::is_downgrade("1.2", "1.1.0"));
+        assert!(crate::version::is_downgrade("banana", "1.1.0"));
+    }
+
+    #[test]
+    fn transaction_temp_stems_cover_every_compiled_known_name() {
+        let stems = transaction_temp_stems();
+        for resource in [
+            Resource::MainExecutable,
+            Resource::MaintenanceHelper,
+            Resource::Readme,
+            Resource::ReadmeZh,
+            Resource::License,
+            Resource::LicenseZh,
+            Resource::ThirdPartyNotices,
+        ] {
+            assert!(
+                stems.contains(&paths::filename_stem(resource.filename())),
+                "{resource:?} temp residue must be cleanable"
+            );
+        }
+        assert!(stems.contains(&"installation-receipt"));
+        assert!(stems.contains(&"active-uninstall"));
     }
     #[test]
     fn install_rejects_its_own_install_root_as_source() {

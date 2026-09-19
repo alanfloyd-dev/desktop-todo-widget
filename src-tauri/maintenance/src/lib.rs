@@ -7,6 +7,7 @@ pub mod paths;
 pub mod receipt;
 pub mod resources;
 mod security;
+pub mod version;
 pub const PRODUCT_VERSION: &str = env!("DTW_PRODUCT_VERSION");
 
 use std::fmt;
@@ -21,6 +22,7 @@ pub enum ErrorKind {
     UnsafePath,
     ReceiptMalformed,
     UnsupportedReceiptSchema,
+    VersionMalformed,
     AppIdMismatch,
     InstallRootMismatch,
     DataRootMismatch,

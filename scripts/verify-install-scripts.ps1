@@ -253,6 +253,39 @@ try {
     $result = Invoke-UnderTest -ScriptPath $uninstallScript -LocalAppData $local -RoamingAppData $roaming
     Check 'uninstall succeeds once the foreign file is gone' ($result.ExitCode -eq 0) $result.Output
     Check 'install directory removed after the guard run' (-not (Test-Path -LiteralPath $installDir))
+
+    # --- managed-state guards (helper/receipt fail closed) -------------------
+    # A legacy payload must never touch an installation that carries the
+    # maintenance helper (broken managed state) or the installation receipt,
+    # and the legacy uninstaller must refuse both before any destructive work.
+    Write-Host 'managed-state guards (helper/receipt fail closed)'
+    $result = Invoke-UnderTest -ScriptPath $installScript -LocalAppData $local -RoamingAppData $roaming `
+        -Arguments @('-Source', $payloadV1)
+    Check 'legacy install for the managed-state guards exits 0' ($result.ExitCode -eq 0) $result.Output
+    Set-Content -LiteralPath (Join-Path $installDir 'desktop-todo-maintenance.exe') -Value 'helper' -Encoding ASCII
+
+    $result = Invoke-UnderTest -ScriptPath $installScript -LocalAppData $local -RoamingAppData $roaming `
+        -Arguments @('-Source', $payloadV2)
+    Check 'legacy install refuses a directory carrying the maintenance helper' ($result.ExitCode -ne 0)
+    Check 'that refusal names the marker' ($result.Output -match 'desktop-todo-maintenance\.exe')
+
+    $result = Invoke-UnderTest -ScriptPath $uninstallScript -LocalAppData $local -RoamingAppData $roaming
+    Check 'legacy uninstall refuses a directory carrying the maintenance helper' ($result.ExitCode -ne 0)
+    Check 'that refusal points at the maintenance tooling' ($result.Output -match 'maintenance')
+    Check 'uninstall guard preserved the shortcut' (Test-Path -LiteralPath $shortcutPath)
+    Check 'uninstall guard preserved the executable' (Test-Path -LiteralPath $installedExe)
+
+    Remove-Item -LiteralPath (Join-Path $installDir 'desktop-todo-maintenance.exe') -Force
+    Set-Content -LiteralPath (Join-Path $installDir 'installation-receipt.json') -Value '{}' -Encoding ASCII
+    $result = Invoke-UnderTest -ScriptPath $uninstallScript -LocalAppData $local -RoamingAppData $roaming
+    Check 'legacy uninstall refuses a directory carrying an installation receipt' ($result.ExitCode -ne 0)
+    Check 'that refusal names the receipt' ($result.Output -match 'installation-receipt\.json')
+    Check 'receipt guard preserved the executable' (Test-Path -LiteralPath $installedExe)
+
+    Remove-Item -LiteralPath (Join-Path $installDir 'installation-receipt.json') -Force
+    $result = Invoke-UnderTest -ScriptPath $uninstallScript -LocalAppData $local -RoamingAppData $roaming
+    Check 'uninstall succeeds once managed markers are gone' ($result.ExitCode -eq 0) $result.Output
+    Check 'install directory removed after managed-state guard run' (-not (Test-Path -LiteralPath $installDir))
 }
 finally {
     if ($KeepSandbox) {

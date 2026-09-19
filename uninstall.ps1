@@ -291,6 +291,21 @@ try {
     $userDataDir = $null
     if ($RemoveUserData) { $userDataDir = Resolve-UserDataDir }
 
+    # Fail closed before any destructive work (stopping processes, removing
+    # the shortcut, deleting files): a receipt or the maintenance helper puts
+    # the directory under Maintenance Protocol 1 ownership, which this legacy
+    # script must never touch. Helper-without-receipt is broken managed state,
+    # not a legacy install; only the maintenance tooling may resolve it.
+    foreach ($markerName in @('installation-receipt.json', 'desktop-todo-maintenance.exe')) {
+        $marker = Join-Path $installDir $markerName
+        if (Test-Path -LiteralPath $marker -PathType Leaf) {
+            $helperCommand = '"' + (Join-Path $installDir 'desktop-todo-maintenance.exe') + '" --uninstall'
+            throw ("Refusing to uninstall: $installDir is a managed installation ($markerName exists).`n" +
+                'Use Windows Settings > Apps > Installed apps, or run:' +
+                "`n  $helperCommand")
+        }
+    }
+
     Write-Host 'desktop-todo-widget uninstall'
     Write-Host "  target    : $installDir"
 

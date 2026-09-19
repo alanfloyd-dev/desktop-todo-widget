@@ -81,11 +81,8 @@ fn hash_valid(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 pub fn version_valid(s: &str) -> bool {
-    let parts: Vec<_> = s.split('.').collect();
-    parts.len() == 3
-        && parts.iter().all(|p| {
-            !p.is_empty() && (p.len() == 1 || !p.starts_with('0')) && p.parse::<u16>().is_ok()
-        })
+    // Single canonical policy: the same parser every version comparison uses.
+    crate::version::Version::parse(s).is_ok()
 }
 pub fn fingerprint(path: &Path) -> Result<(u64, String)> {
     let mut f = paths::open_regular(path)?;

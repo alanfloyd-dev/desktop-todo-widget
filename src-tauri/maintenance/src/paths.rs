@@ -329,21 +329,30 @@ pub fn move_replace(source: &Path, destination: &Path) -> Result<()> {
         match result {
             Ok(()) => return Ok(()),
             Err(e)
-                if attempt < WAITS_MS.len()
-                    && matches!(
-                        (e.code().0 as u32) & 0xffff,
-                        x if x == ERROR_ACCESS_DENIED.0
-                            || x == ERROR_SHARING_VIOLATION.0
-                            || x == ERROR_LOCK_VIOLATION.0
-                    ) =>
+                if matches!(
+                    (e.code().0 as u32) & 0xffff,
+                    x if x == ERROR_ACCESS_DENIED.0
+                        || x == ERROR_SHARING_VIOLATION.0
+                        || x == ERROR_LOCK_VIOLATION.0
+                ) =>
             {
                 last = Some(e);
-                std::thread::sleep(std::time::Duration::from_millis(WAITS_MS[attempt]));
+                match WAITS_MS.get(attempt) {
+                    Some(wait) => std::thread::sleep(std::time::Duration::from_millis(*wait)),
+                    // The ladder is exhausted while the error class is still
+                    // exactly a retryable conflict: report the bounded-retry
+                    // failure, never fall through to the plain per-file form.
+                    None => break,
+                }
             }
             Err(e) => {
                 return Err(Error::new(
                     ErrorKind::Io,
-                    format!("Atomic replace {}: {e}", destination.display()),
+                    format!(
+                        "Atomic replace {}: {e} (win32 code {:#010x})",
+                        destination.display(),
+                        e.code().0 as u32
+                    ),
                 ))
             }
         }
@@ -351,10 +360,11 @@ pub fn move_replace(source: &Path, destination: &Path) -> Result<()> {
     Err(Error::new(
         ErrorKind::Io,
         format!(
-            "Atomic replace {}: still denied after {} retries: {}",
+            "Atomic replace {}: still denied after {} retries (last win32 code {:#010x}): {}",
             destination.display(),
             WAITS_MS.len(),
-            last.expect("retry exhausted implies an error").to_string()
+            last.as_ref().expect("retry exhausted implies an error").code().0 as u32,
+            last.as_ref().expect("retry exhausted implies an error").to_string()
         ),
     ))
 }
@@ -382,6 +392,66 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         let _ = remove_file(&temp);
     }
     result
+}
+
+/// The base name a temp file shares with its compiled-known parent filename:
+/// `"installation-receipt.json"` → `"installation-receipt"`, `"LICENSE"` →
+/// `"LICENSE"`. The temp primitives replace-or-append the last extension with
+/// `.{uuid}.{suffix}`, so this stem is exactly the shared prefix.
+pub fn filename_stem(name: &str) -> &str {
+    match name.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem,
+        _ => name,
+    }
+}
+
+/// The `<stem>.<uuid>` part of a residue temp name, for names ending in the
+/// two suffixes this crate's primitives use. UUID segments contain hyphens
+/// but no dots, so the last dot is always the stem boundary. Anything else is
+/// not a shape we created.
+fn temp_shape(name: &str) -> Option<(&str, &str)> {
+    for suffix in [".installing", ".tmp"] {
+        if let Some(rest) = name.strip_suffix(suffix) {
+            return rest.rsplit_once('.');
+        }
+    }
+    None
+}
+
+/// Best-effort cleanup of crash residue left by this crate's own primitives:
+/// `atomic_write` publishes via `.{uuid}.tmp` and `copy_verified` via
+/// `.{uuid}.installing`, so a process death between creating and publishing
+/// either leaves the temp behind. A transaction may remove only temps of the
+/// exact shape `<compiled-known stem>.<canonical uuid>.<tmp|installing>` under
+/// a canonical root; every other name — unknown files, foreign stems, wrong
+/// shapes — is preserved untouched, and cleanup never widens deletion
+/// authority beyond what the transaction already owns. Per-file failures are
+/// ignored: a locked residue must not block the transaction.
+pub fn remove_stale_temps(dir: &Path, stems: &[&str]) -> usize {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some((stem, uuid_segment)) = temp_shape(&name) else {
+            continue;
+        };
+        let known = stems.iter().any(|s| s.eq_ignore_ascii_case(stem));
+        if !known || crate::receipt::validate_uuid(uuid_segment).is_err() {
+            continue;
+        }
+        if remove_file(&entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 #[cfg(test)]
@@ -418,6 +488,141 @@ mod tests {
         }
         let residue: Vec<_> = fs::read_dir(&dir).unwrap().collect();
         assert!(residue.is_empty(), "stray temp files: {residue:?}");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Deterministic sharing conflict (no AV timing, no sleeps beyond the
+    /// production ladder itself): hold the destination open with no sharing
+    /// at all, so every MoveFileExW attempt fails while the handle lives.
+    #[test]
+    fn move_replace_exhausts_bounded_retries_on_deterministic_conflict() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("target")
+            .join("paths-tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        let dir = root.join("install");
+        create_dir(&dir).unwrap();
+        let source = dir.join("source");
+        let destination = dir.join("destination");
+        fs::write(&source, b"new bytes").unwrap();
+        fs::write(&destination, b"old bytes").unwrap();
+
+        let conflict = OpenOptions::new().read(true).share_mode(0).open(&destination).unwrap();
+        let error = move_replace(&source, &destination).unwrap_err();
+        // Bounded ladder exhausted, never an unbounded wait.
+        assert!(
+            error.detail.contains("still denied after 6 retries"),
+            "{error}"
+        );
+        // The error class stays precise: sharing violation or access denied —
+        // exactly the retryable classes.
+        assert!(
+            error.detail.contains("0x80070020") || error.detail.contains("0x80070005"),
+            "exact win32 class must be preserved: {error}"
+        );
+        // Contract: a failed replace leaves the caller's staged source intact
+        // (the destination cannot be read while the exclusive conflict handle
+        // is alive, so its content is checked right after the release).
+        assert_eq!(fs::read(&source).unwrap(), b"new bytes");
+
+        drop(conflict);
+        assert_eq!(fs::read(&destination).unwrap(), b"old bytes");
+        // An external filter driver may hold the freshly touched destination
+        // a moment longer than the production ladder (the same documented
+        // long-holder behavior); the production code must surface that, so
+        // the bounded wait lives here in the test, not in the primitive.
+        let mut replaced = move_replace(&source, &destination);
+        for _ in 0..20 {
+            if replaced.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            replaced = move_replace(&source, &destination);
+        }
+        replaced.unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"new bytes");
+        assert!(!source.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A non-retryable error must surface immediately as a precise per-file
+    /// error, never enter the ACCESS_DENIED/sharing backoff ladder.
+    #[test]
+    fn move_replace_non_retryable_error_never_enters_the_backoff_ladder() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("target")
+            .join("paths-tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        let dir = root.join("install");
+        create_dir(&dir).unwrap();
+        let destination = dir.join("destination");
+        fs::write(&destination, b"old bytes").unwrap();
+
+        let error = move_replace(&dir.join("missing.source"), &destination).unwrap_err();
+        assert!(error.detail.contains("Atomic replace"), "{error}");
+        assert!(!error.detail.contains("still denied"), "{error}");
+        assert_eq!(fs::read(&destination).unwrap(), b"old bytes");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Crash-residue policy: only temps of the exact shape
+    /// `<compiled-known stem>.<canonical uuid>.<tmp|installing>` are removed;
+    /// unknown files, foreign stems, wrong uuid shapes, and wrong suffixes are
+    /// preserved untouched.
+    #[test]
+    fn stale_transaction_temps_are_cleaned_and_unknown_files_preserved() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("target")
+            .join("paths-tests")
+            .join(uuid::Uuid::new_v4().to_string());
+        let dir = root.join("install");
+        create_dir(&dir).unwrap();
+        let uuid = uuid::Uuid::new_v4().to_string();
+        let residue = [
+            format!("installation-receipt.{uuid}.tmp"),
+            format!("desktop-todo-widget.{uuid}.installing"),
+            format!("LICENSE.{uuid}.installing"),
+            format!("active-uninstall.{uuid}.tmp"),
+        ];
+        let preserved = [
+            format!("foo.{uuid}.tmp"),
+            format!("installation-receipt.not-a-uuid.tmp"),
+            format!("installation-receipt.{uuid}.tmp.bak"),
+            format!("{uuid}.tmp"),
+            "installation-receipt.json".to_string(),
+            "notes.md".to_string(),
+            "desktop-todo-widget.exe".to_string(),
+        ];
+        for name in residue.iter().chain(preserved.iter()) {
+            fs::write(dir.join(name), b"x").unwrap();
+        }
+
+        let stems = [
+            "installation-receipt",
+            "desktop-todo-widget",
+            "LICENSE",
+            "active-uninstall",
+        ];
+        let removed = remove_stale_temps(&dir, &stems);
+        assert_eq!(removed, 4, "exactly the four residue temps are removed");
+        for name in &residue {
+            assert!(!dir.join(name).exists(), "{name} must be removed");
+        }
+        for name in &preserved {
+            assert!(dir.join(name).exists(), "{name} must be preserved");
+        }
+        // Idempotent: a second pass finds nothing left to remove, and the
+        // preserved files stay untouched.
+        assert_eq!(remove_stale_temps(&dir, &stems), 0);
+        for name in &preserved {
+            assert!(dir.join(name).exists(), "{name} must still be preserved");
+        }
         fs::remove_dir_all(&root).unwrap();
     }
 }

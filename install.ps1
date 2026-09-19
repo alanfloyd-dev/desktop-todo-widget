@@ -278,11 +278,16 @@ try {
     # A managed installation is never updated by a legacy payload: its receipt
     # puts the directory under maintenance ownership, and silently replacing
     # its runtime would desynchronize the receipt and the Windows registration.
-    $receiptMarker = Join-Path $installDir $ReceiptName
-    if (Test-Path -LiteralPath $receiptMarker -PathType Leaf) {
-        throw ("This installation is already managed (an installation receipt exists in $installDir).`n" +
-            'A payload without desktop-todo-maintenance.exe cannot update it. ' +
-            'Install a current managed release payload, or run the installed maintenance helper.')
+    # The helper alone is equally fail-closed evidence: helper-without-receipt
+    # is broken managed state that only maintenance tooling may resolve.
+    $managedMarkerNames = @($ReceiptName, $ManagedHelperName)
+    foreach ($markerName in $managedMarkerNames) {
+        $marker = Join-Path $installDir $markerName
+        if (Test-Path -LiteralPath $marker -PathType Leaf) {
+            throw ("This installation is under maintenance ownership ($markerName exists in $installDir).`n" +
+                'A payload without desktop-todo-maintenance.exe cannot update it. ' +
+                'Install a current managed release payload, or run the installed maintenance helper.')
+        }
     }
 
     Write-Host 'desktop-todo-widget install'
