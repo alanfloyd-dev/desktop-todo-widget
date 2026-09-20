@@ -35,11 +35,7 @@ fn open_state() -> AppState {
 }
 
 fn fixture_quick_links() -> Vec<QuickLink> {
-    vec![QuickLink {
-        id: "qa-link-1".into(),
-        name: FIXTURE_LINK_NAME.into(),
-        url: FIXTURE_LINK_URL.into(),
-    }]
+    vec![QuickLink::new("qa-link-1", FIXTURE_LINK_NAME, FIXTURE_LINK_URL)]
 }
 
 /// Creates a representative local-first user state: schema migrations, a

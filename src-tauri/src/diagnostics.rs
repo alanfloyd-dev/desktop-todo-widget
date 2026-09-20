@@ -254,11 +254,11 @@ mod tests {
             weather_longitude: Some(65.4321),
             // A Quick Link URL is local data; the diagnostics allowlist must not
             // leak it either.
-            quick_links: vec![crate::settings::QuickLink {
-                id: "private".into(),
-                name: "Private Site".into(),
-                url: "https://private.example/secret".into(),
-            }],
+            quick_links: vec![crate::settings::QuickLink::new(
+                "private",
+                "Private Site",
+                "https://private.example/secret",
+            )],
             display_name: "Private Person".into(),
             avatar_asset_id: Some("avatar-00000000-0000-0000-0000-000000000000-private.png".into()),
             appearance_profiles: crate::appearance::AppearanceProfiles {

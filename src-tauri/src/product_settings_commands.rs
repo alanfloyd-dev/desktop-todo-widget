@@ -225,11 +225,7 @@ mod tests {
 
     #[test]
     fn quick_links_reject_only_unusable_rows() {
-        let link = |id: &str, name: &str, url: &str| crate::settings::QuickLink {
-            id: id.into(),
-            name: name.into(),
-            url: url.into(),
-        };
+        let link = |id: &str, name: &str, url: &str| crate::settings::QuickLink::new(id, name, url);
         // Duplicate names and duplicate URLs are the user's call, not an error.
         assert!(validate_quick_links(&[
             link("a", "Docs", "https://example.com/docs"),

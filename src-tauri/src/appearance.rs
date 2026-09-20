@@ -1,6 +1,6 @@
 use crate::settings::{AppState, ProductWindowMode};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 use tauri::WebviewWindow;
 use uuid::Uuid;
 
@@ -116,6 +116,17 @@ pub struct AppearanceSettings {
     /// Product text colour used when `text_contrast` is `custom`.
     pub custom_text_color: String,
     pub sampled_luminance: Option<f64>,
+    /// Unknown members written by a future version of this nested document.
+    ///
+    /// The per-mode appearance profile is a persisted, independently evolvable
+    /// object (its fields have grown before), and it lives inside the settings
+    /// document that every startup rewrites — without this map, a rollback to
+    /// an older runtime would permanently delete future material fields. The
+    /// Phase 2A settings unknown-key contract requires nested objects to
+    /// round-trip too, not only the top-level document. `normalize` replaces
+    /// only invalid *values* of known fields and never consults this map.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for AppearanceSettings {
@@ -139,6 +150,7 @@ impl Default for AppearanceSettings {
             // picking a colour does not change the surface.
             custom_text_color: "#d3dade".into(),
             sampled_luminance: None,
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -180,6 +192,12 @@ pub struct AppearanceProfiles {
     pub sidebar: AppearanceSettings,
     pub floating: AppearanceSettings,
     pub desktop: AppearanceSettings,
+    /// Unknown members written by a future version of this object (for
+    /// example a profile for a mode this runtime does not know). Round-tripped
+    /// verbatim per the Phase 2A settings unknown-key contract; a rollback to
+    /// this runtime must not delete them.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl AppearanceProfiles {
@@ -193,6 +211,7 @@ impl AppearanceProfiles {
             sidebar: settings.clone(),
             floating: settings.clone(),
             desktop: settings,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -978,6 +997,7 @@ mod tests {
                 solid_color: "#070809".into(),
                 ..AppearanceSettings::default()
             },
+            ..AppearanceProfiles::default()
         };
         assert_eq!(
             profiles.for_mode(ProductWindowMode::Sidebar).solid_color,
@@ -1034,6 +1054,7 @@ mod tests {
                 image_asset_id: Some(shared.into()),
                 ..AppearanceSettings::default()
             },
+            ..AppearanceProfiles::default()
         };
         let mut released = profiles.clone();
         released.desktop.image_asset_id = None;

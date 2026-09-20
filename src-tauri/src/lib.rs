@@ -114,9 +114,22 @@ pub fn run() {
     // so the log records when a stored document named Enhanced — that line is
     // the only trace such a document leaves, and it must stay answerable from
     // the log alone.
+    //
+    // A database that cannot be opened here is a real failure, not a reason
+    // to pretend the user chose Standard: it is reported through the
+    // controlled fatal path (diagnostics log + native message, non-zero exit)
+    // exactly like the later full load, because continuing would mean running
+    // a half-initialized product whose data layer is known-bad. Admission has
+    // already passed at this point, so this check never bypasses it.
     let early_data_dir = app_data_dir();
     let persisted_backend = match &early_data_dir {
-        Some(dir) => settings::AppState::read_rendering_backend(dir),
+        Some(dir) => match settings::AppState::read_rendering_backend(dir) {
+            Ok(backend) => backend,
+            Err(error) => fatal_startup_failure(
+                &qa_diagnostics,
+                format!("the database could not be opened at startup: {error}"),
+            ),
+        },
         None => settings::RenderingBackend::default(),
     };
     qa_diagnostics.record_rendering_backend(
@@ -140,7 +153,7 @@ pub fn run() {
     // live until process exit so maintenance cannot start mid-session.
     #[cfg(target_os = "windows")]
     let builder = builder.manage(admission);
-    builder
+    let app = match builder
         .on_page_load(|webview, payload| {
             let diagnostics = webview
                 .app_handle()
@@ -180,8 +193,14 @@ pub fn run() {
                 }
             }
             let database = database::Database::open(resolved_data_dir.join("alan-desktop.sqlite3"))
-                .map_err(std::io::Error::other)?;
-            app.manage(settings::AppState::load(database).map_err(std::io::Error::other)?);
+                .map_err(|error| {
+                    diagnostics.record(format!("[startup-fatal] database open failed: {error}"));
+                    std::io::Error::other(error)
+                })?;
+            app.manage(settings::AppState::load(database).map_err(|error| {
+                diagnostics.record(format!("[startup-fatal] settings load failed: {error}"));
+                std::io::Error::other(error)
+            })?);
             product_commands::install_tray(app).map_err(std::io::Error::other)?;
 
             let window = app
@@ -247,6 +266,73 @@ pub fn run() {
             maintenance_admission::start_uninstall
         ])
         .build(tauri::generate_context!())
-        .expect("error while building desktop-todo-widget")
-        .run(|_, _| {});
+    {
+        // A setup failure (database, tray, window) reaches here as a build
+        // error. It must end as a controlled failure — diagnostics were
+        // recorded where the state was available, the user gets a native
+        // message, and the process exits non-zero — never a panic with no UI.
+        Ok(app) => app,
+        Err(error) => fatal_dialog(&format!("desktop-todo-widget failed to start: {error}")),
+    };
+    app.run(|_, _| {});
+}
+
+/// The controlled startup-failure path: record through the diagnostics log
+/// while the instance is still available, then report and exit non-zero.
+/// Never a panic; never a half-initialized product UI.
+fn fatal_startup_failure(diagnostics: &qa_diagnostics::QaDiagnostics, message: String) -> ! {
+    diagnostics.record(format!("[startup-fatal] {message}"));
+    fatal_dialog(&message)
+}
+
+fn fatal_dialog(message: &str) -> ! {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::core::HSTRING;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST,
+        };
+        unsafe {
+            MessageBoxW(
+                None,
+                &HSTRING::from(message),
+                &HSTRING::from("desktop-todo-widget"),
+                MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST,
+            );
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    eprintln!("desktop-todo-widget: {message}");
+    std::process::exit(4);
+}
+
+#[cfg(test)]
+mod startup_failure_tests {
+    /// A startup failure — database unavailable, settings load failure, tray
+    /// or window failure — must end in the controlled fatal path (diagnostics
+    /// log, native message, non-zero exit), never in a panic from an
+    /// `.expect` on the Tauri build. Source-pinned: the full Tauri process
+    /// path is not unit-testable, but the contract is structural.
+    #[test]
+    fn startup_build_failure_is_controlled_not_a_panic() {
+        let source = include_str!("lib.rs");
+        assert!(
+            !source.contains(".expect(\"error while building"),
+            "the Tauri build must not panic on failure"
+        );
+        assert!(source.contains("fatal_dialog("), "controlled exit must exist");
+        assert!(
+            source.contains("fatal_startup_failure("),
+            "the early database failure path must exist"
+        );
+        // The database failure at startup must be recorded, not swallowed.
+        assert!(
+            source.contains("[startup-fatal] database open failed"),
+            "setup must record the database failure before returning"
+        );
+        assert!(
+            source.contains("[startup-fatal] settings load failed"),
+            "setup must record the settings failure before returning"
+        );
+    }
 }

@@ -4,7 +4,7 @@ use crate::{
     locale::Language,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::{collections::BTreeMap, sync::Mutex};
 
 const PRODUCT_SETTINGS_KEY: &str = "product_settings";
 
@@ -33,6 +33,25 @@ pub struct QuickLink {
     pub id: String,
     pub name: String,
     pub url: String,
+    /// Unknown members written by a future version of this evolvable
+    /// document. Round-tripped verbatim so a rollback to this runtime can
+    /// never silently delete a newer link shape (the Phase 2A settings
+    /// unknown-key contract). Never consulted by this build's logic.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl QuickLink {
+    /// A link carrying no future-version extras; the normal in-process way to
+    /// build one. Only a deserialized document can populate `extra`.
+    pub fn new(id: impl Into<String>, name: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            url: url.into(),
+            extra: BTreeMap::new(),
+        }
+    }
 }
 
 /// The only URL shapes a Quick Link may hold: `http` or `https` with a host.
@@ -249,6 +268,25 @@ pub struct ProductSettings {
     pub homepage_label: String,
     #[serde(default, skip_serializing)]
     pub homepage_url: String,
+    /// Unknown members written by a future version of this settings document.
+    ///
+    /// `ProductSettings` is the product's primary evolvable persistence
+    /// surface: every release rewrites the whole document on load
+    /// (`AppState::load` persists after `normalize`), so serde's default
+    /// "ignore unknown keys" behavior would make any rollback runtime
+    /// permanently delete members a newer version had stored. Flattening this
+    /// map round-trips them instead — the Phase 2A frozen settings
+    /// unknown-key contract (docs/application-lifecycle.md §10).
+    ///
+    /// Semantics: a known key is always consumed by its typed field and never
+    /// lands here, so unknown members cannot override typed values and cannot
+    /// duplicate known serialized output; `normalize` never touches this map;
+    /// equality includes it, which is the honest round-trip semantic. Keys
+    /// consumed by a documented legacy migration (`homepageLabel`,
+    /// `homepageUrl`, `appearanceSettings`) are deliberately not preserved:
+    /// they are migrated into their current representation instead.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for ProductSettings {
@@ -303,6 +341,7 @@ impl Default for ProductSettings {
             quick_links: Vec::new(),
             homepage_label: DEFAULT_QUICK_LINK_NAME.into(),
             homepage_url: String::new(),
+            extra: BTreeMap::new(),
         }
     }
 }
@@ -382,15 +421,15 @@ impl ProductSettings {
             return;
         }
         let name = self.homepage_label.trim();
-        self.quick_links.push(QuickLink {
-            id: LEGACY_HOMEPAGE_LINK_ID.into(),
-            name: if name.is_empty() {
-                DEFAULT_QUICK_LINK_NAME.into()
+        self.quick_links.push(QuickLink::new(
+            LEGACY_HOMEPAGE_LINK_ID,
+            if name.is_empty() {
+                DEFAULT_QUICK_LINK_NAME
             } else {
-                name.to_string()
+                name
             },
             url,
-        });
+        ));
     }
 
     /// Drops entries this build cannot render or open.
@@ -465,18 +504,20 @@ impl AppState {
     /// a single source of truth: the same `product_settings` row the rest of the
     /// product already uses.
     ///
-    /// Returns the default backend when the row is absent or unreadable, so a
-    /// damaged or first-run database can never prevent startup.
-    pub fn read_rendering_backend(data_dir: &std::path::Path) -> RenderingBackend {
-        let Ok(database) = Database::open(data_dir.join("alan-desktop.sqlite3")) else {
-            return RenderingBackend::default();
-        };
-        let Ok(Some(raw)) = database.setting(PRODUCT_SETTINGS_KEY) else {
-            return RenderingBackend::default();
-        };
-        serde_json::from_str::<ProductSettings>(&raw)
-            .map(|settings| settings.rendering_backend)
-            .unwrap_or_default()
+    /// "Legitimately absent" is not "broken": a missing row is a first run and
+    /// resolves to the default backend. A database that cannot be opened, a
+    /// failing settings query, or an unparseable stored document is a real
+    /// failure and is returned as `Err` — it must never be disguised as the
+    /// user having chosen Standard, and startup treats it as fatal through the
+    /// controlled failure path (never as a panic or a half-initialized run).
+    pub fn read_rendering_backend(data_dir: &std::path::Path) -> Result<RenderingBackend, String> {
+        let database = Database::open(data_dir.join("alan-desktop.sqlite3"))?;
+        match database.setting(PRODUCT_SETTINGS_KEY)? {
+            None => Ok(RenderingBackend::default()),
+            Some(raw) => serde_json::from_str::<ProductSettings>(&raw)
+                .map(|settings| settings.rendering_backend)
+                .map_err(|error| format!("stored settings document is unreadable: {error}")),
+        }
     }
 
     pub fn load(database: Database) -> Result<Self, String> {
@@ -505,21 +546,36 @@ impl AppState {
             .map_err(|_| "settings lock poisoned".into())
     }
 
+    /// Applies one settings change as a single serialized memory + durable
+    /// transaction.
+    ///
+    /// The settings Mutex is held across the whole sequence — clone candidate,
+    /// mutate, normalize, serialize, **persist** — and the live state is
+    /// committed only after the durable write succeeds. This gives two
+    /// guarantees the pre-hardening shape (mutate in place, release the lock,
+    /// then persist) could not:
+    ///
+    /// * a persist failure leaves both memory and disk at the pre-call state
+    ///   (never memory=new / disk=old);
+    /// * a second concurrent update cannot durably commit out of order or
+    ///   overtake the first one, because it cannot even reach its own persist
+    ///   until the first update has released the lock — which happens only
+    ///   after its durable commit landed. Lock order is always
+    ///   settings → database: no production path acquires the connection lock
+    ///   and then the settings lock, so the wider critical section cannot
+    ///   deadlock.
     pub fn update(
         &self,
         update: impl FnOnce(&mut ProductSettings),
     ) -> Result<ProductSettings, String> {
-        let snapshot = {
-            let mut settings = self.settings.lock().map_err(|_| "settings lock poisoned")?;
-            update(&mut settings);
-            settings.normalize();
-            settings.clone()
-        };
-        self.database.set_setting(
-            PRODUCT_SETTINGS_KEY,
-            &serde_json::to_string(&snapshot).map_err(|error| error.to_string())?,
-        )?;
-        Ok(snapshot)
+        let mut settings = self.settings.lock().map_err(|_| "settings lock poisoned")?;
+        let mut candidate = settings.clone();
+        update(&mut candidate);
+        candidate.normalize();
+        let document = serde_json::to_string(&candidate).map_err(|error| error.to_string())?;
+        self.database.set_setting(PRODUCT_SETTINGS_KEY, &document)?;
+        *settings = candidate;
+        Ok(settings.clone())
     }
 
     pub fn persist(&self) -> Result<(), String> {
@@ -593,16 +649,8 @@ mod tests {
                     settings.locked = true;
                     settings.display_name = "Example Person".into();
                     settings.quick_links = vec![
-                        QuickLink {
-                            id: "link-a".into(),
-                            name: "Example Site".into(),
-                            url: "https://example.com/".into(),
-                        },
-                        QuickLink {
-                            id: "link-b".into(),
-                            name: "Example Site".into(),
-                            url: "https://example.com/".into(),
-                        },
+                        QuickLink::new("link-a", "Example Site", "https://example.com/"),
+                        QuickLink::new("link-b", "Example Site", "https://example.com/"),
                     ];
                 })
                 .expect("update");
@@ -1516,16 +1564,8 @@ mod tests {
     fn quick_links_round_trip_with_camel_case_keys() {
         let mut settings = super::ProductSettings::default();
         settings.quick_links = vec![
-            super::QuickLink {
-                id: "b".into(),
-                name: "Docs".into(),
-                url: "https://example.com/docs".into(),
-            },
-            super::QuickLink {
-                id: "a".into(),
-                name: "Docs".into(),
-                url: "https://example.com/docs".into(),
-            },
+            super::QuickLink::new("b", "Docs", "https://example.com/docs"),
+            super::QuickLink::new("a", "Docs", "https://example.com/docs"),
         ];
         let json = serde_json::to_value(&settings).expect("serialize");
         assert_eq!(
@@ -1554,12 +1594,12 @@ mod tests {
         let migrated = state.snapshot().expect("snapshot");
         assert_eq!(
             migrated.quick_links,
-            vec![super::QuickLink {
-                id: super::LEGACY_HOMEPAGE_LINK_ID.into(),
+            vec![super::QuickLink::new(
+                super::LEGACY_HOMEPAGE_LINK_ID,
                 // The user's own label is kept verbatim, language included.
-                name: "Personal Site".into(),
-                url: "https://www.example.net".into(),
-            }]
+                "Personal Site",
+                "https://www.example.net",
+            )]
         );
 
         // The written document drops the legacy pair, so loading it again must not
@@ -1633,11 +1673,11 @@ mod tests {
         settings.normalize_quick_links();
         assert!(settings.quick_links.is_empty());
 
-        settings.quick_links = vec![super::QuickLink {
-            id: "kept".into(),
-            name: "Kept".into(),
-            url: "https://example.com/kept".into(),
-        }];
+        settings.quick_links = vec![super::QuickLink::new(
+            "kept",
+            "Kept",
+            "https://example.com/kept",
+        )];
         settings.normalize();
         assert_eq!(settings.quick_links.len(), 1);
         assert_eq!(settings.quick_links[0].id, "kept");
@@ -1647,37 +1687,21 @@ mod tests {
     fn normalizing_drops_unusable_quick_links_and_trims_the_rest() {
         let mut settings = super::ProductSettings {
             quick_links: vec![
-                super::QuickLink {
-                    id: "  keep  ".into(),
-                    name: "  Docs  ".into(),
-                    url: "  https://example.com/docs  ".into(),
-                },
-                super::QuickLink {
-                    id: "no-name".into(),
-                    name: "   ".into(),
-                    url: "https://example.com".into(),
-                },
-                super::QuickLink {
-                    id: "bad-url".into(),
-                    name: "Bad".into(),
-                    url: "file:///C:/private.txt".into(),
-                },
-                super::QuickLink {
-                    id: String::new(),
-                    name: "No id".into(),
-                    url: "https://example.com".into(),
-                },
+                super::QuickLink::new("  keep  ", "  Docs  ", "  https://example.com/docs  "),
+                super::QuickLink::new("no-name", "   ", "https://example.com"),
+                super::QuickLink::new("bad-url", "Bad", "file:///C:/private.txt"),
+                super::QuickLink::new(String::new(), "No id", "https://example.com"),
             ],
             ..Default::default()
         };
         settings.normalize();
         assert_eq!(
             settings.quick_links,
-            vec![super::QuickLink {
-                id: "keep".into(),
-                name: "Docs".into(),
-                url: "https://example.com/docs".into(),
-            }]
+            vec![super::QuickLink::new(
+                "keep",
+                "Docs",
+                "https://example.com/docs",
+            )]
         );
     }
 
@@ -1712,5 +1736,539 @@ mod tests {
             );
         }
         assert!(super::validate_quick_link_url("https://example.com/").is_ok());
+    }
+
+    // --- Settings unknown-key round-trip (Phase 2A contract) ----------------
+
+    /// A temp SQLite path unique to one test run; callers clean up themselves.
+    fn temp_db_path(label: &str) -> std::path::PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "alan-desktop-{label}-{}-{suffix}.sqlite3",
+            std::process::id()
+        ))
+    }
+
+    fn remove_db(path: &std::path::Path) {
+        for candidate in [
+            path.to_path_buf(),
+            path.with_extension("sqlite3-wal"),
+            path.with_extension("sqlite3-shm"),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    fn future_feature() -> serde_json::Value {
+        serde_json::json!({
+            "enabled": true,
+            "threshold": 17
+        })
+    }
+
+    fn stored_document(database: &Database) -> serde_json::Value {
+        serde_json::from_str(
+            &database
+                .setting("product_settings")
+                .expect("read stored document")
+                .expect("stored document exists"),
+        )
+        .expect("stored document parses")
+    }
+
+    /// A: a top-level unknown member written by a future version survives the
+    /// current runtime's load → normalize → persist verbatim.
+    #[test]
+    fn top_level_unknown_members_round_trip() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"mode":"floating","futureFeature":{"enabled":true,"threshold":17}}"#,
+            )
+            .expect("future document");
+        let state = AppState::load(database).expect("load");
+        let snapshot = state.snapshot().expect("snapshot");
+        // Typed semantics unchanged…
+        assert_eq!(snapshot.mode, ProductWindowMode::Floating);
+        // …and the unknown member is round-tripped, typed-field shape intact.
+        assert_eq!(snapshot.extra.get("futureFeature"), Some(&future_feature()));
+        assert_eq!(stored_document(&state.database)["futureFeature"], future_feature());
+    }
+
+    /// B: unknown members inside evolvable nested objects (the per-mode
+    /// appearance profile, and the profile container itself) survive too —
+    /// not only top-level keys.
+    #[test]
+    fn nested_unknown_members_round_trip() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"mode":"floating","appearanceProfiles":{"floating":{"futureMaterial":"quantum"},"futureMode":{"backgroundType":"glass"}}}"#,
+            )
+            .expect("future document");
+        let state = AppState::load(database).expect("load");
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(
+            snapshot.appearance_profiles.floating.extra.get("futureMaterial"),
+            Some(&serde_json::json!("quantum"))
+        );
+        assert_eq!(
+            snapshot
+                .appearance_profiles
+                .extra
+                .get("futureMode")
+                .expect("container-level unknown member"),
+            &serde_json::json!({ "backgroundType": "glass" })
+        );
+        let stored = stored_document(&state.database);
+        assert_eq!(stored["appearanceProfiles"]["floating"]["futureMaterial"], "quantum");
+        assert_eq!(stored["appearanceProfiles"]["futureMode"]["backgroundType"], "glass");
+    }
+
+    /// C: a document missing known fields still defaults them, and its
+    /// unknown members are unaffected by the defaulting.
+    #[test]
+    fn missing_known_fields_default_without_touching_unknown_members() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting("product_settings", r#"{"mode":"sidebar","futureFeature":1}"#)
+            .expect("partial future document");
+        let restored = AppState::load(database)
+            .expect("load")
+            .snapshot()
+            .expect("snapshot");
+        assert_eq!(restored.width, 620);
+        assert_eq!(restored.day_rollover, "04:00");
+        assert_eq!(
+            restored.extra.get("futureFeature"),
+            Some(&serde_json::json!(1))
+        );
+    }
+
+    /// D: the runtime updating a known field and persisting keeps every
+    /// unknown member, value for value.
+    #[test]
+    fn known_field_update_preserves_unknown_members() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"mode":"floating","dayRollover":"02:00","futureFeature":{"enabled":true,"threshold":17}}"#,
+            )
+            .expect("future document");
+        let state = AppState::load(database).expect("load");
+        state
+            .update(|settings| settings.mode = ProductWindowMode::Desktop)
+            .expect("known-field update");
+        let stored = stored_document(&state.database);
+        assert_eq!(stored["mode"], "desktop");
+        assert_eq!(stored["dayRollover"], "02:00");
+        assert_eq!(stored["futureFeature"], future_feature());
+    }
+
+    /// E: legacy migration keys are consumed exactly as before (the pair
+    /// becomes a Quick Link and is not written back), while an unrelated
+    /// future key in the same document is preserved.
+    #[test]
+    fn legacy_migration_consumes_its_keys_but_keeps_unrelated_unknowns() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"homepageLabel":"Personal Site","homepageUrl":"https://www.example.net","futureFeature":{"enabled":true,"threshold":17}}"#,
+            )
+            .expect("legacy + future document");
+        let state = AppState::load(database).expect("load");
+        let snapshot = state.snapshot().expect("snapshot");
+        // The legacy pair was consumed by the documented migration…
+        assert_eq!(snapshot.quick_links.len(), 1);
+        assert_eq!(snapshot.quick_links[0].id, super::LEGACY_HOMEPAGE_LINK_ID);
+        // …and is no longer written back, while the unrelated future key is.
+        let stored = stored_document(&state.database);
+        assert!(stored.get("homepageUrl").is_none());
+        assert!(stored.get("homepageLabel").is_none());
+        assert_eq!(stored["futureFeature"], future_feature());
+    }
+
+    /// A: persist-failure atomicity. A deterministic SQLite write failure —
+    /// a BEFORE INSERT trigger that aborts, leaving the existing row and
+    /// table intact — must leave the update as a single failed transaction:
+    /// memory stays at the pre-call state and the disk row is the genuine
+    /// pre-call document. The runtime then self-heals on the next update.
+    #[test]
+    fn persist_failure_leaves_memory_and_disk_at_the_previous_state() {
+        let path = temp_db_path("update-failure-atomicity");
+        let state = AppState::load(Database::open(&path).expect("open")).expect("state");
+        assert_eq!(
+            state.snapshot().expect("snapshot").mode,
+            ProductWindowMode::Floating
+        );
+
+        let saboteur = rusqlite::Connection::open(&path).expect("saboteur");
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER block_settings_writes BEFORE INSERT ON app_settings
+                 BEGIN SELECT RAISE(ABORT, 'writes are blocked'); END;",
+            )
+            .expect("install write blocker");
+
+        let error = state
+            .update(|settings| settings.mode = ProductWindowMode::Desktop)
+            .expect_err("a failed durable write must fail the update");
+        assert!(
+            error.contains("writes are blocked"),
+            "the error must name the durable-write failure: {error}"
+        );
+        // Memory: pre-call state — the mutation was never committed.
+        assert_eq!(
+            state.snapshot().expect("snapshot").mode,
+            ProductWindowMode::Floating
+        );
+
+        // Disk: the genuine pre-call row, untouched by the failed update.
+        saboteur
+            .execute_batch("DROP TRIGGER block_settings_writes")
+            .expect("remove write blocker");
+        assert_eq!(stored_document(&state.database)["mode"], "floating");
+
+        // Self-healing: the next update persists normally.
+        state
+            .update(|settings| settings.mode = ProductWindowMode::Desktop)
+            .expect("retry after the failure is resolved");
+        assert_eq!(
+            state.snapshot().expect("snapshot").mode,
+            ProductWindowMode::Desktop
+        );
+        drop(saboteur);
+        remove_db(&path);
+    }
+
+    /// B: concurrency ordering. With the settings Mutex held across persist,
+    /// a second update cannot durably commit before the first one: while the
+    /// first update is blocked inside its own persist (SQLite write lock,
+    /// released at a controlled moment), the second is still queued behind
+    /// the Mutex and the disk still carries the pre-call document. The
+    /// completion order is then asserted through channels, not wall-clock
+    /// races: A completes (durable commit included) strictly before B.
+    #[test]
+    fn concurrent_updates_cannot_commit_out_of_order() {
+        let path = temp_db_path("update-ordering");
+        let state = AppState::load(Database::open(&path).expect("open")).expect("state");
+
+        let holder = rusqlite::Connection::open(&path).expect("holder");
+        holder.execute_batch("BEGIN IMMEDIATE").expect("write lock");
+
+        std::thread::scope(|scope| {
+            // A: blocks inside set_setting (busy window) holding the settings
+            // Mutex across its persist.
+            let (a_done_tx, a_done_rx) = std::sync::mpsc::channel();
+            let state_a = &state;
+            let a_thread = scope.spawn(move || {
+                let result = state_a.update(|settings| settings.display_name = "First".into());
+                let _ = a_done_tx.send(result.is_ok());
+                result
+            });
+
+            // A is now parked inside its persist. B must queue behind the
+            // Mutex, never run ahead of A's durable commit.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let (b_done_tx, b_done_rx) = std::sync::mpsc::channel();
+            let state_b = &state;
+            let b_thread = scope.spawn(move || {
+                let result = state_b.update(|settings| settings.display_name = "Second".into());
+                let _ = b_done_tx.send(result.is_ok());
+                result
+            });
+            std::thread::sleep(std::time::Duration::from_millis(300));
+
+            // Both updates are still in flight: the disk must be unchanged,
+            // proving neither — B in particular — has durably committed.
+            let disk_display_name: String = holder
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key='product_settings'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map(|document| {
+                    serde_json::from_str::<serde_json::Value>(&document)
+                        .expect("parse disk document")["displayName"]
+                        .as_str()
+                        .expect("displayName")
+                        .to_string()
+                })
+                .expect("read disk while both updates are in flight");
+            assert_eq!(
+                disk_display_name, "User",
+                "no in-flight update may have committed to disk yet"
+            );
+
+            // Release the write lock: A's persist lands, A finishes, and only
+            // then can B reach its own persist. The recv order pins this.
+            drop(holder);
+            assert!(
+                a_done_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("A"),
+                "A must succeed"
+            );
+            let a_snapshot = a_thread.join().expect("A thread").expect("A update");
+            assert_eq!(a_snapshot.display_name, "First");
+            assert!(
+                b_done_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("B"),
+                "B must succeed"
+            );
+            let b_snapshot = b_thread.join().expect("B thread").expect("B update");
+            assert_eq!(b_snapshot.display_name, "Second");
+        });
+
+        // Final state is B's document, durably and in memory.
+        assert_eq!(state.snapshot().expect("snapshot").display_name, "Second");
+        assert_eq!(stored_document(&state.database)["displayName"], "Second");
+        remove_db(&path);
+    }
+
+    /// A stored Quick Link written by a future version carries its own
+    /// unknown member: the current runtime editing a known field of that link
+    /// (and normalizing/persisting the whole document) must keep the unknown
+    /// member value-for-value, not just survive its presence.
+    #[test]
+    fn quick_link_unknown_member_survives_known_field_edit() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"mode":"floating","quickLinks":[{"id":"link-a","name":"Docs","url":"https://example.com/docs","futureIcon":"data:image/svg;base64,abc"}]}"#,
+            )
+            .expect("future link document");
+        let state = AppState::load(database).expect("load");
+        assert_eq!(
+            state.snapshot().expect("snapshot").quick_links[0]
+                .extra
+                .get("futureIcon"),
+            Some(&serde_json::json!("data:image/svg;base64,abc"))
+        );
+        // The runtime edits the known fields of that same link…
+        state
+            .update(|settings| {
+                settings.quick_links[0].name = "Renamed Docs".into();
+                settings.quick_links[0].url = "https://example.com/renamed".into();
+            })
+            .expect("known-field edit");
+        // …and the unknown member is preserved verbatim through normalize and
+        // the persist that `update` performs.
+        let stored = stored_document(&state.database);
+        assert_eq!(stored["quickLinks"][0]["name"], "Renamed Docs");
+        assert_eq!(stored["quickLinks"][0]["url"], "https://example.com/renamed");
+        assert_eq!(
+            stored["quickLinks"][0]["futureIcon"],
+            "data:image/svg;base64,abc"
+        );
+    }
+
+    /// F — the round-trip regression this whole feature exists for: a future
+    /// version writes future-only keys, the current (rollback) runtime loads
+    /// and re-persists the document, and a future version reads again. The
+    /// future keys must still be there, byte-value for byte-value.
+    #[test]
+    fn rollback_simulation_future_keys_survive_the_current_runtime() {
+        let path = temp_db_path("unknown-key-rollback");
+
+        // Current runtime creates its document through the real path.
+        let state = AppState::load(Database::open(&path).expect("open")).expect("state");
+        state
+            .update(|settings| settings.display_name = "Rollback Person".into())
+            .expect("seed");
+
+        // "Future version" writes a top-level and a nested future-only key.
+        {
+            let mut document = stored_document(&state.database);
+            document["futureFeature"] = future_feature();
+            document["appearanceProfiles"]["sidebar"]["futureMaterial"] =
+                serde_json::json!("quantum");
+            state
+                .database
+                .set_setting("product_settings", &document.to_string())
+                .expect("future write");
+        }
+        drop(state);
+
+        // Current rollback runtime: full startup load → normalize → persist.
+        {
+            let rolled_back = AppState::load(Database::open(&path).expect("reopen"))
+                .expect("rollback runtime must load");
+            assert_eq!(
+                rolled_back.snapshot().expect("snapshot").display_name,
+                "Rollback Person"
+            );
+        }
+
+        // "Future version" reads again: both keys survived, exactly.
+        let database = Database::open(&path).expect("future reader");
+        let stored = stored_document(&database);
+        assert_eq!(stored["futureFeature"], future_feature());
+        assert_eq!(
+            stored["appearanceProfiles"]["sidebar"]["futureMaterial"],
+            "quantum"
+        );
+        drop(database);
+        remove_db(&path);
+    }
+
+    /// Normalize must never delete or rewrite unknown extras: they are inert
+    /// data the current runtime does not consume, even while it clamps,
+    /// folds, trims, and prunes the known fields around them.
+    #[test]
+    fn normalize_never_touches_unknown_extras() {
+        let mut settings = super::ProductSettings {
+            extra: [
+                ("futureFeature".to_string(), future_feature()),
+                ("keptKey".to_string(), serde_json::json!("value")),
+            ]
+            .into_iter()
+            .collect(),
+            ..super::ProductSettings::default()
+        };
+        settings.appearance_profiles.floating.extra.insert(
+            "futureMaterial".to_string(),
+            serde_json::json!("quantum"),
+        );
+        // Drive every destructive normalize path with hostile inputs. The
+        // link itself is usable (an unusable link is pruned whole — the
+        // documented prune rule — so there would be nothing left to check);
+        // what is under test is that its unknown extras survive the trim.
+        settings.width = 9999;
+        settings.height = 1;
+        settings.display_name = "  padded  ".into();
+        settings.quick_links = vec![QuickLink {
+            id: "  a  ".into(),
+            name: "  Docs  ".into(),
+            url: "  https://example.com/docs  ".into(),
+            extra: [("futureLinkField".to_string(), serde_json::json!(7))]
+                .into_iter()
+                .collect(),
+        }];
+        settings.normalize();
+        assert_eq!(settings.extra.get("futureFeature"), Some(&future_feature()));
+        assert_eq!(settings.extra.get("keptKey"), Some(&serde_json::json!("value")));
+        assert_eq!(
+            settings.appearance_profiles.floating.extra.get("futureMaterial"),
+            Some(&serde_json::json!("quantum"))
+        );
+        assert_eq!(
+            settings.quick_links[0].extra.get("futureLinkField"),
+            Some(&serde_json::json!(7))
+        );
+    }
+
+    // --- Controlled startup DB failure --------------------------------------
+
+    /// "Legitimately absent" is not "broken": no stored document is a first
+    /// run and resolves to the default backend, not an error.
+    #[test]
+    fn missing_settings_read_as_the_default_backend() {
+        let dir = std::env::temp_dir().join(format!(
+            "alan-desktop-backend-fresh-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let backend = AppState::read_rendering_backend(&dir).expect("first run");
+        assert_eq!(backend, super::RenderingBackend::Standard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stored document with a rendering backend reports it.
+    #[test]
+    fn stored_rendering_backend_is_reported() {
+        let dir = std::env::temp_dir().join(format!(
+            "alan-desktop-backend-stored-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        {
+            let state = AppState::load(Database::open(dir.join("alan-desktop.sqlite3")).expect("db"))
+                .expect("state");
+            state
+                .update(|settings| settings.day_rollover = "03:00".into())
+                .expect("persist a document");
+        }
+        let backend = AppState::read_rendering_backend(&dir).expect("read backend");
+        assert_eq!(backend, super::RenderingBackend::Standard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A database locked beyond the busy timeout is a real error returned to
+    /// the caller — never the default backend, never a panic. The controlled
+    /// startup path (log + native message + non-zero exit) then takes over;
+    /// the lib.rs source test below pins that no `.expect` remains on the
+    /// Tauri build. WAL readers are never blocked by a plain write lock, so
+    /// the seed leaves migration 2 pending: the early read's initialize has
+    /// a real write to perform, and that write is what waits on the lock.
+    #[test]
+    fn locked_database_is_an_error_not_the_default_backend() {
+        let dir = std::env::temp_dir().join(format!(
+            "alan-desktop-backend-locked-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("sandbox dir");
+        let db_path = dir.join("alan-desktop.sqlite3");
+        {
+            let seed = rusqlite::Connection::open(&db_path).expect("seed connection");
+            seed.execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE schema_migrations (
+                   version INTEGER PRIMARY KEY,
+                   applied_at INTEGER NOT NULL
+                 );
+                 INSERT INTO schema_migrations(version, applied_at) VALUES(1, 1);
+                 CREATE TABLE shortcuts (
+                   id TEXT PRIMARY KEY,
+                   label TEXT NOT NULL,
+                   url TEXT NOT NULL,
+                   sort_order INTEGER NOT NULL DEFAULT 0,
+                   enabled INTEGER NOT NULL DEFAULT 1,
+                   created_at INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL
+                 );",
+            )
+            .expect("seed schema");
+        }
+        let holder = rusqlite::Connection::open(&db_path).expect("holder");
+        holder
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("write lock");
+
+        let started = std::time::Instant::now();
+        let result = AppState::read_rendering_backend(&dir);
+        let elapsed = started.elapsed();
+        assert!(result.is_err(), "a locked database must be an error");
+        assert!(
+            result.unwrap_err().to_lowercase().contains("locked"),
+            "the error must name the conflict"
+        );
+        // Bounded: the timeout fired rather than hanging forever (loose bound).
+        assert!(
+            elapsed >= std::time::Duration::from_millis(1000),
+            "{elapsed:?}"
+        );
+        assert!(elapsed < std::time::Duration::from_secs(15), "{elapsed:?}");
+        drop(holder);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

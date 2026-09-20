@@ -2,8 +2,21 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::{
     path::{Path, PathBuf},
     sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+/// The single bounded busy timeout applied to every product database
+/// connection.
+///
+/// It absorbs short SQLite lock contention — another app instance finishing a
+/// write, an indexer or a real-time scanner briefly holding the file — so a
+/// transient conflict surfaces as a short wait instead of an immediate
+/// failure that a future maintenance probation could misread as a rollback
+/// trigger. It is deliberately finite: a genuinely stuck writer still fails
+/// after the timeout and surfaces as a precise error rather than hanging the
+/// startup path. The concrete value is an implementation choice, not a
+/// Protocol 1 invariant, and it is never exposed as a user setting.
+const BUSY_TIMEOUT: Duration = Duration::from_millis(2000);
 
 const MIGRATION_1: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -112,6 +125,9 @@ impl Database {
             std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         let connection = Connection::open(&path).map_err(|error| error.to_string())?;
+        connection
+            .busy_timeout(BUSY_TIMEOUT)
+            .map_err(|error| error.to_string())?;
         let database = Self {
             path,
             connection: Mutex::new(connection),
@@ -122,11 +138,13 @@ impl Database {
 
     #[cfg(test)]
     pub fn in_memory() -> Result<Self, String> {
+        let connection = Connection::open_in_memory().map_err(|error| error.to_string())?;
+        connection
+            .busy_timeout(BUSY_TIMEOUT)
+            .map_err(|error| error.to_string())?;
         let database = Self {
             path: PathBuf::from(":memory:"),
-            connection: Mutex::new(
-                Connection::open_in_memory().map_err(|error| error.to_string())?,
-            ),
+            connection: Mutex::new(connection),
         };
         database.initialize()?;
         Ok(database)
@@ -144,8 +162,14 @@ impl Database {
         connection
             .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")
             .map_err(|error| error.to_string())?;
+        // Immediate, not deferred: the migration transaction always writes.
+        // A deferred transaction that reads first and upgrades later would
+        // return SQLITE_BUSY immediately — SQLite refuses read-to-write
+        // upgrades without invoking the busy handler, to avoid deadlocks —
+        // which would defeat the bounded busy timeout exactly in the
+        // transient-contention scenario it exists for.
         let transaction = connection
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
         // The migration table is bootstrapped separately because querying a
         // missing table is itself an error. Each migration and its version row
@@ -365,7 +389,42 @@ fn unix_timestamp() -> i64 {
 mod tests {
     use super::{Database, Shortcut, WeatherCacheRow, MIGRATION_1, MIGRATION_2};
     use rusqlite::Connection;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    /// A temp SQLite path unique to one test run; callers clean up themselves.
+    fn temp_db_path(label: &str) -> std::path::PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "alan-desktop-{label}-{}-{suffix}.sqlite3",
+            std::process::id()
+        ))
+    }
+
+    /// Reads the migration table through a plain connection; usable while
+    /// another connection holds the write lock, because WAL allows readers.
+    fn peek_schema_version(path: &std::path::Path) -> i64 {
+        Connection::open(path)
+            .expect("reader connection")
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema version")
+    }
+
+    fn remove_db(path: &std::path::Path) {
+        for candidate in [
+            path.to_path_buf(),
+            path.with_extension("sqlite3-wal"),
+            path.with_extension("sqlite3-shm"),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
 
     #[test]
     fn initializes_and_migrates_required_schema() {
@@ -537,5 +596,223 @@ mod tests {
         ] {
             let _ = std::fs::remove_file(candidate);
         }
+    }
+
+    /// Seeds a database that still needs migrations 2 and 3, in WAL mode
+    /// (the product's own journal mode), so a product open has real writes
+    /// to perform — the actual probation scenario: an older source runtime
+    /// opening a pending-migration database. WAL is set here because the
+    /// journal-mode *change* itself fails immediately (and outside the busy
+    /// handler) while a write lock is held; the migration writes inside the
+    /// open are what must wait.
+    fn seed_pending_migration(path: &std::path::Path) {
+        let connection = Connection::open(path).expect("legacy database");
+        connection
+            .execute_batch("PRAGMA journal_mode = WAL;")
+            .expect("wal mode");
+        connection.execute_batch(MIGRATION_1).expect("migration one");
+        connection
+            .execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES(1, 1)",
+                [],
+            )
+            .expect("version one");
+    }
+
+    /// The bounded busy timeout must absorb a lock that is released inside
+    /// the window: another connection holds the write lock while the product
+    /// open has migrations to apply, the lock goes away, and the open
+    /// completes normally.
+    #[test]
+    fn open_waits_out_a_transient_write_lock() {
+        let path = temp_db_path("busy-transient");
+        seed_pending_migration(&path);
+
+        let holder = Connection::open(&path).expect("holder connection");
+        holder.execute_batch("BEGIN IMMEDIATE").expect("write lock");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            holder.execute_batch("COMMIT").expect("release lock");
+        });
+
+        let started = Instant::now();
+        let reopened = Database::open(&path);
+        let elapsed = started.elapsed();
+        assert!(
+            reopened.is_ok(),
+            "an open whose conflict resolves inside the busy window must succeed"
+        );
+        // Loose bounds only: the wait is real (the lock was held), but the
+        // test must not be a stopwatch.
+        assert!(elapsed >= Duration::from_millis(200), "elapsed {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(5), "elapsed {elapsed:?}");
+        assert_eq!(reopened.unwrap().schema_version().expect("version"), 3);
+        releaser.join().expect("releaser thread");
+        remove_db(&path);
+    }
+
+    /// A write lock that outlives the busy timeout must fail the open in a
+    /// bounded, precise way — never panic, never hang, and never leave a
+    /// half-applied migration or a fabricated schema version behind.
+    #[test]
+    fn open_fails_bounded_when_the_write_lock_never_releases() {
+        let path = temp_db_path("busy-persistent");
+        seed_pending_migration(&path);
+
+        let holder = Connection::open(&path).expect("holder connection");
+        holder.execute_batch("BEGIN IMMEDIATE").expect("write lock");
+
+        let started = Instant::now();
+        let blocked = Database::open(&path);
+        let elapsed = started.elapsed();
+
+        let error = match blocked {
+            Err(error) => error,
+            Ok(_) => panic!("a permanently held lock must fail the open"),
+        };
+        assert!(
+            error.to_lowercase().contains("locked"),
+            "the error must name the lock conflict: {error}"
+        );
+        // Loose bounds around the 2s timeout: the wait happened, and it ended.
+        assert!(elapsed >= Duration::from_millis(1000), "elapsed {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(15), "elapsed {elapsed:?}");
+
+        // Migration integrity: the version row is still the pre-existing one;
+        // the blocked migration wrote neither schema nor a version number.
+        assert_eq!(peek_schema_version(&path), 1);
+
+        // Once the lock is gone the same database migrates normally.
+        drop(holder);
+        let recovered = Database::open(&path).expect("open after release");
+        assert_eq!(recovered.schema_version().expect("version"), 3);
+        drop(recovered);
+        remove_db(&path);
+    }
+
+    /// The rollback-compatibility fixture: an additive future schema object
+    /// and future-only settings keys must survive the current runtime's open
+    /// → load → normalize → persist cycle untouched. Simulates the future
+    /// updater's data semantics without implementing it and without creating
+    /// a real new migration version.
+    #[test]
+    fn additive_future_schema_and_settings_survive_the_current_runtime() {
+        let path = temp_db_path("rollback-fixture");
+
+        // 1. The current product creates the database through its real APIs
+        //    and writes representative user data.
+        {
+            let state = crate::settings::AppState::load(Database::open(&path).expect("open"))
+                .expect("state");
+            state
+                .update(|settings| {
+                    settings.display_name = "Rollback Person".into();
+                    settings.quick_links = vec![crate::settings::QuickLink::new(
+                        "rb-link",
+                        "Rollback Docs",
+                        "https://example.com/rb",
+                    )];
+                })
+                .expect("seed settings");
+            let category = state.database.create_category("RB 分类").expect("category");
+            let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 20).expect("date");
+            state
+                .database
+                .add_task("RB 任务", Some(&category.id), date)
+                .expect("task");
+        }
+
+        // 2. Simulate a future version: an additive table (deliberately NOT a
+        //    new migration row) and future-only keys inside the settings
+        //    document, at the top level and inside a nested profile.
+        {
+            let connection = Connection::open(&path).expect("future connection");
+            connection
+                .execute_batch(
+                    "CREATE TABLE future_extension (
+                       id TEXT PRIMARY KEY,
+                       payload TEXT NOT NULL
+                     );
+                     INSERT INTO future_extension(id, payload) VALUES('fx-1', 'future data');",
+                )
+                .expect("additive schema");
+        }
+        {
+            let state = crate::settings::AppState::load(Database::open(&path).expect("open"))
+                .expect("state");
+            let mut document: serde_json::Value = serde_json::from_str(
+                &state
+                    .database
+                    .setting("product_settings")
+                    .expect("read")
+                    .expect("value"),
+            )
+            .expect("stored document");
+            document["futureFeature"] = serde_json::json!({
+                "enabled": true,
+                "threshold": 17,
+                "nested": { "depth": 3 }
+            });
+            document["appearanceProfiles"]["floating"]["futureMaterial"] =
+                serde_json::json!("quantum");
+            state
+                .database
+                .set_setting("product_settings", &document.to_string())
+                .expect("future settings write");
+        }
+
+        // 3. The current (rollback) runtime opens, loads, normalizes, and
+        //    persists — exactly what startup does.
+        {
+            let state = crate::settings::AppState::load(Database::open(&path).expect("reopen"))
+                .expect("rollback runtime must open");
+            assert_eq!(state.database.schema_version().expect("version"), 3);
+            assert_eq!(
+                state.database.task_count().expect("task count"),
+                1,
+                "known data must stay readable"
+            );
+            let snapshot = state.snapshot().expect("snapshot");
+            assert_eq!(snapshot.display_name, "Rollback Person");
+            assert_eq!(snapshot.quick_links.len(), 1);
+        }
+
+        // 4. The future version reads again: its keys and schema must have
+        //    survived the rollback runtime's full load/persist cycle.
+        let future_connection = Connection::open(&path).expect("future reader");
+        let stored: serde_json::Value = serde_json::from_str(
+            &future_connection
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key='product_settings'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .expect("stored document"),
+        )
+        .expect("parse stored document");
+        assert_eq!(
+            stored["futureFeature"],
+            serde_json::json!({
+                "enabled": true,
+                "threshold": 17,
+                "nested": { "depth": 3 }
+            }),
+            "the future-only top-level key must survive verbatim"
+        );
+        assert_eq!(
+            stored["appearanceProfiles"]["floating"]["futureMaterial"],
+            serde_json::json!("quantum"),
+            "the future-only nested key must survive verbatim"
+        );
+        let future_rows: String = future_connection
+            .query_row(
+                "SELECT payload FROM future_extension WHERE id='fx-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("future table must still exist with its row");
+        assert_eq!(future_rows, "future data");
+        drop(future_connection);
+        remove_db(&path);
     }
 }
