@@ -86,6 +86,23 @@ function Get-NormalizedPath {
     return $full.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
 }
 
+# Per-user uninstall: nothing here needs elevation, and over-the-shoulder
+# elevation (a standard user supplying an administrator's credentials) would
+# resolve LOCALAPPDATA/APPDATA to the administrator's profile instead of the
+# user's own install and data. Early UX guard only — the maintenance helper
+# performs the authoritative token check before any lifecycle side effect.
+# The legacy direct-removal path below is guarded equally: this check runs
+# before any process stop, shortcut removal, file deletion, or data deletion.
+function Assert-NotElevated {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw ('This is a per-user application. Run the uninstaller normally, ' +
+            'without administrator elevation ("Run as administrator"). ' +
+            'No uninstall step requires administrator rights.')
+    }
+}
+
 function Test-PathInside {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -285,6 +302,10 @@ function Remove-UserData {
 }
 
 try {
+    # First gate, before any target resolution, process stop, shortcut
+    # removal, file deletion, or user-data deletion.
+    Assert-NotElevated
+
     $explicitInstallDir = $PSBoundParameters.ContainsKey('InstallDir')
     $installDir = Resolve-UninstallTarget -Path $InstallDir -Explicit $explicitInstallDir
 

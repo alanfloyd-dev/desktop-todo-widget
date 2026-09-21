@@ -100,6 +100,21 @@ function Get-NormalizedPath {
     return $full.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
 }
 
+# Per-user install: nothing here needs elevation, and over-the-shoulder
+# elevation (a standard user supplying an administrator's credentials) would
+# resolve LOCALAPPDATA/APPDATA to the administrator's profile instead of the
+# installing user's. Early UX guard only — the maintenance helper performs
+# the authoritative token check before any lifecycle side effect.
+function Assert-NotElevated {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw ('This is a per-user application. Run the installer normally, ' +
+            'without administrator elevation ("Run as administrator"). ' +
+            'No installation step requires administrator rights.')
+    }
+}
+
 function Test-PathInside {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -224,6 +239,10 @@ function Install-StartMenuShortcut {
 }
 
 try {
+    # First gate, before any path resolution, copy, shortcut, receipt, or
+    # helper handoff.
+    Assert-NotElevated
+
     $sourceDir = Get-NormalizedPath $Source
     $installDir = Assert-PerUserInstallDir -Path $InstallDir
     if ($sourceDir -eq $installDir) {

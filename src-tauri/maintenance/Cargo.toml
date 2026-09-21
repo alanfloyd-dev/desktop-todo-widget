@@ -34,7 +34,13 @@ windows = { version = "0.61.3", features = [
 ] }
 
 [profile.release]
+# Kept in lockstep with the parent src-tauri [profile.release]: the canonical
+# helper build goes through the parent manifest (`cargo build --release -p
+# desktop-todo-maintenance --manifest-path src-tauri/Cargo.toml`, which applies
+# the parent profile), but an accidental standalone build of this crate must
+# not produce a byte-different helper with a different crash strategy.
 opt-level = "s"
 lto = true
 codegen-units = 1
+panic = "abort"
 strip = true

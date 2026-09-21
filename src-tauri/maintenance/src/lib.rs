@@ -1,5 +1,6 @@
 //! Local, offline lifecycle operations. No Tauri, network, or SQLite dependency.
 pub mod integration;
+pub mod elevation;
 pub mod lifecycle;
 pub mod lock;
 pub mod native;
@@ -32,6 +33,7 @@ pub enum ErrorKind {
     RuntimeRemovalFailure,
     PersistentDataRemovalFailure,
     PartialUninstall,
+    ElevatedExecution,
     Io,
 }
 

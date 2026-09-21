@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Simulation harness for install.ps1 and uninstall.ps1.
@@ -286,6 +286,51 @@ try {
     $result = Invoke-UnderTest -ScriptPath $uninstallScript -LocalAppData $local -RoamingAppData $roaming
     Check 'uninstall succeeds once managed markers are gone' ($result.ExitCode -eq 0) $result.Output
     Check 'install directory removed after managed-state guard run' (-not (Test-Path -LiteralPath $installDir))
+
+    # --- elevation guards (early refusal, no bypass) --------------------------
+    # Structural checks: the per-user scripts must refuse an elevated host as
+    # their first action, before every destructive or managed handoff path,
+    # and must expose no bypass switch. The authoritative token check lives in
+    # the maintenance helper; these are UX/defense-in-depth guards and real
+    # elevated execution is release-QA territory, so only structure is
+    # asserted here.
+    Write-Host 'elevation guards (early refusal, no bypass)'
+    foreach ($pair in @(
+        @{ Script = $installScript; Name = 'install.ps1' },
+        @{ Script = $uninstallScript; Name = 'uninstall.ps1' }
+    )) {
+        $text = Get-Content -LiteralPath $pair.Script -Raw
+        Check "$($pair.Name) defines the elevation guard" ($text.Contains('function Assert-NotElevated'))
+        # The guard call is the first statement inside the top-level try block:
+        # before Known Folder derivation, copies, shortcut/registry writes,
+        # receipt work, helper handoff, process stops, or deletions.
+        # Anchor on the guard's call line (four-space indented statement — the
+        # `function Assert-NotElevated` definition does not match this shape),
+        # then the main try block is the last `try {` before that call. All
+        # destructive/handoff calls searched from the main try onward must sit
+        # after the guard.
+        $guardCall = [regex]::Match($text, '(?m)^    Assert-NotElevated\s*$')
+        Check "$($pair.Name) invokes the guard" ($guardCall.Success)
+        if ($guardCall.Success) {
+            $guardIndex = $guardCall.Index
+            $tryIndex = $text.LastIndexOf('try {', $guardIndex)
+            Check "$($pair.Name) guard sits inside the main try block" ($tryIndex -ge 0)
+            $markers = @('Copy-PayloadFile', 'Install-StartMenuShortcut', 'Stop-InstalledApp',
+                'Remove-InstalledProgramFiles', 'Remove-UserData', 'Remove-StartMenuShortcut',
+                'desktop-todo-maintenance.exe')
+            foreach ($marker in $markers) {
+                $markerIndex = $text.IndexOf($marker, [Math]::Max($tryIndex, 0))
+                if ($markerIndex -ge 0) {
+                    Check "$($pair.Name) guard precedes '$marker' call" ($guardIndex -lt $markerIndex)
+                }
+            }
+        }
+        # No bypass switch: the only accepted shapes are none at all, or the
+        # documented scope switches that have nothing to do with elevation.
+        foreach ($bypass in @('AllowElevated', 'SkipElevation', 'NoElevationCheck', 'ElevatedCheck')) {
+            Check "$($pair.Name) has no '$bypass' bypass" (-not $text.Contains($bypass))
+        }
+    }
 }
 finally {
     if ($KeepSandbox) {

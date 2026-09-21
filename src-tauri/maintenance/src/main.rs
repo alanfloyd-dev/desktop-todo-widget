@@ -1,6 +1,10 @@
 #![windows_subsystem = "windows"]
-use desktop_todo_maintenance::{lifecycle, native, paths::Paths, Error, ErrorKind, Result};
+use desktop_todo_maintenance::{elevation, lifecycle, native, paths::Paths, Error, ErrorKind, Result};
 fn run() -> Result<()> {
+    // Per-user product: an elevated helper targets the wrong profile/HKCU
+    // under over-the-shoulder elevation and needs elevation for nothing.
+    // Refused before any gate, receipt, filesystem, or registry side effect.
+    elevation::refuse_elevated_execution()?;
     let paths = Paths::resolve()?;
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
