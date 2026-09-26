@@ -18,6 +18,12 @@ chrono = { version = "0.4", features = ["clock"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+# Updater metadata fetches reuse this client. Deliberately kept WITHOUT the
+# gzip/brotli/deflate features: no transparent content decoding exists, so
+# the signature verifier always receives the exact transport bytes of the
+# served manifest (frozen exact-raw-byte rule). Enabling a decompression
+# feature here would change signed-bytes semantics and needs a protocol
+# review first.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "native-tls"] }
 tauri = { version = "2.11.5", features = ["tray-icon"] }
 url = "2"
@@ -54,8 +60,7 @@ desktop-todo-maintenance = { path = "maintenance" }
 # Pure signed-update protocol core (Phase 2B): envelope/trust-store/canonical
 # signature verification, manifest parsing, candidate policy. Shared with the
 # helper through the same path crate; each binary verifies independently.
-desktop-todo-update-core = { path = "update-core" }
-# This is the Standard product's whole Win32 surface: the widget-frame
+desktop-todo-update-core = { path = "update-core" }# This is the Standard product's whole Win32 surface: the widget-frame
 # subclassing and window styles plus the WebView2 telemetry in qa_diagnostics.
 # `Win32_UI_Shell` is declared explicitly instead of relying on feature
 # unification from other crates in the dependency graph.
@@ -72,6 +77,11 @@ windows-core = "0.61.2"
 # a production build, so shipped binaries cannot be redirected by the QA
 # environment variable.
 desktop-todo-maintenance = { path = "maintenance", features = ["qa"] }
+# Test-only signing for updater discovery fixtures (deterministic RFC 8032
+# TEST-ONLY seeds; never release signing, never in production builds).
+ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
+# Test-only envelope construction for the same fixtures.
+base64 = "0.22"
 
 [profile.dev]
 incremental = true

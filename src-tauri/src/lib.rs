@@ -33,6 +33,18 @@ mod reviews;
 mod settings;
 mod task_day;
 mod tasks;
+// Phase 2B updater: provider discovery and bounded metadata fetch. The
+// verification/eligibility core is the shared `desktop-todo-update-core`
+// crate; this module only transports attacker-controlled bytes to it and
+// never writes durable state.
+//
+// Deliberately crate-private (pre-commit boundary review): the network
+// capability is not part of the product's public API. `#[allow(dead_code)]`
+// is scoped to the module because no production caller exists until the
+// Phase 2C wiring (trusted-target persistence, download, session); the
+// moment that lands, the allow and this note go.
+#[allow(dead_code)]
+mod updater;
 mod weather;
 mod window_mode;
 
