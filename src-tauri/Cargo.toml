@@ -51,6 +51,10 @@ wry = "0.55.1"
 # Shared maintenance core: canonical roots, receipt codec and the launch
 # admission/lease primitives. No Tauri, network or SQLite dependency.
 desktop-todo-maintenance = { path = "maintenance" }
+# Pure signed-update protocol core (Phase 2B): envelope/trust-store/canonical
+# signature verification, manifest parsing, candidate policy. Shared with the
+# helper through the same path crate; each binary verifies independently.
+desktop-todo-update-core = { path = "update-core" }
 # This is the Standard product's whole Win32 surface: the widget-frame
 # subclassing and window styles plus the WebView2 telemetry in qa_diagnostics.
 # `Win32_UI_Shell` is declared explicitly instead of relying on feature

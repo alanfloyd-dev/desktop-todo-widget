@@ -8,6 +8,7 @@ pub mod paths;
 pub mod receipt;
 pub mod resources;
 mod security;
+pub mod updater;
 pub mod version;
 pub const PRODUCT_VERSION: &str = env!("DTW_PRODUCT_VERSION");
 

@@ -48,3 +48,6 @@ src-tauri/.codex-target/
 # Python bytecode cache
 __pycache__/
 *.py[cod]
+
+/src-tauri/update-core/target/
+/src-tauri/update-core/Cargo.lock

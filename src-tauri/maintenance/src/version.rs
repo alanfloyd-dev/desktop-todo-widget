@@ -1,71 +1,14 @@
 //! The one canonical semantic version policy for Maintenance Protocol 1.
 //!
-//! Receipts, the manual bootstrap downgrade check, and PE ProductVersion
-//! comparison all go through this module, so they can never diverge on what a
-//! valid version is or how two versions order. Protocol 1 delivers stable
-//! numeric dotted versions only; future manifest versions reuse this type.
+//! The implementation is the shared pure protocol core
+//! (`desktop-todo-update-core/src/version.rs`), extracted in Phase 2B so the
+//! signed-update core and this crate can never diverge into two slightly
+//! different parsers (protocol v1: "Protocol 1 introduces no semver crate
+//! and no second comparator"). Receipts, the manual bootstrap downgrade
+//! check, and PE ProductVersion comparison all go through this module; the
+//! tests below pin the re-exported surface.
 
-use crate::{Error, ErrorKind, Result};
-
-/// A stable Protocol 1 version: exactly three numeric components, each a
-/// 16-bit decimal without leading zeros (`0` is allowed, `01` is rejected).
-/// The 16-bit bound matches the PE `VS_FIXEDFILEINFO` fields, so every
-/// version comparable here is representable both as text and as PE metadata.
-/// Prerelease/build suffixes are not accepted: protocol 1 delivers stable
-/// versions only, and any future channel extension is a protocol change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Version {
-    major: u16,
-    minor: u16,
-    patch: u16,
-}
-
-impl Version {
-    /// Strict parse. Anything that is not exactly `M.m.p` with digit-only,
-    /// leading-zero-free, u16-range components fails closed — including
-    /// prerelease suffixes, whitespace, signs, and overflow.
-    pub fn parse(text: &str) -> Result<Self> {
-        let parts: Vec<&str> = text.split('.').collect();
-        if parts.len() != 3 {
-            return Err(Error::new(
-                ErrorKind::VersionMalformed,
-                format!("Version must be three numeric components: {text:?}"),
-            ));
-        }
-        let mut fields = [0u16; 3];
-        for (field, part) in fields.iter_mut().zip(parts) {
-            let well_formed = !part.is_empty()
-                && part.bytes().all(|b| b.is_ascii_digit())
-                && (part.len() == 1 || !part.starts_with('0'));
-            let value = if well_formed {
-                part.parse::<u16>().ok()
-            } else {
-                None
-            };
-            *field = value.ok_or_else(|| {
-                Error::new(
-                    ErrorKind::VersionMalformed,
-                    format!("Invalid version component {part:?}"),
-                )
-            })?;
-        }
-        Ok(Self {
-            major: fields[0],
-            minor: fields[1],
-            patch: fields[2],
-        })
-    }
-}
-
-/// True when `installed` is strictly newer than `candidate`, i.e. installing
-/// or updating to `candidate` would be a downgrade. Unparseable input fails
-/// closed: the caller refuses the operation, never silently allows it.
-pub fn is_downgrade(installed: &str, candidate: &str) -> bool {
-    match (Version::parse(installed), Version::parse(candidate)) {
-        (Ok(a), Ok(b)) => a > b,
-        _ => true,
-    }
-}
+pub use desktop_todo_update_core::version::{is_downgrade, Version};
 
 #[cfg(test)]
 mod tests {
@@ -77,7 +20,7 @@ mod tests {
 
     #[test]
     fn stable_versions_parse_and_order_semantically() {
-        assert_eq!(parse("1.1.0"), Version { major: 1, minor: 1, patch: 0 });
+        assert_eq!(parse("1.1.0"), Version::new(1, 1, 0));
         assert!(parse("1.10.0") > parse("1.9.0"));
         assert!(parse("1.10.0") > parse("1.2.0"));
         assert!(parse("2.0.0") > parse("1.99.99"));

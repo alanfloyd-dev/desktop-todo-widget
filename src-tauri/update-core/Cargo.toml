@@ -1,0 +1,20 @@
+[package]
+name = "desktop-todo-update-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Pure signed-update protocol core shared by the product binary and the maintenance helper"
+
+[lib]
+name = "desktop_todo_update_core"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+# Ed25519 is the frozen protocol-1 algorithm. Signing exists only for test
+# fixture generation (deterministic RFC 8032 signing from a fixed seed); no
+# rand feature is enabled, and no batch/serde/pkcs8 surface is pulled in.
+ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
+base64 = { version = "0.22", default-features = false, features = ["std"] }
