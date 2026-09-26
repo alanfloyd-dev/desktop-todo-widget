@@ -66,9 +66,14 @@ impl RawManifest {
 /// The frozen manifest wire shape (schema 1). Top-level unknown fields are
 /// rejected. The `assets` platform map is the one open dimension: platform
 /// keys this client does not recognize are carried as uninterpreted values.
+///
+/// Deliberately crate-private: an unauthenticated `ManifestV1` value must
+/// never be nameable by product code, or it could be mistaken for a
+/// verified one. Parsed manifests escape this crate only as
+/// `ValidatedManifest` inside an authenticated `VerifiedTarget`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ManifestV1 {
+pub(crate) struct ManifestV1 {
     #[serde(rename = "schemaVersion")]
     schema_version: u32,
     #[serde(rename = "appId")]
@@ -159,7 +164,13 @@ impl InstallIdentity {
     }
 }
 
-/// A manifest that passed the full semantic validation.
+/// A manifest that passed the full semantic validation. This is the only
+/// parsed-manifest type this crate exposes, and it can only be constructed
+/// inside the crate — the sole path is `verify_and_parse`, i.e. after
+/// envelope validation, compiled-key lookup, and the exact raw-byte
+/// signature check. There is no public or unchecked constructor by design:
+/// external code can never hold a `ValidatedManifest` that did not come
+/// from an authenticated verification.
 #[derive(Debug)]
 pub struct ValidatedManifest {
     manifest: ManifestV1,
@@ -200,7 +211,11 @@ impl ValidatedManifest {
 
 /// Strict-parse the manifest structure from the verified bytes. Closed
 /// struct: unknown fields, duplicate keys, and trailing input are rejected.
-pub fn parse_manifest(raw: &RawManifest) -> Result<ManifestV1, ProtocolError> {
+///
+/// Crate-private (audit F-1): exposing this publicly would let product code
+/// obtain a parsed `ValidatedManifest` without ever passing envelope
+/// validation, trust lookup, or the signature check.
+pub(crate) fn parse_manifest(raw: &RawManifest) -> Result<ManifestV1, ProtocolError> {
     strict_parse(raw.bytes())
         .map_err(|e| ProtocolError::new(ErrorKind::ManifestMalformed, e.to_string()))
 }
@@ -208,7 +223,10 @@ pub fn parse_manifest(raw: &RawManifest) -> Result<ManifestV1, ProtocolError> {
 /// Semantic validation (step 6 of the frozen order). The failure kinds feed
 /// the candidate policy: `UnsupportedUpdaterProtocol` and `PlatformMismatch`
 /// make a candidate ineligible, every other kind makes it invalid.
-pub fn validate_manifest(manifest: ManifestV1) -> Result<ValidatedManifest, ProtocolError> {
+///
+/// Crate-private (audit F-1), for the same reason as `parse_manifest`: the
+/// only public producer of `ValidatedManifest` is `verify_and_parse`.
+pub(crate) fn validate_manifest(manifest: ManifestV1) -> Result<ValidatedManifest, ProtocolError> {
     let reject = |violation: SemanticViolation, detail: String| {
         Err(ProtocolError::new(
             ErrorKind::SemanticViolation(violation),
@@ -297,11 +315,14 @@ fn validate_platform_asset(asset: &PlatformAsset) -> Result<(), ProtocolError> {
     };
 
     // The package filename is a required closed-schema field carried into
-    // the frozen tuple. Protocol 1 freezes only that "version, package name
-    // and platform must agree"; it never froze a concrete filename grammar,
-    // so no naming shape is a semantic rejection here — exact package
-    // identity is enforced later against the signed package bytes and the
-    // compiled allowlist (release-time pinning, protocol v1 §16).
+    // the frozen tuple: an opaque identity/locator, not a grammar-checked
+    // name. Protocol 1 freezes only that "version, package name and
+    // platform must agree" and no concrete filename grammar, so no naming
+    // shape is a semantic rejection here. The later package phase checks
+    // the downloaded object against the already-signed metadata (filename
+    // equality, size, SHA-256) and the compiled package-content allowlist;
+    // the package bytes themselves are never "signed", and schema 1 never
+    // re-introduces an unfrozen naming format.
     if asset.size > PACKAGE_MAX_BYTES {
         return reject(
             SemanticViolation::PackageSizeOutOfRange,
@@ -516,6 +537,76 @@ pub(crate) mod tests {
         assert_eq!(
             validate_manifest(parsed).unwrap_err().kind,
             ErrorKind::ManifestSchemaUnsupported
+        );
+    }
+
+    /// Regression pins (audit F-2A): every remaining semantic rejection is
+    /// wired to its exact typed variant, never a bare `is_err()`.
+    #[test]
+    fn remaining_semantic_violations_are_typed() {
+        let reject = |text: String| {
+            let raw = RawManifest::from_bytes(text.into_bytes()).unwrap();
+            validate_manifest(parse_manifest(&raw).unwrap())
+                .unwrap_err()
+                .kind
+        };
+
+        // AppIdMismatch.
+        assert_eq!(
+            reject(manifest_text("1.4.0").replace("net.alanfloyd.desktop", "net.evil.desktop")),
+            ErrorKind::SemanticViolation(SemanticViolation::AppIdMismatch)
+        );
+        // ChannelUnsupported.
+        assert_eq!(
+            reject(manifest_text("1.4.0").replace(r#""channel":"stable""#, r#""channel":"beta""#)),
+            ErrorKind::SemanticViolation(SemanticViolation::ChannelUnsupported)
+        );
+        // PublishedAtMalformed: a non-UTC offset is not an RFC 3339 UTC
+        // timestamp.
+        assert_eq!(
+            reject(
+                manifest_text("1.4.0").replace("2026-10-01T00:00:00Z", "2026-10-01T00:00:00+01:00")
+            ),
+            ErrorKind::SemanticViolation(SemanticViolation::PublishedAtMalformed)
+        );
+        // PackageSizeOutOfRange: beyond the frozen 256 MiB package limit.
+        assert_eq!(
+            reject(manifest_text("1.4.0").replace(r#""size":3000000"#, r#""size":300000000"#)),
+            ErrorKind::SemanticViolation(SemanticViolation::PackageSizeOutOfRange)
+        );
+        // InstallFileSizeOutOfRange: beyond the frozen 128 MiB per-EXE limit.
+        assert_eq!(
+            reject(manifest_text("1.4.0").replace(r#""size":5500000"#, r#""size":200000000"#)),
+            ErrorKind::SemanticViolation(SemanticViolation::InstallFileSizeOutOfRange)
+        );
+    }
+
+    /// Regression pin (audit F-2A): the 512 MiB expanded-size rejection is
+    /// entailed by the smaller frozen limits under schema 1's fixed
+    /// two-entry shape, so it can never fire through a legal manifest — the
+    /// check stays as a compiled backstop, and any attempt to exceed the
+    /// budget trips an earlier typed rejection first.
+    #[test]
+    fn expanded_size_limit_is_entailed_and_unreachable_under_schema_1() {
+        // Two managed files at exactly the per-file compiled limit (128 MiB
+        // each) pass: 256 MiB total is within the 512 MiB expanded budget.
+        let text = manifest_text("1.4.0")
+            .replace(r#""size":5500000"#, r#""size":134217728"#)
+            .replace(r#""size":800000"#, r#""size":134217728"#);
+        let raw = RawManifest::from_bytes(text.into_bytes()).unwrap();
+        assert!(validate_manifest(parse_manifest(&raw).unwrap()).is_ok());
+
+        // Any total beyond the budget requires a per-file size beyond the
+        // 128 MiB limit, which rejects first with its own typed variant.
+        let text = manifest_text("1.4.0")
+            .replace(r#""size":5500000"#, r#""size":200000000"#)
+            .replace(r#""size":800000"#, r#""size":200000000"#);
+        let raw = RawManifest::from_bytes(text.into_bytes()).unwrap();
+        assert_eq!(
+            validate_manifest(parse_manifest(&raw).unwrap())
+                .unwrap_err()
+                .kind,
+            ErrorKind::SemanticViolation(SemanticViolation::InstallFileSizeOutOfRange)
         );
     }
 

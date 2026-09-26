@@ -89,6 +89,43 @@ fn hex_to_raw_key(text: &str) -> [u8; 32] {
     raw
 }
 
+/// Regression pin (audit F-2D): the SHA-256 of the committed
+/// `manifest-A.json` bytes (703 bytes), precomputed outside the crate, so
+/// the golden digest assertion cannot pass by recomputing the expected
+/// value with the same helper it asserts on.
+const MANIFEST_A_SHA256: &str = "f1277c58b09ce66d8c03d5748bb6b4c756d55d6eeaa0ae277c3212244f1ddf1c";
+
+#[test]
+fn golden_digest_matches_independent_precomputed_sha256() {
+    let manifest_bytes = read_golden("manifest-A.json");
+    let envelope = read_golden("envelope-A.json");
+    let raw_key = hex_to_raw_key(&String::from_utf8(read_golden("key-1-public.hex")).unwrap());
+    let trust = TrustStore::from_raw_keys(&[raw_key]).unwrap();
+
+    let target = verify_and_parse(&trust, &envelope, &manifest_bytes).unwrap();
+    assert_eq!(target.manifest_sha256_hex(), MANIFEST_A_SHA256);
+}
+
+/// Regression pin (audit F-2E): the accepted target carries the exact
+/// served bytes, and a byte-mutated variant can never yield a
+/// `VerifiedTarget`.
+#[test]
+fn accepted_target_carries_the_exact_served_bytes() {
+    let manifest_bytes = read_golden("manifest-A.json");
+    let envelope = read_golden("envelope-A.json");
+    let raw_key = hex_to_raw_key(&String::from_utf8(read_golden("key-1-public.hex")).unwrap());
+    let trust = TrustStore::from_raw_keys(&[raw_key]).unwrap();
+
+    let target = verify_and_parse(&trust, &envelope, &manifest_bytes).unwrap();
+    assert_eq!(target.raw_bytes(), manifest_bytes.as_slice());
+
+    let mut mutated = manifest_bytes.clone();
+    mutated.insert(mutated.len() - 1, b' ');
+    assert_ne!(mutated, manifest_bytes);
+    let error = verify_and_parse(&trust, &envelope, &mutated).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::BadSignature);
+}
+
 #[test]
 fn deterministic_signing_reproduces_the_committed_signature() {
     // Re-sign the committed manifest with the committed test seed: the

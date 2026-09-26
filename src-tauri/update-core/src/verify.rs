@@ -147,4 +147,41 @@ pub(crate) mod tests {
             ErrorKind::BadSignature
         );
     }
+
+    /// Regression pin (audit F-2B): the manifest size bound is the first
+    /// check of the frozen order at the verifier entry itself — even with a
+    /// garbage envelope, the failure is ManifestTooLarge, proving the
+    /// early-return fires before any envelope parsing.
+    #[test]
+    fn oversized_manifest_fails_at_the_verifier_entry() {
+        let oversized = vec![b'a'; crate::compiled::MANIFEST_MAX_BYTES + 1];
+        assert_eq!(
+            verify_and_parse(&test_trust(), b"garbage", &oversized)
+                .unwrap_err()
+                .kind,
+            ErrorKind::ManifestTooLarge
+        );
+    }
+
+    /// Regression pin (audit F-2C): a duplicate key inside the selected
+    /// windows-x64 object of a real manifest shape — signed exactly as
+    /// served, so the signature itself verifies — is rejected fail-closed by
+    /// the closed-struct parse.
+    #[test]
+    fn duplicate_key_in_selected_asset_fails_closed() {
+        let trust = test_trust();
+        let key_id = trust.entries()[0].key_id().to_string();
+        let manifest = crate::manifest::tests::manifest_text("1.4.0").replace(
+            r#""size":3000000,"sha256""#,
+            r#""size":3000000,"size":3000000,"sha256""#,
+        );
+        assert_ne!(manifest, crate::manifest::tests::manifest_text("1.4.0"));
+        let signature = sign(manifest.as_bytes());
+        assert_eq!(
+            verify_and_parse(&trust, &envelope(&key_id, &signature), manifest.as_bytes())
+                .unwrap_err()
+                .kind,
+            ErrorKind::ManifestMalformed
+        );
+    }
 }

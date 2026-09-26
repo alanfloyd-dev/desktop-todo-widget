@@ -41,7 +41,7 @@ pub use compiled::{
 pub use envelope::{EnvelopeAuth, SignedEnvelopeV1};
 pub use error::{ErrorKind, ProtocolError, SemanticViolation, TrustStoreError};
 pub use manifest::{
-    InstallFileEntry, InstallIdentity, ManifestV1, PlatformAsset, RawManifest, ValidatedManifest,
+    InstallFileEntry, InstallIdentity, PlatformAsset, RawManifest, ValidatedManifest,
 };
 pub use trust::{derive_key_id, TrustStore};
 pub use verify::{verify_and_parse, VerifiedTarget};
