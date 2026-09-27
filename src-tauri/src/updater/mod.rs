@@ -13,12 +13,14 @@
 //! This phase writes no durable state: an accepted target lives in memory
 //! only, for later phases to persist and act on.
 
+pub(crate) mod acquisition;
 pub(crate) mod http_fetch;
+pub(crate) mod package_zip;
 pub(crate) mod providers;
 #[cfg(test)]
 mod tests;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use desktop_todo_update_core::{
     evaluate_candidate, CandidateInput, ErrorKind, IneligibilityReason, RollbackCompatibility,
@@ -64,6 +66,13 @@ pub struct DiscoveryConfig {
     pub retry_after_cap: Duration,
     /// Redirect attempts the allowlisted policy may follow.
     pub max_redirects: usize,
+    /// Whole-scan budget (implementation transport policy, never a signed
+    /// protocol semantic rule): once elapsed, the scan stops taking new
+    /// candidates instead of running per-request timeouts × retries ×
+    /// candidates unbounded. Expiry is never a candidate verdict, never
+    /// discards an accepted target, and is not a provider-layer failure, so
+    /// the frozen Auto fallback does not react to it.
+    pub scan_budget: Option<Duration>,
 }
 
 impl Default for DiscoveryConfig {
@@ -77,6 +86,7 @@ impl Default for DiscoveryConfig {
             retry_backoff: Duration::from_millis(250),
             retry_after_cap: Duration::from_secs(5),
             max_redirects: 4,
+            scan_budget: Some(Duration::from_secs(120)),
         }
     }
 }
@@ -84,23 +94,64 @@ impl Default for DiscoveryConfig {
 /// Run one provider call behind the bounded retry ladder: initial attempt
 /// plus `max_retries` transient retries, sleeping at most `retry_after_cap`
 /// per Retry-After and `retry_backoff` otherwise.
+/// Deadline derived from the whole-scan budget: `None` means unlimited.
+pub(crate) fn scan_deadline(ctx: &DiscoveryContext<'_>) -> Option<Instant> {
+    ctx.config
+        .scan_budget
+        .and_then(|budget| ctx.scan_started.checked_add(budget))
+}
+
+/// Remaining whole-scan budget right now, if budgeted.
+pub(crate) fn remaining_budget(deadline: Option<Instant>) -> Option<Duration> {
+    deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
+}
+
+/// Run one provider call behind the bounded retry ladder with a hard
+/// whole-scan deadline. Every retry attempt's request timeout is
+/// `min(configured timeout, remaining budget)`; a Retry-After or backoff
+/// sleep longer than the remaining budget ends the scan immediately instead
+/// of sleeping past the deadline. Budget expiry is a client-side stop — it
+/// is never retried, never a candidate verdict, and never a provider-layer
+/// failure.
 pub(crate) fn with_bounded_retry<T>(
     config: &DiscoveryConfig,
-    call: impl Fn() -> Result<T, FetchError>,
+    deadline: Option<Instant>,
+    call: impl Fn(Duration) -> Result<T, FetchError>,
 ) -> Result<T, FetchError> {
     let attempts = config.max_retries.saturating_add(1).max(1);
     for attempt in 0..attempts {
-        match call() {
+        // Budget gate before every attempt: no request may start past the
+        // deadline. `None` deadline means unlimited.
+        let per_request_timeout = match remaining_budget(deadline) {
+            Some(remaining) if remaining.is_zero() => {
+                return Err(FetchError::BudgetExhausted);
+            }
+            Some(remaining) => remaining.min(config.request_timeout),
+            None => config.request_timeout,
+        };
+        match call(per_request_timeout) {
             Err(error) if error.is_transient() && attempt + 1 < attempts => {
-                let delay = match &error {
+                let wanted = match &error {
                     FetchError::HttpStatus {
                         retry_after: Some(delay),
                         ..
                     } => (*delay).min(config.retry_after_cap),
                     _ => config.retry_backoff,
                 };
-                if !delay.is_zero() {
-                    std::thread::sleep(delay);
+                // A sleep longer than the remaining budget is not taken:
+                // the scan stops instead of hanging past the deadline.
+                match remaining_budget(deadline) {
+                    Some(remaining) if wanted < remaining && !remaining.is_zero() => {
+                        if !wanted.is_zero() {
+                            std::thread::sleep(wanted);
+                        }
+                    }
+                    Some(_) => return Err(FetchError::BudgetExhausted),
+                    None => {
+                        if !wanted.is_zero() {
+                            std::thread::sleep(wanted);
+                        }
+                    }
                 }
             }
             other => return other,
@@ -143,6 +194,10 @@ pub struct ScanReport {
     pub records: Vec<CandidateRecord>,
     pub skipped_draft: usize,
     pub skipped_prerelease: usize,
+    /// True when the whole-scan budget expired before every candidate could
+    /// be taken. A client-side stop — recorded, never a candidate verdict,
+    /// never a provider-layer failure.
+    pub budget_exhausted: bool,
 }
 
 /// The result of a discovery run. A transport failure is a different layer
@@ -151,9 +206,14 @@ pub struct ScanReport {
 #[derive(Debug)]
 pub enum DiscoveryOutcome {
     /// The first candidate whose complete eligibility predicate succeeded.
-    /// In memory only this phase — no durable state exists yet.
+    /// In memory only this phase — no durable state exists yet. The package
+    /// locator comes from the accepted candidate's provider assets and is
+    /// transport metadata only.
     TargetFound {
         target: Box<VerifiedTarget>,
+        /// Exact raw envelope bytes of the accepted candidate.
+        envelope_bytes: Vec<u8>,
+        package_url: Option<String>,
         scans: Vec<ScanReport>,
     },
     /// Every bounded scan completed without an eligible candidate.
@@ -173,6 +233,9 @@ pub enum DiscoveryOutcome {
 /// owns no trust state of its own.
 pub struct DiscoveryContext<'a> {
     pub config: &'a DiscoveryConfig,
+    /// Start of the current discovery run; the whole-scan budget is measured
+    /// from here so retries and candidates share one finite budget.
+    pub scan_started: Instant,
     pub client: &'a reqwest::blocking::Client,
     pub endpoints: &'a [ProviderEndpoints],
     pub trust: &'a TrustStore,
@@ -213,6 +276,14 @@ fn endpoints_for<'a>(
 /// and completes normally (no-target or target), with failures recorded.
 struct ScanResult {
     target: Option<VerifiedTarget>,
+    /// Exact raw envelope bytes of the accepted candidate, for durable
+    /// trusted-target persistence (the manifest bytes live in the target).
+    envelope_bytes: Vec<u8>,
+    /// Package ZIP locator from the accepted candidate's provider assets.
+    /// Transport metadata only — the signed package filename/size/SHA-256
+    /// are the identity, and acquisition re-validates the URL against the
+    /// signed filename and the origin allowlist.
+    package_url: Option<String>,
     report: ScanReport,
 }
 
@@ -225,9 +296,25 @@ fn scan_provider(
         records: Vec::new(),
         skipped_draft: 0,
         skipped_prerelease: 0,
+        budget_exhausted: false,
     };
+    // The whole-scan deadline starts when the provider scan starts. `None`
+    // means no budget (used by tests); a budget of zero expires immediately.
+    let deadline = scan_deadline(ctx);
 
-    let enumeration = match enumerate_candidates(ctx.client, endpoints, ctx.config) {
+    let enumeration = match enumerate_candidates(ctx.client, endpoints, ctx.config, deadline) {
+        Err(error) if error.is_budget_exhausted() => {
+            // Client-side budget stop: the scan completes with nothing
+            // taken, and the frozen Auto fallback does not react (this is
+            // not a provider-layer failure).
+            report.budget_exhausted = true;
+            return Ok(ScanResult {
+                target: None,
+                envelope_bytes: Vec::new(),
+                package_url: None,
+                report,
+            });
+        }
         Ok(enumeration) => enumeration,
         Err(error) => return Err((error, report)),
     };
@@ -249,6 +336,13 @@ fn scan_provider(
     let mut last_transport_error: Option<FetchError> = None;
 
     for descriptor in enumeration.candidates {
+        // Whole-scan budget: stop taking new candidates once expired. Not a
+        // candidate verdict and not a provider failure — the scan simply
+        // completes with what it has.
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            report.budget_exhausted = true;
+            break;
+        }
         // Candidate-local metadata unavailability: garbage rejects only
         // itself; the bounded scan continues to older candidates.
         let Ok(urls) = descriptor.metadata else {
@@ -262,7 +356,7 @@ fn scan_provider(
             });
             continue;
         };
-        let (envelope, manifest) = match fetch_metadata_pair(ctx, &urls) {
+        let (envelope, manifest) = match fetch_metadata_pair(ctx, &urls, deadline) {
             Ok(pair) => pair,
             Err(MetadataFetchError::CandidateLocal(reason)) => {
                 report.records.push(CandidateRecord {
@@ -294,12 +388,41 @@ fn scan_provider(
         let outcome = evaluate_candidate(
             &selection,
             &CandidateInput {
-                envelope_bytes: envelope,
-                manifest_bytes: manifest,
+                envelope_bytes: envelope.clone(),
+                manifest_bytes: manifest.clone(),
             },
         );
         let result = match outcome {
             desktop_todo_update_core::CandidateOutcome::Accepted(target) => {
+                // Package locator selection authority: the asset whose name
+                // exactly equals the **signed** package filename. Asset names
+                // are opaque — no extension or grammar filter — and an
+                // ambiguous provider listing (two same-named assets) fails
+                // this candidate locally instead of guessing.
+                let signed_filename = target.manifest().asset().filename();
+                let matches: Vec<&(String, String)> = urls
+                    .assets
+                    .iter()
+                    .filter(|(name, _)| name == signed_filename)
+                    .collect();
+                let package_url = match matches.as_slice() {
+                    [(_, url)] => Some(url.clone()),
+                    [] => None,
+                    _ => {
+                        report.records.push(CandidateRecord {
+                            kind: descriptor.kind,
+                            release_id: descriptor.release_id.clone(),
+                            tag: descriptor.tag.clone(),
+                            result: CandidateResultKind::MetadataUnavailable {
+                                detail: format!(
+                                    "provider lists {} assets named {signed_filename:?}; ambiguous package locator",
+                                    matches.len()
+                                ),
+                            },
+                        });
+                        continue;
+                    }
+                };
                 report.records.push(CandidateRecord {
                     kind: descriptor.kind,
                     release_id: descriptor.release_id.clone(),
@@ -308,6 +431,8 @@ fn scan_provider(
                 });
                 return Ok(ScanResult {
                     target: Some(*target),
+                    envelope_bytes: envelope,
+                    package_url,
                     report,
                 });
             }
@@ -340,6 +465,8 @@ fn scan_provider(
     }
     Ok(ScanResult {
         target: None,
+        envelope_bytes: Vec::new(),
+        package_url: None,
         report,
     })
 }
@@ -351,18 +478,21 @@ fn scan_provider(
 fn fetch_metadata_pair(
     ctx: &DiscoveryContext<'_>,
     urls: &providers::MetadataUrls,
+    deadline: Option<Instant>,
 ) -> Result<(Vec<u8>, Vec<u8>), MetadataFetchError> {
     let envelope = metadata_bytes(
         ctx,
         &urls.envelope,
         BodyKind::Envelope,
         desktop_todo_update_core::ENVELOPE_MAX_BYTES,
+        deadline,
     )?;
     let manifest = metadata_bytes(
         ctx,
         &urls.manifest,
         BodyKind::Manifest,
         desktop_todo_update_core::MANIFEST_MAX_BYTES,
+        deadline,
     )?;
     Ok((envelope, manifest))
 }
@@ -385,8 +515,11 @@ fn metadata_bytes(
     url: &str,
     kind: BodyKind,
     cap: usize,
+    deadline: Option<Instant>,
 ) -> Result<Vec<u8>, MetadataFetchError> {
-    match with_bounded_retry(ctx.config, || fetch_bounded(ctx.client, url, cap, kind)) {
+    match with_bounded_retry(ctx.config, deadline, |per_request_timeout| {
+        fetch_bounded(ctx.client, url, cap, kind, per_request_timeout)
+    }) {
         Ok(bytes) => Ok(bytes),
         Err(FetchError::HttpStatus { status: 404, .. }) => Err(MetadataFetchError::CandidateLocal(
             CandidateResultKind::MetadataUnavailable {
@@ -410,6 +543,11 @@ fn metadata_bytes(
                 detail: format!("metadata served with non-identity content encoding {encoding:?}"),
             }),
         ),
+        Err(FetchError::BudgetExhausted) => Err(MetadataFetchError::CandidateLocal(
+            CandidateResultKind::MetadataUnavailable {
+                detail: "whole-scan budget expired during metadata fetch".to_string(),
+            },
+        )),
         Err(error) => Err(MetadataFetchError::Transport(error)),
     }
 }
@@ -446,14 +584,19 @@ pub fn discover(source: ReleaseSource, ctx: &DiscoveryContext<'_>) -> DiscoveryO
             match scan_provider(ctx, endpoints) {
                 Ok(ScanResult {
                     target: Some(target),
+                    envelope_bytes,
+                    package_url,
                     report,
                 }) => DiscoveryOutcome::TargetFound {
                     target: Box::new(target),
+                    envelope_bytes,
+                    package_url,
                     scans: vec![report],
                 },
                 Ok(ScanResult {
                     target: None,
                     report,
+                    ..
                 }) => DiscoveryOutcome::NoEligibleCandidate {
                     scans: vec![report],
                 },
@@ -481,14 +624,19 @@ pub fn discover(source: ReleaseSource, ctx: &DiscoveryContext<'_>) -> DiscoveryO
             match scan_provider(ctx, github) {
                 Ok(ScanResult {
                     target: Some(target),
+                    envelope_bytes,
+                    package_url,
                     report,
                 }) => DiscoveryOutcome::TargetFound {
                     target: Box::new(target),
+                    envelope_bytes,
+                    package_url,
                     scans: vec![report],
                 },
                 Ok(ScanResult {
                     target: None,
                     report,
+                    ..
                 }) => DiscoveryOutcome::NoEligibleCandidate {
                     scans: vec![report],
                 },
@@ -507,14 +655,19 @@ pub fn discover(source: ReleaseSource, ctx: &DiscoveryContext<'_>) -> DiscoveryO
                     match scan_provider(ctx, gitee) {
                         Ok(ScanResult {
                             target: Some(target),
+                            envelope_bytes,
+                            package_url,
                             report,
                         }) => DiscoveryOutcome::TargetFound {
                             target: Box::new(target),
+                            envelope_bytes,
+                            package_url,
                             scans: vec![github_report, report],
                         },
                         Ok(ScanResult {
                             target: None,
                             report,
+                            ..
                         }) => DiscoveryOutcome::NoEligibleCandidate {
                             scans: vec![github_report, report],
                         },

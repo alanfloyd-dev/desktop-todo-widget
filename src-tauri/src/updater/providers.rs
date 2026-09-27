@@ -48,10 +48,22 @@ pub struct CandidateDescriptor {
     pub metadata: Result<MetadataUrls, MetadataSkip>,
 }
 
+/// Upper bound on provider-listed assets carried per candidate
+/// (implementation transport policy; the releases index itself is already
+/// body-capped before parsing).
+pub const MAX_ASSETS_PER_CANDIDATE: usize = 64;
+
 #[derive(Debug, Clone)]
 pub struct MetadataUrls {
     pub envelope: String,
     pub manifest: String,
+    /// The candidate's provider asset list (name, URL), carried unchanged.
+    /// No extension, suffix, or naming-grammar filter is applied here: the
+    /// package locator is selected by exact match against the **signed
+    /// manifest's package filename** after verification — the asset name is
+    /// an opaque identifier, and every fetched byte is hash-verified against
+    /// the signed package facts.
+    pub assets: Vec<(String, String)>,
 }
 
 /// Candidate-local, content-level reasons a release cannot even be fetched
@@ -183,16 +195,18 @@ pub fn enumerate_candidates(
     client: &reqwest::blocking::Client,
     endpoints: &ProviderEndpoints,
     config: &DiscoveryConfig,
+    deadline: Option<std::time::Instant>,
 ) -> Result<Enumeration, FetchError> {
     let url = endpoints
         .releases_url
         .replace("{bound}", &config.max_candidates.to_string());
-    let body = with_bounded_retry(config, || {
+    let body = with_bounded_retry(config, deadline, |per_request_timeout| {
         fetch_bounded(
             client,
             &url,
             config.provider_index_body_cap,
             BodyKind::ProviderIndex,
+            per_request_timeout,
         )
     })?;
     let releases: Vec<ProviderRelease> =
@@ -252,7 +266,17 @@ fn metadata_urls(
             });
         }
     }
-    Ok(MetadataUrls { envelope, manifest })
+    let assets: Vec<(String, String)> = release
+        .assets
+        .iter()
+        .take(MAX_ASSETS_PER_CANDIDATE)
+        .map(|asset| (asset.name.clone(), asset.browser_download_url.clone()))
+        .collect();
+    Ok(MetadataUrls {
+        envelope,
+        manifest,
+        assets,
+    })
 }
 
 /// An asset URL must land on one of the provider's compiled download

@@ -53,6 +53,10 @@ pub enum FetchError {
     BodyTooLarge { kind: BodyKind, cap: usize },
     /// A redirect left the compiled origin allowlist or exceeded the bound.
     RedirectRejected { detail: String },
+    /// The whole-scan budget expired before this call could start or finish.
+    /// Client-side stop: never a candidate verdict and never a
+    /// provider-layer failure.
+    BudgetExhausted,
 }
 
 impl FetchError {
@@ -70,6 +74,12 @@ impl FetchError {
                     ..
                 }
         )
+    }
+
+    /// Budget expiry is a client-side stop, never a retryable provider
+    /// condition.
+    pub(crate) fn is_budget_exhausted(&self) -> bool {
+        matches!(self, FetchError::BudgetExhausted)
     }
 }
 
@@ -101,6 +111,9 @@ impl std::fmt::Display for FetchError {
             }
             FetchError::RedirectRejected { detail } => {
                 write!(f, "redirect rejected: {detail}")
+            }
+            FetchError::BudgetExhausted => {
+                write!(f, "whole-scan budget expired")
             }
         }
     }
@@ -193,6 +206,7 @@ pub(crate) fn fetch_bounded(
     url: &str,
     cap: usize,
     kind: BodyKind,
+    per_request_timeout: Duration,
 ) -> Result<Vec<u8>, FetchError> {
     let response = client
         .get(url)
@@ -200,6 +214,9 @@ pub(crate) fn fetch_bounded(
         // covers the exact served bytes, so no content transformation may
         // stand between the source and the verifier.
         .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        // Per-request timeout bounded by the remaining whole-scan budget —
+        // a single 30s request can never outlive a 300ms budget.
+        .timeout(per_request_timeout)
         .send()
         .map_err(map_send_error)?;
     // Fail closed on any non-identity content encoding (header absent or

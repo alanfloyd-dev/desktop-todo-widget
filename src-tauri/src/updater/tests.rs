@@ -170,6 +170,7 @@ fn test_config() -> DiscoveryConfig {
         retry_backoff: Duration::ZERO,
         retry_after_cap: Duration::ZERO,
         max_redirects: 4,
+        scan_budget: None,
     }
 }
 
@@ -289,6 +290,7 @@ fn fixture(addr: SocketAddr) -> Fixture {
 fn run(fixture: &Fixture, source: ReleaseSource) -> DiscoveryOutcome {
     let ctx = DiscoveryContext {
         config: &fixture.config,
+        scan_started: Instant::now(),
         client: &fixture.client,
         endpoints: &fixture.endpoints,
         trust: &fixture.trust,
@@ -296,6 +298,14 @@ fn run(fixture: &Fixture, source: ReleaseSource) -> DiscoveryOutcome {
         hop_policy: &fixture.hop,
     };
     discover(source, &ctx)
+}
+
+fn installed_anchor() -> Version {
+    Version::parse("1.2.0").unwrap()
+}
+
+fn test_trust_store() -> TrustStore {
+    TrustStore::from_raw_keys(&[signing_k1().verifying_key().to_bytes()]).unwrap()
 }
 
 fn assert_target(outcome: DiscoveryOutcome, expected_version: &str) -> VerifiedTarget {
@@ -337,7 +347,7 @@ fn enumeration_is_bounded_and_provider_ordered() {
     let config = test_config();
     let endpoints = test_endpoints(addr);
     let client = discovery_client(&config, &combined_origin_allowlist(&endpoints)).unwrap();
-    let enumeration = enumerate_candidates(&client, &endpoints[0], &config).unwrap();
+    let enumeration = enumerate_candidates(&client, &endpoints[0], &config, None).unwrap();
 
     assert_eq!(*seen_query.lock().unwrap(), "/github/releases?per_page=10");
     assert_eq!(enumeration.candidates.len(), 10);
@@ -481,7 +491,7 @@ fn rate_limit_respects_bounded_retry_after_then_recovers() {
     // retry_after_cap = 0 (test config): bounded Retry-After is clamped to
     // the cap, so the test stays fast while the header is still honored.
     let client = discovery_client(&config, &combined_origin_allowlist(&endpoints)).unwrap();
-    let enumeration = enumerate_candidates(&client, &endpoints[0], &config).unwrap();
+    let enumeration = enumerate_candidates(&client, &endpoints[0], &config, None).unwrap();
     assert_eq!(enumeration.candidates.len(), 0);
     assert_eq!(hits.load(Ordering::SeqCst), 3);
 }
@@ -519,7 +529,8 @@ fn metadata_body_bounds_are_enforced_at_the_boundary() {
             &client,
             &format!("http://{addr}/env/at"),
             envelope_cap,
-            BodyKind::Envelope
+            BodyKind::Envelope,
+            std::time::Duration::from_secs(5)
         )
         .unwrap()
         .len(),
@@ -530,7 +541,8 @@ fn metadata_body_bounds_are_enforced_at_the_boundary() {
             &client,
             &format!("http://{addr}/env/over"),
             envelope_cap,
-            BodyKind::Envelope
+            BodyKind::Envelope,
+            std::time::Duration::from_secs(5)
         ),
         Err(FetchError::BodyTooLarge { .. })
     ));
@@ -539,7 +551,8 @@ fn metadata_body_bounds_are_enforced_at_the_boundary() {
             &client,
             &format!("http://{addr}/man/at"),
             manifest_cap,
-            BodyKind::Manifest
+            BodyKind::Manifest,
+            std::time::Duration::from_secs(5)
         )
         .unwrap()
         .len(),
@@ -550,7 +563,8 @@ fn metadata_body_bounds_are_enforced_at_the_boundary() {
             &client,
             &format!("http://{addr}/man/over"),
             manifest_cap,
-            BodyKind::Manifest
+            BodyKind::Manifest,
+            std::time::Duration::from_secs(5)
         ),
         Err(FetchError::BodyTooLarge { .. })
     ));
@@ -587,6 +601,7 @@ fn chunked_bodies_are_bounded_and_exact() {
         &format!("http://{addr}/chunk/small"),
         envelope_cap,
         BodyKind::Envelope,
+        std::time::Duration::from_secs(5),
     )
     .unwrap();
     assert_eq!(body, small, "exact bytes, no trim or normalization");
@@ -595,7 +610,8 @@ fn chunked_bodies_are_bounded_and_exact() {
             &client,
             &format!("http://{addr}/chunk/over"),
             envelope_cap,
-            BodyKind::Envelope
+            BodyKind::Envelope,
+            std::time::Duration::from_secs(5)
         ),
         Err(FetchError::BodyTooLarge { .. })
     ));
@@ -624,6 +640,7 @@ fn lying_small_content_length_is_still_bounded() {
         &format!("http://{addr}/lie"),
         4096,
         BodyKind::Envelope,
+        std::time::Duration::from_secs(5),
     ) {
         Ok(body) => assert!(body.len() <= 10, "read must respect the declared length"),
         Err(FetchError::BodyRead { .. }) | Err(FetchError::Transport { .. }) => {}
@@ -1011,6 +1028,7 @@ fn metadata_requests_ask_for_identity() {
         &format!("http://{addr}/probe"),
         1024,
         BodyKind::Envelope,
+        std::time::Duration::from_secs(5),
     )
     .unwrap();
 
@@ -1219,4 +1237,2046 @@ fn t3_partial_degradation_completes_without_fallback() {
         0,
         "partial degradation completes discovery; no fallback"
     );
+}
+
+// =================================================== Phase 2C-A: acquisition
+
+use crate::updater::acquisition::{
+    acquire_and_stage, persist_trusted_target, recover_session, AcquisitionError, MilestoneState,
+    ENVELOPE_FILE, MANIFEST_FILE, PACKAGE_DOWNLOADING_FILE, PACKAGE_FILE, RECORD_FILE, STAGED_DIR,
+};
+use crate::updater::package_zip::ArchiveError;
+use std::path::PathBuf;
+
+/// Deterministic managed-executable payloads (synthetic bytes, never real
+/// product binaries).
+fn exe_payload(tag: u8) -> Vec<u8> {
+    let mut bytes = vec![tag; 600];
+    bytes.extend((0..400u32).map(|i| (i % 251) as u8));
+    bytes
+}
+
+/// Build a ZIP in memory with Stored/Deflated entries.
+fn zip_bytes(entries: &[(&str, Vec<u8>)], method: zip::CompressionMethod) -> Vec<u8> {
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(cursor);
+    let options = zip::write::SimpleFileOptions::default().compression_method(method);
+    for (name, bytes) in entries {
+        writer
+            .start_file(*name, options)
+            .expect("zip fixture entry");
+        std::io::Write::write_all(&mut writer, bytes).expect("zip fixture body");
+    }
+    writer.finish().expect("zip fixture finish").into_inner()
+}
+
+fn sha_of(bytes: &[u8]) -> String {
+    desktop_todo_update_core::sha256_hex(bytes)
+}
+
+/// A manifest whose package and installFiles facts match a real fixture ZIP.
+fn pipeline_manifest(version: &str, package: &[u8], exe1: &[u8], exe2: &[u8]) -> String {
+    format!(
+        concat!(
+            r#"{{"schemaVersion":1,"appId":"net.alanfloyd.desktop","channel":"stable","version":"{v}","#,
+            r#""publishedAt":"2026-10-01T00:00:00Z","notes":"Application lifecycle management.","updaterProtocol":1,"#,
+            r#""assets":{{"windows-x64":{{"filename":"desktop-todo-widget-v{v}-windows-x64.zip","size":{pkg},"sha256":"{psha}","installFiles":["#,
+            r#"{{"identity":"mainExecutable","filename":"desktop-todo-widget.exe","size":{s1},"sha256":"{h1}"}},"#,
+            r#"{{"identity":"maintenanceHelper","filename":"desktop-todo-maintenance.exe","size":{s2},"sha256":"{h2}"}}]}}}}}}"#
+        ),
+        v = version,
+        pkg = package.len(),
+        psha = sha_of(package),
+        s1 = exe1.len(),
+        h1 = sha_of(exe1),
+        s2 = exe2.len(),
+        h2 = sha_of(exe2),
+    )
+}
+
+/// The full valid package: exactly the nine allowlisted root files.
+fn valid_package(exe1: &[u8], exe2: &[u8]) -> Vec<u8> {
+    let readme = b"readme".to_vec();
+    zip_bytes(
+        &[
+            ("desktop-todo-widget.exe", exe1.to_vec()),
+            ("desktop-todo-maintenance.exe", exe2.to_vec()),
+            ("install.ps1", readme.clone()),
+            ("uninstall.ps1", readme.clone()),
+            ("README.md", readme.clone()),
+            ("README_ZH.md", readme.clone()),
+            ("LICENSE", readme.clone()),
+            ("LICENSE_ZH.md", readme.clone()),
+            ("THIRD_PARTY_NOTICES.md", readme),
+        ],
+        zip::CompressionMethod::Deflated,
+    )
+}
+
+struct AcquisitionFixture {
+    addr: SocketAddr,
+    updates_root: PathBuf,
+    session_id: String,
+}
+
+fn temp_root(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("dtw-2ca-{tag}-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("temp root");
+    dir
+}
+
+/// End-to-end: discovery (mock) → persist trusted target → bounded package
+/// download → exact hash → archive validation → staged managed EXEs → typed
+/// PackageStaged state. The seven support files are validated as package
+/// members but never staged.
+#[test]
+fn full_pipeline_trusted_target_to_staged_package() {
+    let exe1 = exe_payload(1);
+    let exe2 = exe_payload(2);
+    let package = valid_package(&exe1, &exe2);
+    let manifest = pipeline_manifest("1.4.0", &package, &exe1, &exe2);
+    let manifest_bytes = manifest.clone().into_bytes();
+    let signature = sign(&signing_k1(), manifest.as_bytes());
+    let envelope = envelope_json(&signing_k1(), &signature).into_bytes();
+    let envelope_bytes_fixture = envelope.clone();
+
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/github/releases") {
+            let release = release_json(
+                1,
+                "v1.4.0",
+                false,
+                false,
+                &[
+                    (
+                        ENVELOPE_ASSET_NAME,
+                        &format!("http://{addr}/download/update-manifest.json.sig"),
+                    ),
+                    (
+                        MANIFEST_ASSET_NAME,
+                        &format!("http://{addr}/download/update-manifest.json"),
+                    ),
+                    (
+                        "desktop-todo-widget-v1.4.0-windows-x64.zip",
+                        &format!(
+                            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+                        ),
+                    ),
+                ],
+            );
+            return http_ok(format!("[{release}]").as_bytes());
+        }
+        if target == "/download/update-manifest.json.sig" {
+            return http_ok(&envelope_bytes_fixture);
+        }
+        if target == "/download/update-manifest.json" {
+            return http_ok(&manifest_bytes);
+        }
+        if target.ends_with(".zip") {
+            return http_ok(&package);
+        }
+        not_found()
+    });
+    let fixture = fixture(addr);
+    let outcome = run(&fixture, ReleaseSource::GitHub);
+    let (target, envelope_bytes, package_url) = match outcome {
+        DiscoveryOutcome::TargetFound {
+            target,
+            envelope_bytes,
+            package_url,
+            ..
+        } => (target, envelope_bytes, package_url),
+        other => panic!("expected TargetFound, got {other:?}"),
+    };
+    let package_url = package_url.expect("package locator");
+
+    let root = temp_root("pipeline");
+    let expected_digest = target.manifest_sha256_hex().to_string();
+    let mut session = persist_trusted_target(
+        &root,
+        *target,
+        &envelope_bytes,
+        Some(&package_url),
+        "GitHub",
+        &fixture.installed,
+    )
+    .expect("persist trusted target");
+    assert_eq!(session.record.state, MilestoneState::TrustedTargetPersisted);
+    assert_eq!(session.record.target_version, "1.4.0");
+    assert_eq!(
+        session.record.manifest_sha256, expected_digest,
+        "the record binds the digest of the exact raw manifest bytes"
+    );
+
+    acquire_and_stage(&mut session, &fixture.client).expect("acquire and stage");
+    assert_eq!(session.record.state, MilestoneState::PackageStaged);
+
+    let staged_dir = session.dir.join(STAGED_DIR);
+    let staged: Vec<String> = std::fs::read_dir(&staged_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect();
+    let mut sorted = staged.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        vec![
+            "desktop-todo-maintenance.exe".to_string(),
+            "desktop-todo-widget.exe".to_string()
+        ],
+        "only the two managed executables are staged; support files are not"
+    );
+    assert_eq!(
+        std::fs::read(staged_dir.join("desktop-todo-widget.exe")).unwrap(),
+        exe1
+    );
+    assert_eq!(
+        std::fs::read(staged_dir.join("desktop-todo-maintenance.exe")).unwrap(),
+        exe2
+    );
+    // Raw signed bytes are durable and byte-exact.
+    assert_eq!(
+        std::fs::read(session.dir.join(MANIFEST_FILE)).unwrap(),
+        manifest.as_bytes()
+    );
+    assert_eq!(
+        std::fs::read(session.dir.join(ENVELOPE_FILE)).unwrap(),
+        envelope
+    );
+    assert!(session.dir.join(PACKAGE_FILE).exists());
+    assert!(!session.dir.join(PACKAGE_DOWNLOADING_FILE).exists());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Package locator must name the signed package file exactly; provider
+/// display metadata and frontend arguments play no part.
+#[test]
+fn package_url_must_match_the_signed_package_filename() {
+    let exe1 = exe_payload(1);
+    let exe2 = exe_payload(2);
+    let package = valid_package(&exe1, &exe2);
+    let manifest = pipeline_manifest("1.4.0", &package, &exe1, &exe2);
+    let signature = sign(&signing_k1(), manifest.as_bytes());
+    let envelope = envelope_json(&signing_k1(), &signature).into_bytes();
+
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/github/releases") {
+            let release = release_json(
+                1,
+                "v1.4.0",
+                false,
+                false,
+                &[
+                    (
+                        ENVELOPE_ASSET_NAME,
+                        &format!("http://{addr}/download/update-manifest.json.sig"),
+                    ),
+                    (
+                        MANIFEST_ASSET_NAME,
+                        &format!("http://{addr}/download/update-manifest.json"),
+                    ),
+                    (
+                        "some-other-name.zip",
+                        &format!("http://{addr}/download/some-other-name.zip"),
+                    ),
+                ],
+            );
+            return http_ok(format!("[{release}]").as_bytes());
+        }
+        if target == "/download/update-manifest.json.sig" {
+            return http_ok(&envelope);
+        }
+        if target == "/download/update-manifest.json" {
+            return http_ok(manifest.as_bytes());
+        }
+        not_found()
+    });
+    let fixture = fixture(addr);
+    let (target, envelope_bytes, _) = match run(&fixture, ReleaseSource::GitHub) {
+        DiscoveryOutcome::TargetFound {
+            target,
+            envelope_bytes,
+            package_url,
+            ..
+        } => (target, envelope_bytes, package_url),
+        other => panic!("expected TargetFound, got {other:?}"),
+    };
+    let root = temp_root("url-mismatch");
+    let mut session = persist_trusted_target(
+        &root,
+        *target,
+        &envelope_bytes,
+        Some("http://127.0.0.1:1/download/some-other-name.zip"),
+        "GitHub",
+        &fixture.installed,
+    )
+    .expect("persist");
+    match acquire_and_stage(&mut session, &fixture.client) {
+        Err(AcquisitionError::PackageUrlRejected { .. }) => {}
+        other => panic!("expected PackageUrlRejected, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Package body bounds and exact identity: declared size and signed SHA-256
+/// are checked against the actual bytes before anything is staged; partial
+/// files never become ready states.
+#[test]
+fn package_body_is_verified_before_staging() {
+    let exe1 = exe_payload(1);
+    let exe2 = exe_payload(2);
+    let package = valid_package(&exe1, &exe2);
+
+    // Size mismatch: fewer bytes than declared.
+    let manifest = pipeline_manifest("1.4.0", &package, &exe1, &exe2);
+    let signature = sign(&signing_k1(), manifest.as_bytes());
+    let envelope = envelope_json(&signing_k1(), &signature).into_bytes();
+    let truncated = package[..package.len() - 10].to_vec();
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/github/releases") {
+            let release = release_json(
+                1,
+                "v1.4.0",
+                false,
+                false,
+                &[
+                    (
+                        ENVELOPE_ASSET_NAME,
+                        &format!("http://{addr}/download/{ENVELOPE_ASSET_NAME}"),
+                    ),
+                    (
+                        MANIFEST_ASSET_NAME,
+                        &format!("http://{addr}/download/{MANIFEST_ASSET_NAME}"),
+                    ),
+                    (
+                        "desktop-todo-widget-v1.4.0-windows-x64.zip",
+                        &format!(
+                            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+                        ),
+                    ),
+                ],
+            );
+            return http_ok(format!("[{release}]").as_bytes());
+        }
+        if target.ends_with(ENVELOPE_ASSET_NAME) {
+            return http_ok(&envelope);
+        }
+        if target.ends_with(MANIFEST_ASSET_NAME) {
+            return http_ok(manifest.as_bytes());
+        }
+        if target.ends_with(".zip") {
+            // Truncated body: stream ends early.
+            return http_ok(&truncated);
+        }
+        not_found()
+    });
+    let fixture_size = fixture(addr);
+    let (target, envelope_bytes, _) = match run(&fixture_size, ReleaseSource::GitHub) {
+        DiscoveryOutcome::TargetFound {
+            target,
+            envelope_bytes,
+            ..
+        } => (target, envelope_bytes, None::<String>),
+        other => panic!("expected TargetFound, got {other:?}"),
+    };
+    let root = temp_root("size");
+    let mut session = persist_trusted_target(
+        &root,
+        *target,
+        &envelope_bytes,
+        Some(&format!(
+            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+        )),
+        "GitHub",
+        &fixture_size.installed,
+    )
+    .expect("persist");
+    match acquire_and_stage(&mut session, &fixture_size.client) {
+        Err(AcquisitionError::SizeMismatch { .. }) => {}
+        other => panic!("expected SizeMismatch, got {other:?}"),
+    }
+    assert_eq!(
+        session.record.state,
+        MilestoneState::TrustedTargetPersisted,
+        "failure must not advance the typed state"
+    );
+    assert!(!session.dir.join(PACKAGE_FILE).exists());
+    assert!(!session.dir.join(STAGED_DIR).exists());
+    let _ = std::fs::remove_dir_all(&root);
+
+    // Hash mismatch: full length, one flipped byte.
+    let mut corrupted = package.clone();
+    let last = corrupted.len() - 1;
+    corrupted[last] ^= 0xFF;
+    let manifest = pipeline_manifest("1.4.0", &corrupted, &exe1, &exe2);
+    let manifest_bytes = manifest.clone().into_bytes();
+    let signature = sign(&signing_k1(), manifest.as_bytes());
+    let envelope = envelope_json(&signing_k1(), &signature).into_bytes();
+    // The manifest signs the corrupted bytes; serve the ORIGINAL bytes so
+    // the downloaded hash disagrees with the signed digest.
+    let package_fixture = package.clone();
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/github/releases") {
+            let release = release_json(
+                1,
+                "v1.4.0",
+                false,
+                false,
+                &[
+                    (
+                        ENVELOPE_ASSET_NAME,
+                        &format!("http://{addr}/download/{ENVELOPE_ASSET_NAME}"),
+                    ),
+                    (
+                        MANIFEST_ASSET_NAME,
+                        &format!("http://{addr}/download/{MANIFEST_ASSET_NAME}"),
+                    ),
+                    (
+                        "desktop-todo-widget-v1.4.0-windows-x64.zip",
+                        &format!(
+                            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+                        ),
+                    ),
+                ],
+            );
+            return http_ok(format!("[{release}]").as_bytes());
+        }
+        if target.ends_with(ENVELOPE_ASSET_NAME) {
+            return http_ok(&envelope);
+        }
+        if target.ends_with(MANIFEST_ASSET_NAME) {
+            return http_ok(&manifest_bytes);
+        }
+        if target.ends_with(".zip") {
+            return http_ok(&package_fixture);
+        }
+        not_found()
+    });
+    let fixture_hash = fixture(addr);
+    let (target, envelope_bytes, _) = match run(&fixture_hash, ReleaseSource::GitHub) {
+        DiscoveryOutcome::TargetFound {
+            target,
+            envelope_bytes,
+            ..
+        } => (target, envelope_bytes, None::<String>),
+        other => panic!("expected TargetFound, got {other:?}"),
+    };
+    let root = temp_root("hash");
+    let mut session = persist_trusted_target(
+        &root,
+        *target,
+        &envelope_bytes,
+        Some(&format!(
+            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+        )),
+        "GitHub",
+        &fixture_hash.installed,
+    )
+    .expect("persist");
+    // Serve the original (non-corrupted) bytes against the corrupted hash:
+    // reuse a fresh fixture is overkill; instead corrupt the served body by
+    // serving package (original) while the record expects corrupted hash.
+    let _ = std::fs::create_dir_all(&session.dir);
+    match acquire_and_stage(&mut session, &fixture_hash.client) {
+        Err(AcquisitionError::PackageHashMismatch { .. }) => {}
+        other => panic!("expected PackageHashMismatch, got {other:?}"),
+    }
+    assert!(!session.dir.join(PACKAGE_FILE).exists());
+    assert!(!session.dir.join(STAGED_DIR).exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Streaming hard cap: the manifest declares a package beyond the compiled
+/// 256 MiB cap, so the transport rejects before any body arrives; a declared
+/// size within budget but served over-long is cut at declared + 1.
+#[test]
+fn package_streaming_bounds() {
+    let exe1 = exe_payload(1);
+    let exe2 = exe_payload(2);
+    let package = valid_package(&exe1, &exe2);
+    // The signed manifest declares the true package size; the server
+    // over-serves beyond it. The streaming read is hard-capped at
+    // declared + 1 and the byte count must match the declaration exactly.
+    let manifest = pipeline_manifest("1.4.0", &package, &exe1, &exe2);
+    let manifest_bytes = manifest.clone().into_bytes();
+    let signature = sign(&signing_k1(), manifest.as_bytes());
+    let envelope = envelope_json(&signing_k1(), &signature).into_bytes();
+    let mut overserved = package.clone();
+    overserved.extend_from_slice(b"garbage beyond the declared size");
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/github/releases") {
+            let release = release_json(
+                1,
+                "v1.4.0",
+                false,
+                false,
+                &[
+                    (
+                        ENVELOPE_ASSET_NAME,
+                        &format!("http://{addr}/download/{ENVELOPE_ASSET_NAME}"),
+                    ),
+                    (
+                        MANIFEST_ASSET_NAME,
+                        &format!("http://{addr}/download/{MANIFEST_ASSET_NAME}"),
+                    ),
+                    (
+                        "desktop-todo-widget-v1.4.0-windows-x64.zip",
+                        &format!(
+                            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+                        ),
+                    ),
+                ],
+            );
+            return http_ok(format!("[{release}]").as_bytes());
+        }
+        if target.ends_with(ENVELOPE_ASSET_NAME) {
+            return http_ok(&envelope);
+        }
+        if target.ends_with(MANIFEST_ASSET_NAME) {
+            return http_ok(&manifest_bytes);
+        }
+        if target.ends_with(".zip") {
+            return chunked_response(
+                "HTTP/1.1 200 OK",
+                &[
+                    &overserved[..overserved.len() / 2],
+                    &overserved[overserved.len() / 2..],
+                ],
+            );
+        }
+        not_found()
+    });
+    let fixture = fixture(addr);
+    let (target, envelope_bytes, _) = match run(&fixture, ReleaseSource::GitHub) {
+        DiscoveryOutcome::TargetFound {
+            target,
+            envelope_bytes,
+            ..
+        } => (target, envelope_bytes, None::<String>),
+        other => panic!("expected TargetFound, got {other:?}"),
+    };
+    let root = temp_root("cap");
+    let mut session = persist_trusted_target(
+        &root,
+        *target,
+        &envelope_bytes,
+        Some(&format!(
+            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+        )),
+        "GitHub",
+        &fixture.installed,
+    )
+    .expect("persist");
+    match acquire_and_stage(&mut session, &fixture.client) {
+        Err(AcquisitionError::SizeMismatch { .. }) => {}
+        other => panic!("expected SizeMismatch, got {other:?}"),
+    }
+    assert_eq!(session.record.state, MilestoneState::TrustedTargetPersisted);
+    assert!(!session.dir.join(PACKAGE_FILE).exists());
+    assert!(!session.dir.join(STAGED_DIR).exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Archive-level failures are typed and package-local: the record state
+/// never advances and no staging survives.
+#[test]
+fn archive_rule_violations_are_typed_and_fail_closed() {
+    let exe1 = exe_payload(1);
+    let exe2 = exe_payload(2);
+    let readme = b"readme".to_vec();
+
+    struct Case {
+        label: &'static str,
+        package: Vec<u8>,
+        expect: fn(&AcquisitionError) -> bool,
+    }
+    let cases = vec![
+        Case {
+            label: "extra file",
+            package: zip_bytes(
+                &[
+                    ("desktop-todo-widget.exe", exe1.clone()),
+                    ("desktop-todo-maintenance.exe", exe2.clone()),
+                    ("install.ps1", readme.clone()),
+                    ("uninstall.ps1", readme.clone()),
+                    ("README.md", readme.clone()),
+                    ("README_ZH.md", readme.clone()),
+                    ("LICENSE", readme.clone()),
+                    ("LICENSE_ZH.md", readme.clone()),
+                    ("THIRD_PARTY_NOTICES.md", readme.clone()),
+                    ("extra.txt", readme.clone()),
+                ],
+                zip::CompressionMethod::Deflated,
+            ),
+            expect: |error| {
+                matches!(
+                    error,
+                    AcquisitionError::Archive(ArchiveError::AllowlistMismatch { .. })
+                )
+            },
+        },
+        Case {
+            label: "missing file",
+            package: zip_bytes(
+                &[
+                    ("desktop-todo-widget.exe", exe1.clone()),
+                    ("desktop-todo-maintenance.exe", exe2.clone()),
+                    ("install.ps1", readme.clone()),
+                    ("uninstall.ps1", readme.clone()),
+                    ("README.md", readme.clone()),
+                    ("README_ZH.md", readme.clone()),
+                    ("LICENSE", readme.clone()),
+                    ("LICENSE_ZH.md", readme.clone()),
+                ],
+                zip::CompressionMethod::Deflated,
+            ),
+            expect: |error| {
+                matches!(
+                    error,
+                    AcquisitionError::Archive(ArchiveError::AllowlistMismatch { .. })
+                )
+            },
+        },
+        Case {
+            label: "nested path",
+            package: zip_bytes(
+                &[
+                    ("desktop-todo-widget.exe", exe1.clone()),
+                    ("desktop-todo-maintenance.exe", exe2.clone()),
+                    ("install.ps1", readme.clone()),
+                    ("uninstall.ps1", readme.clone()),
+                    ("README.md", readme.clone()),
+                    ("README_ZH.md", readme.clone()),
+                    ("LICENSE", readme.clone()),
+                    ("LICENSE_ZH.md", readme.clone()),
+                    ("nested/THIRD_PARTY_NOTICES.md", readme.clone()),
+                ],
+                zip::CompressionMethod::Deflated,
+            ),
+            expect: |error| {
+                matches!(
+                    error,
+                    AcquisitionError::Archive(ArchiveError::AllowlistMismatch { .. })
+                )
+            },
+        },
+        Case {
+            label: "parent traversal",
+            package: zip_bytes(
+                &[
+                    ("desktop-todo-widget.exe", exe1.clone()),
+                    ("desktop-todo-maintenance.exe", exe2.clone()),
+                    ("install.ps1", readme.clone()),
+                    ("uninstall.ps1", readme.clone()),
+                    ("README.md", readme.clone()),
+                    ("README_ZH.md", readme.clone()),
+                    ("LICENSE", readme.clone()),
+                    ("LICENSE_ZH.md", readme.clone()),
+                    ("../evil.md", readme.clone()),
+                ],
+                zip::CompressionMethod::Deflated,
+            ),
+            expect: |error| {
+                matches!(
+                    error,
+                    AcquisitionError::Archive(ArchiveError::PathUnsafe { .. })
+                )
+            },
+        },
+        Case {
+            label: "absolute path",
+            package: zip_bytes(
+                &[
+                    ("desktop-todo-widget.exe", exe1.clone()),
+                    ("desktop-todo-maintenance.exe", exe2.clone()),
+                    ("install.ps1", readme.clone()),
+                    ("uninstall.ps1", readme.clone()),
+                    ("README.md", readme.clone()),
+                    ("README_ZH.md", readme.clone()),
+                    ("LICENSE", readme.clone()),
+                    ("LICENSE_ZH.md", readme.clone()),
+                    ("/etc/evil.md", readme.clone()),
+                ],
+                zip::CompressionMethod::Deflated,
+            ),
+            expect: |error| {
+                matches!(
+                    error,
+                    AcquisitionError::Archive(ArchiveError::PathUnsafe { .. })
+                )
+            },
+        },
+        Case {
+            label: "windows drive path",
+            package: zip_bytes(
+                &[
+                    ("desktop-todo-widget.exe", exe1.clone()),
+                    ("desktop-todo-maintenance.exe", exe2.clone()),
+                    ("install.ps1", readme.clone()),
+                    ("uninstall.ps1", readme.clone()),
+                    ("README.md", readme.clone()),
+                    ("README_ZH.md", readme.clone()),
+                    ("LICENSE", readme.clone()),
+                    ("LICENSE_ZH.md", readme.clone()),
+                    ("C:evil.md", readme.clone()),
+                ],
+                zip::CompressionMethod::Deflated,
+            ),
+            expect: |error| {
+                matches!(
+                    error,
+                    AcquisitionError::Archive(ArchiveError::PathUnsafe { .. })
+                )
+            },
+        },
+        Case {
+            label: "ads colon",
+            package: zip_bytes(
+                &[
+                    ("desktop-todo-widget.exe", exe1.clone()),
+                    ("desktop-todo-maintenance.exe", exe2.clone()),
+                    ("install.ps1", readme.clone()),
+                    ("uninstall.ps1", readme.clone()),
+                    ("README.md", readme.clone()),
+                    ("README_ZH.md", readme.clone()),
+                    ("LICENSE", readme.clone()),
+                    ("LICENSE_ZH.md", readme.clone()),
+                    ("THIRD_PARTY_NOTICES.md:hidden", readme.clone()),
+                ],
+                zip::CompressionMethod::Deflated,
+            ),
+            expect: |error| {
+                matches!(
+                    error,
+                    AcquisitionError::Archive(ArchiveError::PathUnsafe { .. })
+                )
+            },
+        },
+        Case {
+            label: "case alias",
+            package: zip_bytes(
+                &[
+                    ("desktop-todo-widget.exe", exe1.clone()),
+                    ("desktop-todo-maintenance.exe", exe2.clone()),
+                    ("install.ps1", readme.clone()),
+                    ("uninstall.ps1", readme.clone()),
+                    ("README.md", readme.clone()),
+                    ("README_ZH.md", readme.clone()),
+                    ("LICENSE", readme.clone()),
+                    ("LICENSE_ZH.MD", readme.clone()),
+                    ("THIRD_PARTY_NOTICES.md", readme.clone()),
+                ],
+                zip::CompressionMethod::Deflated,
+            ),
+            expect: |error| {
+                matches!(
+                    error,
+                    AcquisitionError::Archive(ArchiveError::AllowlistMismatch { .. })
+                )
+            },
+        },
+        Case {
+            // The writer refuses an exactly duplicated name, so the dup is
+            // expressed as a case-variant: the validator's case-insensitive
+            // seen-set rejects it before the allowlist comparison.
+            label: "case-insensitive duplicate entry",
+            package: zip_bytes(
+                &[
+                    ("desktop-todo-widget.exe", exe1.clone()),
+                    ("desktop-todo-maintenance.exe", exe2.clone()),
+                    ("install.ps1", readme.clone()),
+                    ("uninstall.ps1", readme.clone()),
+                    ("README.md", readme.clone()),
+                    ("README_ZH.md", readme.clone()),
+                    ("readme.md", readme.clone()),
+                    ("LICENSE", readme.clone()),
+                    ("LICENSE_ZH.md", readme.clone()),
+                    ("THIRD_PARTY_NOTICES.md", readme.clone()),
+                ],
+                zip::CompressionMethod::Deflated,
+            ),
+            expect: |error| {
+                matches!(
+                    error,
+                    AcquisitionError::Archive(ArchiveError::DuplicateEntry { .. })
+                )
+            },
+        },
+        Case {
+            label: "trailing dot",
+            package: zip_bytes(
+                &[
+                    ("desktop-todo-widget.exe", exe1.clone()),
+                    ("desktop-todo-maintenance.exe", exe2.clone()),
+                    ("install.ps1", readme.clone()),
+                    ("uninstall.ps1", readme.clone()),
+                    ("README.md", readme.clone()),
+                    ("README_ZH.md", readme.clone()),
+                    ("LICENSE", readme.clone()),
+                    ("LICENSE_ZH.md", readme.clone()),
+                    ("THIRD_PARTY_NOTICES.md.", readme.clone()),
+                ],
+                zip::CompressionMethod::Deflated,
+            ),
+            expect: |error| {
+                matches!(
+                    error,
+                    AcquisitionError::Archive(ArchiveError::PathUnsafe { .. })
+                )
+            },
+        },
+        Case {
+            label: "compression bomb",
+            package: {
+                let bomb = vec![0u8; 20_000];
+                zip_bytes(
+                    &[
+                        ("desktop-todo-widget.exe", exe1.clone()),
+                        ("desktop-todo-maintenance.exe", exe2.clone()),
+                        ("install.ps1", bomb),
+                        ("uninstall.ps1", readme.clone()),
+                        ("README.md", readme.clone()),
+                        ("README_ZH.md", readme.clone()),
+                        ("LICENSE", readme.clone()),
+                        ("LICENSE_ZH.md", readme.clone()),
+                        ("THIRD_PARTY_NOTICES.md", readme.clone()),
+                    ],
+                    zip::CompressionMethod::Deflated,
+                )
+            },
+            expect: |error| {
+                matches!(
+                    error,
+                    AcquisitionError::Archive(ArchiveError::CompressionRatioExceeded { .. })
+                )
+            },
+        },
+        Case {
+            label: "corrupt zip",
+            package: {
+                let mut bytes = valid_package(&exe1, &exe2);
+                let last = bytes.len() - 1;
+                bytes[last] ^= 0xFF;
+                bytes
+            },
+            expect: |error| {
+                matches!(
+                    error,
+                    AcquisitionError::Archive(ArchiveError::Malformed { .. })
+                )
+            },
+        },
+    ];
+
+    for case in cases {
+        let manifest = pipeline_manifest("1.4.0", &case.package, &exe1, &exe2);
+        let signature = sign(&signing_k1(), manifest.as_bytes());
+        let envelope = envelope_json(&signing_k1(), &signature).into_bytes();
+        let package = case.package.clone();
+        let addr = serve(move |target, addr| {
+            if target.starts_with("/github/releases") {
+                let release = release_json(
+                    1,
+                    "v1.4.0",
+                    false,
+                    false,
+                    &[
+                        (
+                            ENVELOPE_ASSET_NAME,
+                            &format!("http://{addr}/download/{ENVELOPE_ASSET_NAME}"),
+                        ),
+                        (
+                            MANIFEST_ASSET_NAME,
+                            &format!("http://{addr}/download/{MANIFEST_ASSET_NAME}"),
+                        ),
+                        (
+                            "desktop-todo-widget-v1.4.0-windows-x64.zip",
+                            &format!(
+                                "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+                            ),
+                        ),
+                    ],
+                );
+                return http_ok(format!("[{release}]").as_bytes());
+            }
+            if target.ends_with(ENVELOPE_ASSET_NAME) {
+                return http_ok(&envelope);
+            }
+            if target.ends_with(MANIFEST_ASSET_NAME) {
+                return http_ok(manifest.as_bytes());
+            }
+            if target.ends_with(".zip") {
+                return http_ok(&package);
+            }
+            not_found()
+        });
+        let fixture = fixture(addr);
+        let (target, envelope_bytes, _) = match run(&fixture, ReleaseSource::GitHub) {
+            DiscoveryOutcome::TargetFound {
+                target,
+                envelope_bytes,
+                ..
+            } => (target, envelope_bytes, None::<String>),
+            other => panic!("{}: expected TargetFound, got {other:?}", case.label),
+        };
+        let root = temp_root(case.label);
+        let mut session = persist_trusted_target(
+            &root,
+            *target,
+            &envelope_bytes,
+            Some(&format!(
+                "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+            )),
+            "GitHub",
+            &fixture.installed,
+        )
+        .unwrap_or_else(|e| panic!("{}: persist failed: {e}", case.label));
+        let error = acquire_and_stage(&mut session, &fixture.client).expect_err(case.label);
+        assert!(
+            (case.expect)(&error),
+            "{}: unexpected error {error:?}",
+            case.label
+        );
+        assert_eq!(session.record.state, MilestoneState::TrustedTargetPersisted);
+        assert!(!session.dir.join(STAGED_DIR).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// The two managed executables are cross-checked against the signed
+/// installFiles facts after extraction: package hash correctness alone
+/// never substitutes for per-file verification.
+#[test]
+fn managed_executable_hash_mismatch_is_typed() {
+    let exe1 = exe_payload(1);
+    let exe2 = exe_payload(2);
+    // The manifest declares a WRONG hash for the helper EXE; the package
+    // itself contains the real bytes and hashes correctly at package level.
+    let readme = b"readme".to_vec();
+    let package = zip_bytes(
+        &[
+            ("desktop-todo-widget.exe", exe1.clone()),
+            ("desktop-todo-maintenance.exe", exe2.clone()),
+            ("install.ps1", readme.clone()),
+            ("uninstall.ps1", readme.clone()),
+            ("README.md", readme.clone()),
+            ("README_ZH.md", readme.clone()),
+            ("LICENSE", readme.clone()),
+            ("LICENSE_ZH.md", readme.clone()),
+            ("THIRD_PARTY_NOTICES.md", readme),
+        ],
+        zip::CompressionMethod::Deflated,
+    );
+    let wrong_helper_hash = "b".repeat(64);
+    let manifest = {
+        let psha = sha_of(&package);
+        format!(
+            concat!(
+                r#"{{"schemaVersion":1,"appId":"net.alanfloyd.desktop","channel":"stable","version":"1.4.0","#,
+                r#""publishedAt":"2026-10-01T00:00:00Z","notes":"","updaterProtocol":1,"#,
+                r#""assets":{{"windows-x64":{{"filename":"desktop-todo-widget-v1.4.0-windows-x64.zip","size":{pkg},"sha256":"{psha}","installFiles":["#,
+                r#"{{"identity":"mainExecutable","filename":"desktop-todo-widget.exe","size":{s1},"sha256":"{h1}"}},"#,
+                r#"{{"identity":"maintenanceHelper","filename":"desktop-todo-maintenance.exe","size":{s2},"sha256":"{h2}"}}]}}}}}}"#
+            ),
+            pkg = package.len(),
+            psha = &psha,
+            s1 = exe1.len(),
+            h1 = sha_of(&exe1),
+            s2 = exe2.len(),
+            h2 = &wrong_helper_hash,
+        )
+    };
+    let signature = sign(&signing_k1(), manifest.as_bytes());
+    let envelope = envelope_json(&signing_k1(), &signature).into_bytes();
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/github/releases") {
+            let release = release_json(
+                1,
+                "v1.4.0",
+                false,
+                false,
+                &[
+                    (
+                        ENVELOPE_ASSET_NAME,
+                        &format!("http://{addr}/download/{ENVELOPE_ASSET_NAME}"),
+                    ),
+                    (
+                        MANIFEST_ASSET_NAME,
+                        &format!("http://{addr}/download/{MANIFEST_ASSET_NAME}"),
+                    ),
+                    (
+                        "desktop-todo-widget-v1.4.0-windows-x64.zip",
+                        &format!(
+                            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+                        ),
+                    ),
+                ],
+            );
+            return http_ok(format!("[{release}]").as_bytes());
+        }
+        if target.ends_with(ENVELOPE_ASSET_NAME) {
+            return http_ok(&envelope);
+        }
+        if target.ends_with(MANIFEST_ASSET_NAME) {
+            return http_ok(manifest.as_bytes());
+        }
+        if target.ends_with(".zip") {
+            return http_ok(&package);
+        }
+        not_found()
+    });
+    let fixture = fixture(addr);
+    let (target, envelope_bytes, _) = match run(&fixture, ReleaseSource::GitHub) {
+        DiscoveryOutcome::TargetFound {
+            target,
+            envelope_bytes,
+            ..
+        } => (target, envelope_bytes, None::<String>),
+        other => panic!("expected TargetFound, got {other:?}"),
+    };
+    let root = temp_root("exe-hash");
+    let mut session = persist_trusted_target(
+        &root,
+        *target,
+        &envelope_bytes,
+        Some(&format!(
+            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+        )),
+        "GitHub",
+        &fixture.installed,
+    )
+    .expect("persist");
+    match acquire_and_stage(&mut session, &fixture.client) {
+        Err(AcquisitionError::Archive(ArchiveError::ExtractedHashMismatch { file, .. })) => {
+            assert_eq!(file, "desktop-todo-maintenance.exe");
+        }
+        other => panic!("expected ExtractedHashMismatch, got {other:?}"),
+    }
+    // Main EXE was staged and verified before the helper check failed; the
+    // record state must still not claim readiness.
+    assert_eq!(session.record.state, MilestoneState::TrustedTargetPersisted);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ------------------------------------------------------- restart model A–F
+
+/// A: a persisted trusted target survives restart with the same binding.
+#[test]
+fn restart_a_persisted_target_recovers_identically() {
+    let exe1 = exe_payload(1);
+    let exe2 = exe_payload(2);
+    let package = valid_package(&exe1, &exe2);
+    let manifest = pipeline_manifest("1.4.0", &package, &exe1, &exe2);
+    let signature = sign(&signing_k1(), manifest.as_bytes());
+    let envelope = envelope_json(&signing_k1(), &signature).into_bytes();
+    let trust = TrustStore::from_raw_keys(&[signing_k1().verifying_key().to_bytes()]).unwrap();
+    let target_manifest =
+        desktop_todo_update_core::verify_and_parse(&trust, &envelope, manifest.as_bytes())
+            .expect("fixture target");
+    let root = temp_root("restart-a");
+    let session = persist_trusted_target(
+        &root,
+        target_manifest,
+        &envelope,
+        Some("https://github.com/x/pkg.zip"),
+        "GitHub",
+        &Version::parse("1.2.0").unwrap(),
+    )
+    .expect("persist");
+    let id = session.id.clone();
+
+    let recovered =
+        recover_session(&root, &id, &test_trust_store(), &installed_anchor()).expect("recover");
+    assert_eq!(recovered.record, session.record);
+    assert_eq!(
+        recovered.record.manifest_sha256,
+        session.record.manifest_sha256
+    );
+    assert_eq!(recovered.record.target_version, "1.4.0");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// B: a half-written or tampered durable record can never read as trusted.
+#[test]
+fn restart_b_broken_record_fails_closed() {
+    let root = temp_root("restart-b");
+    let dir = root.join("sessions").join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&dir).unwrap();
+    // Truncated JSON (a crash mid-write leaves no such file at all thanks
+    // to atomic_write; a corrupted file must fail closed regardless).
+    std::fs::write(dir.join(RECORD_FILE), b"{\"schemaVersion\":1,\"sta").unwrap();
+    let id = dir.file_name().unwrap().to_string_lossy().to_string();
+    match recover_session(&root, &id, &test_trust_store(), &installed_anchor()) {
+        Err(crate::updater::acquisition::PersistError::Malformed { .. }) => {}
+        other => panic!("expected Malformed, got {other:?}"),
+    }
+    // Unknown-field record fails closed.
+    std::fs::write(
+        dir.join(RECORD_FILE),
+        br#"{"schemaVersion":1,"state":"trustedTargetPersisted","extra":1}"#,
+    )
+    .unwrap();
+    match recover_session(&root, &id, &test_trust_store(), &installed_anchor()) {
+        Err(crate::updater::acquisition::PersistError::Malformed { .. }) => {}
+        other => panic!("expected Malformed for unknown field, got {other:?}"),
+    }
+    // Unsupported schema fails closed.
+    std::fs::write(
+        dir.join(RECORD_FILE),
+        br#"{"schemaVersion":2,"state":"trustedTargetPersisted","targetVersion":"1.4.0","manifestSha256":"a","envelopeSha256":"b","installedSourceVersion":"1.2.0","package":{"filename":"p.zip","size":1,"sha256":"c"},"installFiles":[],"discoveredVia":"GitHub","packageUrl":"","createdAt":"2026-10-01T00:00:00Z"}"#,
+    )
+    .unwrap();
+    match recover_session(&root, &id, &test_trust_store(), &installed_anchor()) {
+        Err(crate::updater::acquisition::PersistError::UnsupportedSchema { .. }) => {}
+        other => panic!("expected UnsupportedSchema, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// C: a partial package download is not a verified state — it is ignored,
+/// overwritten by the next run, and the record state never claims readiness.
+#[test]
+fn restart_c_partial_download_is_never_ready() {
+    let exe1 = exe_payload(1);
+    let exe2 = exe_payload(2);
+    let package = valid_package(&exe1, &exe2);
+    let manifest = pipeline_manifest("1.4.0", &package, &exe1, &exe2);
+    let signature = sign(&signing_k1(), manifest.as_bytes());
+    let envelope = envelope_json(&signing_k1(), &signature).into_bytes();
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/github/releases") {
+            let release = release_json(
+                1,
+                "v1.4.0",
+                false,
+                false,
+                &[
+                    (
+                        ENVELOPE_ASSET_NAME,
+                        &format!("http://{addr}/download/{ENVELOPE_ASSET_NAME}"),
+                    ),
+                    (
+                        MANIFEST_ASSET_NAME,
+                        &format!("http://{addr}/download/{MANIFEST_ASSET_NAME}"),
+                    ),
+                    (
+                        "desktop-todo-widget-v1.4.0-windows-x64.zip",
+                        &format!(
+                            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+                        ),
+                    ),
+                ],
+            );
+            return http_ok(format!("[{release}]").as_bytes());
+        }
+        if target.ends_with(ENVELOPE_ASSET_NAME) {
+            return http_ok(&envelope);
+        }
+        if target.ends_with(MANIFEST_ASSET_NAME) {
+            return http_ok(manifest.as_bytes());
+        }
+        if target.ends_with(".zip") {
+            return http_ok(&package);
+        }
+        not_found()
+    });
+    let fixture = fixture(addr);
+    let (target, envelope_bytes, _) = match run(&fixture, ReleaseSource::GitHub) {
+        DiscoveryOutcome::TargetFound {
+            target,
+            envelope_bytes,
+            ..
+        } => (target, envelope_bytes, None::<String>),
+        other => panic!("expected TargetFound, got {other:?}"),
+    };
+    let root = temp_root("restart-c");
+    let session = persist_trusted_target(
+        &root,
+        *target,
+        &envelope_bytes,
+        Some(&format!(
+            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+        )),
+        "GitHub",
+        &fixture.installed,
+    )
+    .expect("persist");
+    // Simulate a crash mid-download: a partial temp file and no package.
+    std::fs::write(session.dir.join(PACKAGE_DOWNLOADING_FILE), b"partial").unwrap();
+    assert!(!session.dir.join(PACKAGE_FILE).exists());
+
+    let recovered = recover_session(&root, &session.id, &test_trust_store(), &installed_anchor())
+        .expect("recover");
+    assert_eq!(
+        recovered.record.state,
+        MilestoneState::TrustedTargetPersisted
+    );
+    let mut recovered = recovered;
+    acquire_and_stage(&mut recovered, &fixture.client).expect("re-acquire");
+    assert_eq!(recovered.record.state, MilestoneState::PackageStaged);
+    assert!(!recovered.dir.join(PACKAGE_DOWNLOADING_FILE).exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// D: a crash during extraction (after the package hash passed) leaves the
+/// typed state at TrustedTargetPersisted — never Ready — and the next run
+/// re-stages cleanly over the partial extraction.
+#[test]
+fn restart_d_partial_extraction_is_never_ready() {
+    let exe1 = exe_payload(1);
+    let exe2 = exe_payload(2);
+    let package = valid_package(&exe1, &exe2);
+    let manifest = pipeline_manifest("1.4.0", &package, &exe1, &exe2);
+    let manifest_bytes = manifest.clone().into_bytes();
+    let package_for_writes = package.clone();
+    let signature = sign(&signing_k1(), manifest.as_bytes());
+    let envelope = envelope_json(&signing_k1(), &signature).into_bytes();
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/github/releases") {
+            let release = release_json(
+                1,
+                "v1.4.0",
+                false,
+                false,
+                &[
+                    (
+                        ENVELOPE_ASSET_NAME,
+                        &format!("http://{addr}/download/{ENVELOPE_ASSET_NAME}"),
+                    ),
+                    (
+                        MANIFEST_ASSET_NAME,
+                        &format!("http://{addr}/download/{MANIFEST_ASSET_NAME}"),
+                    ),
+                    (
+                        "desktop-todo-widget-v1.4.0-windows-x64.zip",
+                        &format!(
+                            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+                        ),
+                    ),
+                ],
+            );
+            return http_ok(format!("[{release}]").as_bytes());
+        }
+        if target.ends_with(ENVELOPE_ASSET_NAME) {
+            return http_ok(&envelope);
+        }
+        if target.ends_with(MANIFEST_ASSET_NAME) {
+            return http_ok(&manifest_bytes);
+        }
+        if target.ends_with(".zip") {
+            return http_ok(&package);
+        }
+        not_found()
+    });
+    let fixture = fixture(addr);
+    let (target, envelope_bytes, _) = match run(&fixture, ReleaseSource::GitHub) {
+        DiscoveryOutcome::TargetFound {
+            target,
+            envelope_bytes,
+            ..
+        } => (target, envelope_bytes, None::<String>),
+        other => panic!("expected TargetFound, got {other:?}"),
+    };
+    let root = temp_root("restart-d");
+    let session = persist_trusted_target(
+        &root,
+        *target,
+        &envelope_bytes,
+        Some(&format!(
+            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+        )),
+        "GitHub",
+        &fixture.installed,
+    )
+    .expect("persist");
+    // Simulate a crash after download+hash but mid-extraction: package
+    // published, one partial staged temp file, state never advanced.
+    std::fs::write(session.dir.join(PACKAGE_FILE), &package_for_writes).unwrap();
+    let staged = session.dir.join(STAGED_DIR);
+    std::fs::create_dir_all(&staged).unwrap();
+    std::fs::write(staged.join("desktop-todo-widget.exe.extracting"), b"half").unwrap();
+    let recovered = recover_session(&root, &session.id, &test_trust_store(), &installed_anchor())
+        .expect("recover");
+    assert_eq!(
+        recovered.record.state,
+        MilestoneState::TrustedTargetPersisted,
+        "partial extraction must never read as Ready"
+    );
+    let mut recovered = recovered;
+    acquire_and_stage(&mut recovered, &fixture.client).expect("re-stage");
+    assert_eq!(recovered.record.state, MilestoneState::PackageStaged);
+    assert!(!staged.join("desktop-todo-widget.exe.extracting").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// E: a fully staged session recovers as Ready and re-verification passes
+/// idempotently; a tampered staged file fails closed.
+#[test]
+fn restart_e_staged_state_recovers_and_reverifies() {
+    let exe1 = exe_payload(1);
+    let exe2 = exe_payload(2);
+    let package = valid_package(&exe1, &exe2);
+    let manifest = pipeline_manifest("1.4.0", &package, &exe1, &exe2);
+    let signature = sign(&signing_k1(), manifest.as_bytes());
+    let envelope = envelope_json(&signing_k1(), &signature).into_bytes();
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/github/releases") {
+            let release = release_json(
+                1,
+                "v1.4.0",
+                false,
+                false,
+                &[
+                    (
+                        ENVELOPE_ASSET_NAME,
+                        &format!("http://{addr}/download/{ENVELOPE_ASSET_NAME}"),
+                    ),
+                    (
+                        MANIFEST_ASSET_NAME,
+                        &format!("http://{addr}/download/{MANIFEST_ASSET_NAME}"),
+                    ),
+                    (
+                        "desktop-todo-widget-v1.4.0-windows-x64.zip",
+                        &format!(
+                            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+                        ),
+                    ),
+                ],
+            );
+            return http_ok(format!("[{release}]").as_bytes());
+        }
+        if target.ends_with(ENVELOPE_ASSET_NAME) {
+            return http_ok(&envelope);
+        }
+        if target.ends_with(MANIFEST_ASSET_NAME) {
+            return http_ok(manifest.as_bytes());
+        }
+        if target.ends_with(".zip") {
+            return http_ok(&package);
+        }
+        not_found()
+    });
+    let fixture = fixture(addr);
+    let (target, envelope_bytes, _) = match run(&fixture, ReleaseSource::GitHub) {
+        DiscoveryOutcome::TargetFound {
+            target,
+            envelope_bytes,
+            ..
+        } => (target, envelope_bytes, None::<String>),
+        other => panic!("expected TargetFound, got {other:?}"),
+    };
+    let root = temp_root("restart-e");
+    let mut session = persist_trusted_target(
+        &root,
+        *target,
+        &envelope_bytes,
+        Some(&format!(
+            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+        )),
+        "GitHub",
+        &fixture.installed,
+    )
+    .expect("persist");
+    acquire_and_stage(&mut session, &fixture.client).expect("stage");
+
+    let mut recovered =
+        recover_session(&root, &session.id, &test_trust_store(), &installed_anchor())
+            .expect("recover");
+    assert_eq!(recovered.record.state, MilestoneState::PackageStaged);
+    // Idempotent: staged files still verify without any network.
+    acquire_and_stage(&mut recovered, &fixture.client).expect("reverify");
+    // Tampering with a staged file fails closed on the next verification.
+    let staged = recovered.dir.join(STAGED_DIR);
+    std::fs::write(staged.join("desktop-todo-widget.exe"), vec![0xFF; 1000]).unwrap();
+    match acquire_and_stage(&mut recovered, &fixture.client) {
+        Err(AcquisitionError::Archive(ArchiveError::ExtractedHashMismatch { .. })) => {}
+        other => panic!("expected ExtractedHashMismatch, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// F: staged state is bound to its own session and target — swapping the
+/// persisted manifest bytes of another session breaks the digest binding
+/// and fails closed instead of rebinding.
+#[test]
+fn restart_f_staged_state_never_binds_a_new_target() {
+    let exe1 = exe_payload(1);
+    let exe2 = exe_payload(2);
+    let package = valid_package(&exe1, &exe2);
+
+    // Session A: a real staged target 1.4.0.
+    let manifest_a = pipeline_manifest("1.4.0", &package, &exe1, &exe2);
+    let signature_a = sign(&signing_k1(), manifest_a.as_bytes());
+    let envelope_a = envelope_json(&signing_k1(), &signature_a).into_bytes();
+    let manifest_bytes = manifest_a.clone().into_bytes();
+    let package_fixture = package.clone();
+    let envelope_fixture = envelope_a.clone();
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/github/releases") {
+            let release = release_json(
+                1,
+                "v1.4.0",
+                false,
+                false,
+                &[
+                    (
+                        ENVELOPE_ASSET_NAME,
+                        &format!("http://{addr}/download/{ENVELOPE_ASSET_NAME}"),
+                    ),
+                    (
+                        MANIFEST_ASSET_NAME,
+                        &format!("http://{addr}/download/{MANIFEST_ASSET_NAME}"),
+                    ),
+                    (
+                        "desktop-todo-widget-v1.4.0-windows-x64.zip",
+                        &format!(
+                            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+                        ),
+                    ),
+                ],
+            );
+            return http_ok(format!("[{release}]").as_bytes());
+        }
+        if target.ends_with(ENVELOPE_ASSET_NAME) {
+            return http_ok(&envelope_fixture);
+        }
+        if target.ends_with(MANIFEST_ASSET_NAME) {
+            return http_ok(&manifest_bytes);
+        }
+        if target.ends_with(".zip") {
+            return http_ok(&package_fixture);
+        }
+        not_found()
+    });
+    let fixture = fixture(addr);
+    let (target, envelope_bytes, _) = match run(&fixture, ReleaseSource::GitHub) {
+        DiscoveryOutcome::TargetFound {
+            target,
+            envelope_bytes,
+            ..
+        } => (target, envelope_bytes, None::<String>),
+        other => panic!("expected TargetFound, got {other:?}"),
+    };
+    let root = temp_root("restart-f");
+    let mut session = persist_trusted_target(
+        &root,
+        *target,
+        &envelope_bytes,
+        Some(&format!(
+            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+        )),
+        "GitHub",
+        &fixture.installed,
+    )
+    .expect("persist");
+    acquire_and_stage(&mut session, &fixture.client).expect("stage");
+    let id_a = session.id.clone();
+
+    // Swap session A's persisted manifest bytes for a DIFFERENT validly
+    // signed target (1.3.0): the record's digest binding fails closed first,
+    // and even a fully re-signed swap would disagree field-by-field with the
+    // record. A staged state never rebinds to a new target.
+    let other_manifest = manifest_text("1.3.0", 1);
+    let other_signature = sign(&signing_k1(), other_manifest.as_bytes());
+    let other_envelope = envelope_json(&signing_k1(), &other_signature).into_bytes();
+    std::fs::write(session.dir.join(MANIFEST_FILE), other_manifest.as_bytes()).unwrap();
+    std::fs::write(session.dir.join(ENVELOPE_FILE), &other_envelope).unwrap();
+    match recover_session(&root, &id_a, &test_trust_store(), &installed_anchor()) {
+        Err(crate::updater::acquisition::PersistError::DigestMismatch { file }) => {
+            assert_eq!(file, MANIFEST_FILE);
+        }
+        other => panic!("expected DigestMismatch, got {other:?}"),
+    }
+
+    // Even when the swap is accompanied by a fully updated record (digests
+    // recomputed over the swapped bytes — an attacker-or-bug scenario that
+    // also survives the digest layer), the re-verified target disagrees
+    // field-by-field with the record's staged facts and the source baseline
+    // anchor is re-checked. Recovery still fails closed.
+    let mut swapped_record: crate::updater::acquisition::TrustedTargetRecord =
+        serde_json::from_slice(&std::fs::read(session.dir.join(RECORD_FILE)).unwrap()).unwrap();
+    let fresh = recover_helper_target(other_manifest.as_bytes(), &other_envelope);
+    swapped_record.manifest_sha256 = fresh.manifest_sha256_hex().to_string();
+    swapped_record.envelope_sha256 = desktop_todo_update_core::sha256_hex(&other_envelope);
+    swapped_record.target_version = "1.3.0".to_string();
+    swapped_record.package.filename = "desktop-todo-widget-v1.3.0-windows-x64.zip".to_string();
+    std::fs::write(
+        session.dir.join(RECORD_FILE),
+        serde_json::to_vec(&swapped_record).unwrap(),
+    )
+    .unwrap();
+    match recover_session(&root, &id_a, &test_trust_store(), &installed_anchor()) {
+        Err(crate::updater::acquisition::PersistError::RecordTampered { field }) => {
+            assert_eq!(field, "package");
+        }
+        other => panic!("expected RecordTampered, got {other:?}"),
+    }
+
+    // The source-version anchor is checked against the CURRENT actual
+    // installed version: the same intact session recovers under 1.2.0 but
+    // fails closed when the runtime has changed (rollback/reinstall).
+    std::fs::write(session.dir.join(MANIFEST_FILE), manifest_a.as_bytes()).unwrap();
+    std::fs::write(session.dir.join(ENVELOPE_FILE), &envelope_bytes).unwrap();
+    let mut swapped_record = serde_json::from_slice::<
+        crate::updater::acquisition::TrustedTargetRecord,
+    >(&std::fs::read(session.dir.join(RECORD_FILE)).unwrap())
+    .unwrap();
+    swapped_record.target_version = "1.4.0".to_string();
+    let fresh = recover_helper_target(manifest_a.as_bytes(), &envelope_bytes);
+    swapped_record.manifest_sha256 = fresh.manifest_sha256_hex().to_string();
+    swapped_record.envelope_sha256 = desktop_todo_update_core::sha256_hex(&envelope_bytes);
+    swapped_record.package.filename = "desktop-todo-widget-v1.4.0-windows-x64.zip".to_string();
+    swapped_record.package.size = package.len() as u64;
+    swapped_record.package.sha256 = sha_of(&package);
+    swapped_record.install_files = fresh
+        .manifest()
+        .asset()
+        .install_files()
+        .iter()
+        .map(|entry| crate::updater::acquisition::InstallFileFact {
+            identity: entry.identity().to_string(),
+            filename: entry.filename().to_string(),
+            size: entry.size(),
+            sha256: entry.sha256_hex().to_string(),
+        })
+        .collect();
+    std::fs::write(
+        session.dir.join(RECORD_FILE),
+        serde_json::to_vec(&swapped_record).unwrap(),
+    )
+    .unwrap();
+    assert!(recover_session(&root, &id_a, &test_trust_store(), &installed_anchor()).is_ok());
+    match recover_session(
+        &root,
+        &id_a,
+        &test_trust_store(),
+        &Version::parse("1.3.0").unwrap(),
+    ) {
+        Err(crate::updater::acquisition::PersistError::SourceVersionChanged {
+            recorded,
+            current,
+        }) => {
+            assert_eq!(recorded, "1.2.0");
+            assert_eq!(current, "1.3.0");
+        }
+        other => panic!("expected SourceVersionChanged, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Build a VerifiedTarget from signed fixture bytes (test convenience for
+/// hand-constructed session states).
+fn recover_helper_target(manifest: &[u8], envelope: &[u8]) -> VerifiedTarget {
+    desktop_todo_update_core::verify_and_parse(&test_trust_store(), envelope, manifest).unwrap()
+}
+
+/// Whole-scan budget (Phase 2B-B debt closure): an expired budget stops the
+/// scan from taking new candidates, is recorded but never classified as a
+/// candidate verdict or provider-layer failure, never drops an accepted
+/// target, and does not trigger Auto fallback.
+#[test]
+fn scan_budget_stops_the_scan_without_provider_semantics() {
+    let gitee_hits = Arc::new(AtomicUsize::new(0));
+    let gitee_hits_clone = gitee_hits.clone();
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/github/releases") {
+            // Three eligible-looking candidates; the budget must stop the
+            // scan before they are all taken.
+            let one = release_with_assets(addr, 1, "one", "1.3.0");
+            let two = release_with_assets(addr, 2, "two", "1.4.0");
+            let three = release_with_assets(addr, 3, "three", "1.5.0");
+            return http_ok(format!("[{one},{two},{three}]").as_bytes());
+        }
+        if target.starts_with("/gitee/") {
+            gitee_hits_clone.fetch_add(1, Ordering::SeqCst);
+        }
+        serve_candidate_bytes(target, "one", "1.3.0", 1, &signing_k1())
+            .or_else(|| serve_candidate_bytes(target, "two", "1.4.0", 1, &signing_k1()))
+            .or_else(|| serve_candidate_bytes(target, "three", "1.5.0", 1, &signing_k1()))
+            .unwrap_or_else(not_found)
+    });
+    let mut fixture = fixture(addr);
+    fixture.config.scan_budget = Some(Duration::ZERO);
+    let ctx = DiscoveryContext {
+        config: &fixture.config,
+        scan_started: Instant::now(),
+        client: &fixture.client,
+        endpoints: &fixture.endpoints,
+        trust: &fixture.trust,
+        installed_version: &fixture.installed,
+        hop_policy: &fixture.hop,
+    };
+    match discover(ReleaseSource::Auto, &ctx) {
+        DiscoveryOutcome::NoEligibleCandidate { scans } => {
+            assert!(scans[0].budget_exhausted, "budget stop must be recorded");
+        }
+        other => panic!("expected NoEligibleCandidate, got {other:?}"),
+    }
+    assert_eq!(
+        gitee_hits.load(Ordering::SeqCst),
+        0,
+        "budget exhaustion is client-side, not a provider-layer failure: no fallback"
+    );
+
+    // A generous budget never discards an accepted target (same run shape).
+    fixture.config.scan_budget = Some(Duration::from_secs(60));
+    let ctx = DiscoveryContext {
+        config: &fixture.config,
+        scan_started: Instant::now(),
+        client: &fixture.client,
+        endpoints: &fixture.endpoints,
+        trust: &fixture.trust,
+        installed_version: &fixture.installed,
+        hop_policy: &fixture.hop,
+    };
+    assert_target(discover(ReleaseSource::GitHub, &ctx), "1.3.0");
+}
+
+/// The persisted raw manifest digest is the handoff binding: any single-byte
+/// change to the raw bytes yields a different digest, so a different target
+/// can never inherit another target's binding.
+#[test]
+fn expected_manifest_digest_changes_with_any_raw_byte() {
+    let base = manifest_text("1.4.0", 1);
+    let digest = desktop_todo_update_core::sha256_hex(base.as_bytes());
+    let mut mutated = base.clone().into_bytes();
+    mutated.insert(mutated.len() - 1, b' ');
+    let mutated_digest = desktop_todo_update_core::sha256_hex(&mutated);
+    assert_ne!(digest, mutated_digest);
+}
+
+// ===================================== durable boundary review tests (2C-A)
+
+/// Shared setup for the durable-boundary tests: a real staged session built
+/// through the full pipeline.
+fn staged_session(
+    tag: &str,
+) -> (
+    crate::updater::acquisition::UpdateSession,
+    PathBuf,
+    Vec<u8>,
+    reqwest::blocking::Client,
+) {
+    let exe1 = exe_payload(1);
+    let exe2 = exe_payload(2);
+    let package = valid_package(&exe1, &exe2);
+    let manifest = pipeline_manifest("1.4.0", &package, &exe1, &exe2);
+    let signature = sign(&signing_k1(), manifest.as_bytes());
+    let envelope = envelope_json(&signing_k1(), &signature).into_bytes();
+    let package_fixture = package.clone();
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/github/releases") {
+            let release = release_json(
+                1,
+                "v1.4.0",
+                false,
+                false,
+                &[
+                    (
+                        ENVELOPE_ASSET_NAME,
+                        &format!("http://{addr}/download/{ENVELOPE_ASSET_NAME}"),
+                    ),
+                    (
+                        MANIFEST_ASSET_NAME,
+                        &format!("http://{addr}/download/{MANIFEST_ASSET_NAME}"),
+                    ),
+                    (
+                        "desktop-todo-widget-v1.4.0-windows-x64.zip",
+                        &format!(
+                            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+                        ),
+                    ),
+                ],
+            );
+            return http_ok(format!("[{release}]").as_bytes());
+        }
+        if target.ends_with(ENVELOPE_ASSET_NAME) {
+            return http_ok(&envelope);
+        }
+        if target.ends_with(MANIFEST_ASSET_NAME) {
+            return http_ok(manifest.as_bytes());
+        }
+        if target.ends_with(".zip") {
+            return http_ok(&package_fixture);
+        }
+        not_found()
+    });
+    let fixture = fixture(addr);
+    let (target, envelope_bytes, _) = match run(&fixture, ReleaseSource::GitHub) {
+        DiscoveryOutcome::TargetFound {
+            target,
+            envelope_bytes,
+            ..
+        } => (target, envelope_bytes, None::<String>),
+        other => panic!("expected TargetFound, got {other:?}"),
+    };
+    let root = temp_root(tag);
+    let mut session = persist_trusted_target(
+        &root,
+        *target,
+        &envelope_bytes,
+        Some(&format!(
+            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+        )),
+        "GitHub",
+        &fixture.installed,
+    )
+    .expect("persist");
+    acquire_and_stage(&mut session, &fixture.client).expect("stage");
+    (session, root, package, fixture.client)
+}
+
+fn read_record(
+    session: &crate::updater::acquisition::UpdateSession,
+) -> crate::updater::acquisition::TrustedTargetRecord {
+    serde_json::from_slice(&std::fs::read(session.dir.join(RECORD_FILE)).unwrap()).unwrap()
+}
+
+fn write_record(
+    session: &crate::updater::acquisition::UpdateSession,
+    record: &crate::updater::acquisition::TrustedTargetRecord,
+) {
+    std::fs::write(
+        session.dir.join(RECORD_FILE),
+        serde_json::to_vec(record).unwrap(),
+    )
+    .unwrap();
+}
+
+/// T1: only the record's package SHA-256 is tampered with (raw bytes and
+/// digests untouched) — recovery fails closed; the re-verified target, not
+/// the record, is the authority.
+#[test]
+fn t1_tampered_record_package_sha_fails_closed() {
+    let (mut session, root, package, client) = staged_session("t1");
+    let mut record = read_record(&session);
+    record.package.sha256 = "e".repeat(64);
+    write_record(&session, &record);
+    match recover_session(&root, &session.id, &test_trust_store(), &installed_anchor()) {
+        Err(crate::updater::acquisition::PersistError::RecordTampered { field }) => {
+            assert_eq!(field, "package");
+        }
+        other => panic!("expected RecordTampered, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read(session.dir.join(PACKAGE_FILE)).unwrap(),
+        package
+    );
+    acquire_and_stage(&mut session, &client).expect("intact in-memory session still works");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// T2: only the record's installFiles facts are tampered with — they can
+/// never become authoritative.
+#[test]
+fn t2_tampered_record_install_files_fail_closed() {
+    let (session, root, _package, _client) = staged_session("t2");
+    let mut record = read_record(&session);
+    record.install_files[0].sha256 = "f".repeat(64);
+    write_record(&session, &record);
+    match recover_session(&root, &session.id, &test_trust_store(), &installed_anchor()) {
+        Err(crate::updater::acquisition::PersistError::RecordTampered { field }) => {
+            assert_eq!(field, "installFiles");
+        }
+        other => panic!("expected RecordTampered, got {other:?}"),
+    }
+    record.install_files[0].size = 9_999_999;
+    write_record(&session, &record);
+    match recover_session(&root, &session.id, &test_trust_store(), &installed_anchor()) {
+        Err(crate::updater::acquisition::PersistError::RecordTampered { field }) => {
+            assert_eq!(field, "installFiles");
+        }
+        other => panic!("expected RecordTampered for size, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// T3: one changed raw-manifest byte — even when the record's digest is
+/// recomputed to match — fails the signature recovery layer.
+#[test]
+fn t3_manifest_byte_change_fails_signature_recovery() {
+    let (session, root, _package, _client) = staged_session("t3");
+    let mut tampered = std::fs::read(session.dir.join(MANIFEST_FILE)).unwrap();
+    tampered.insert(tampered.len() - 1, b' ');
+    std::fs::write(session.dir.join(MANIFEST_FILE), &tampered).unwrap();
+    let mut record = read_record(&session);
+    record.manifest_sha256 = desktop_todo_update_core::sha256_hex(&tampered);
+    write_record(&session, &record);
+    match recover_session(&root, &session.id, &test_trust_store(), &installed_anchor()) {
+        Err(crate::updater::acquisition::PersistError::SignatureRecovery { detail }) => {
+            assert!(detail.contains("BadSignature"), "{detail}");
+        }
+        other => panic!("expected SignatureRecovery, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// T4: one changed envelope byte (with the record digest recomputed) fails
+/// the signature recovery layer — the envelope is verified input too.
+#[test]
+fn t4_envelope_byte_change_fails_signature_recovery() {
+    let (session, root, _package, _client) = staged_session("t4");
+    let mut tampered = std::fs::read(session.dir.join(ENVELOPE_FILE)).unwrap();
+    // Non-whitespace trailing byte: JSON whitespace would leave the selected
+    // signature and target semantically identical, but any byte change that
+    // alters the envelope document must fail signature recovery.
+    tampered.insert(tampered.len(), b'x');
+    std::fs::write(session.dir.join(ENVELOPE_FILE), &tampered).unwrap();
+    let mut record = read_record(&session);
+    record.envelope_sha256 = desktop_todo_update_core::sha256_hex(&tampered);
+    write_record(&session, &record);
+    match recover_session(&root, &session.id, &test_trust_store(), &installed_anchor()) {
+        Err(crate::updater::acquisition::PersistError::SignatureRecovery { detail }) => {
+            assert!(detail.contains("EnvelopeMalformed"), "{detail}");
+        }
+        other => panic!("expected SignatureRecovery, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The package locator selection authority is the signed manifest filename,
+/// not any extension or naming grammar: a package asset named
+/// `package.payload` whose bytes are a fully valid ZIP flows through the
+/// whole pipeline.
+#[test]
+fn package_locator_is_the_signed_filename_not_an_extension() {
+    let exe1 = exe_payload(1);
+    let exe2 = exe_payload(2);
+    let package = valid_package(&exe1, &exe2);
+    let manifest = {
+        let psha = sha_of(&package);
+        format!(
+            concat!(
+                r#"{{"schemaVersion":1,"appId":"net.alanfloyd.desktop","channel":"stable","version":"1.4.0","#,
+                r#""publishedAt":"2026-10-01T00:00:00Z","notes":"","updaterProtocol":1,"#,
+                r#""assets":{{"windows-x64":{{"filename":"package.payload","size":{pkg},"sha256":"{psha}","installFiles":["#,
+                r#"{{"identity":"mainExecutable","filename":"desktop-todo-widget.exe","size":{s1},"sha256":"{h1}"}},"#,
+                r#"{{"identity":"maintenanceHelper","filename":"desktop-todo-maintenance.exe","size":{s2},"sha256":"{h2}"}}]}}}}}}"#
+            ),
+            pkg = package.len(),
+            psha = &psha,
+            s1 = exe1.len(),
+            h1 = sha_of(&exe1),
+            s2 = exe2.len(),
+            h2 = sha_of(&exe2),
+        )
+    };
+    let manifest_bytes = manifest.clone().into_bytes();
+    let signature = sign(&signing_k1(), manifest.as_bytes());
+    let envelope = envelope_json(&signing_k1(), &signature).into_bytes();
+    let package_fixture = package.clone();
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/github/releases") {
+            let release = release_json(
+                1,
+                "v1.4.0",
+                false,
+                false,
+                &[
+                    (
+                        ENVELOPE_ASSET_NAME,
+                        &format!("http://{addr}/download/{ENVELOPE_ASSET_NAME}"),
+                    ),
+                    (
+                        MANIFEST_ASSET_NAME,
+                        &format!("http://{addr}/download/{MANIFEST_ASSET_NAME}"),
+                    ),
+                    (
+                        "package.payload",
+                        &format!("http://{addr}/download/package.payload"),
+                    ),
+                ],
+            );
+            return http_ok(format!("[{release}]").as_bytes());
+        }
+        if target.ends_with(ENVELOPE_ASSET_NAME) {
+            return http_ok(&envelope);
+        }
+        if target.ends_with(MANIFEST_ASSET_NAME) {
+            return http_ok(&manifest_bytes);
+        }
+        if target.ends_with("package.payload") {
+            return http_ok(&package_fixture);
+        }
+        not_found()
+    });
+    let fixture = fixture(addr);
+    let (target, envelope_bytes, package_url) = match run(&fixture, ReleaseSource::GitHub) {
+        DiscoveryOutcome::TargetFound {
+            target,
+            envelope_bytes,
+            package_url,
+            ..
+        } => (target, envelope_bytes, package_url),
+        other => panic!("expected TargetFound, got {other:?}"),
+    };
+    let package_url = package_url.expect("the exact signed filename selects the package locator");
+    assert!(package_url.ends_with("package.payload"));
+    let root = temp_root("opaque-name");
+    let mut session = persist_trusted_target(
+        &root,
+        *target,
+        &envelope_bytes,
+        Some(&package_url),
+        "GitHub",
+        &fixture.installed,
+    )
+    .expect("persist");
+    acquire_and_stage(&mut session, &fixture.client).expect("acquire");
+    assert_eq!(session.record.state, MilestoneState::PackageStaged);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Two provider assets with the same exact signed filename are an ambiguous
+/// locator: the candidate is skipped locally and an older bridge is accepted
+/// — never "take the first one".
+#[test]
+fn ambiguous_package_assets_skip_the_candidate() {
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/github/releases") {
+            let newest = release_json(
+                9,
+                "v1.6.0",
+                false,
+                false,
+                &[
+                    (
+                        ENVELOPE_ASSET_NAME,
+                        &format!("http://{addr}/download/newest/{ENVELOPE_ASSET_NAME}"),
+                    ),
+                    (
+                        MANIFEST_ASSET_NAME,
+                        &format!("http://{addr}/download/newest/{MANIFEST_ASSET_NAME}"),
+                    ),
+                    (
+                        "desktop-todo-widget-v1.6.0-windows-x64.zip",
+                        &format!(
+                            "http://{addr}/download/newest/first-desktop-todo-widget-v1.6.0-windows-x64.zip"
+                        ),
+                    ),
+                    (
+                        "desktop-todo-widget-v1.6.0-windows-x64.zip",
+                        &format!(
+                            "http://{addr}/download/newest/second-desktop-todo-widget-v1.6.0-windows-x64.zip"
+                        ),
+                    ),
+                ],
+            );
+            let bridge = release_with_assets(addr, 2, "bridge", "1.4.0");
+            return http_ok(format!("[{newest},{bridge}]").as_bytes());
+        }
+        if target.contains("/download/newest/") {
+            let (envelope, manifest_bytes) = signed_metadata(&signing_k1(), "1.6.0", 1);
+            return if target.ends_with(ENVELOPE_ASSET_NAME) {
+                http_ok(&envelope)
+            } else {
+                http_ok(&manifest_bytes)
+            };
+        }
+        serve_candidate_bytes(target, "bridge", "1.4.0", 1, &signing_k1()).unwrap_or_else(not_found)
+    });
+    let fixture = fixture(addr);
+    let target = assert_target(run(&fixture, ReleaseSource::GitHub), "1.4.0");
+    assert_eq!(
+        target.manifest().version().to_string(),
+        "1.4.0",
+        "the ambiguous newest candidate was skipped, not guessed"
+    );
+}
+
+/// Hard whole-scan deadline: a 300ms budget with a 30s per-request timeout
+/// cannot hang for 30s — every attempt's timeout, retry, and sleep is
+/// bounded by the remaining budget, and the expiry is a client-side stop
+/// (NoEligibleCandidate with the budget flag), never a provider failure and
+/// never a trigger for Auto fallback.
+#[test]
+fn hard_deadline_bounds_hung_requests() {
+    let gitee_hits = Arc::new(AtomicUsize::new(0));
+    let gitee_hits_clone = gitee_hits.clone();
+    let github_hits = Arc::new(AtomicUsize::new(0));
+    let github_hits_clone = github_hits.clone();
+    let addr = serve(move |target, _| {
+        if target.starts_with("/github/releases") {
+            github_hits_clone.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_secs(30));
+            return http_ok(b"[]");
+        }
+        if target.starts_with("/gitee/") {
+            gitee_hits_clone.fetch_add(1, Ordering::SeqCst);
+        }
+        not_found()
+    });
+    let mut fixture = fixture(addr);
+    fixture.config.scan_budget = Some(Duration::from_millis(300));
+    fixture.config.request_timeout = Duration::from_secs(30);
+    fixture.client = discovery_client(
+        &fixture.config,
+        &combined_origin_allowlist(&fixture.endpoints),
+    )
+    .unwrap();
+    let started = Instant::now();
+    let ctx = DiscoveryContext {
+        config: &fixture.config,
+        scan_started: Instant::now(),
+        client: &fixture.client,
+        endpoints: &fixture.endpoints,
+        trust: &fixture.trust,
+        installed_version: &fixture.installed,
+        hop_policy: &fixture.hop,
+    };
+    match discover(ReleaseSource::Auto, &ctx) {
+        DiscoveryOutcome::NoEligibleCandidate { scans } => {
+            assert!(scans[0].budget_exhausted);
+        }
+        other => panic!("expected NoEligibleCandidate, got {other:?}"),
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the 30s per-request timeout must be clamped by the 300ms budget"
+    );
+    assert_eq!(
+        gitee_hits.load(Ordering::SeqCst),
+        0,
+        "budget expiry is client-side: no Auto fallback"
+    );
+    assert!(github_hits.load(Ordering::SeqCst) >= 1);
+}
+
+/// A Retry-After longer than the remaining budget is not slept through.
+#[test]
+fn retry_after_beyond_the_budget_stops_instead_of_sleeping() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_clone = hits.clone();
+    let addr = serve(move |target, _| {
+        if target.starts_with("/github/releases") {
+            hits_clone.fetch_add(1, Ordering::SeqCst);
+            return http_status(
+                "HTTP/1.1 429 Too Many Requests",
+                &[("Retry-After", "60".to_string())],
+                b"slow down",
+            );
+        }
+        not_found()
+    });
+    let mut fixture = fixture(addr);
+    fixture.config.scan_budget = Some(Duration::from_millis(300));
+    // Cap raised above the remaining budget so the wanted 60s sleep genuinely
+    // exceeds it: the scan must stop instead of sleeping past the deadline.
+    fixture.config.retry_after_cap = Duration::from_secs(60);
+    fixture.client = discovery_client(
+        &fixture.config,
+        &combined_origin_allowlist(&fixture.endpoints),
+    )
+    .unwrap();
+    let started = Instant::now();
+    match run(&fixture, ReleaseSource::GitHub) {
+        DiscoveryOutcome::NoEligibleCandidate { scans } => {
+            assert!(scans[0].budget_exhausted);
+        }
+        other => panic!("expected NoEligibleCandidate, got {other:?}"),
+    }
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "no retry past the deadline");
 }
