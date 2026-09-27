@@ -37,8 +37,8 @@ use sha2::{Digest, Sha256};
 use crate::paths::{self, Paths};
 use crate::receipt::{validate_uuid, Lifecycle, Receipt};
 use crate::update_session::{
-    backup_slot, load_update_session, SessionOperation, SessionPhase, UpdateSessionEnvelope,
-    SESSION_MAX_BYTES,
+    backup_slot, load_update_session, ProcessIdentity, SessionOperation, SessionPhase,
+    UpdateSessionEnvelope, SESSION_MAX_BYTES,
 };
 use crate::{APP_ID, Error, ErrorKind, MAIN_EXE};
 
@@ -115,6 +115,12 @@ pub enum HandoffError {
     InstallationInvalid { detail: String },
     /// The receipt is in a transitional lifecycle state.
     LifecycleBusy { detail: String },
+    /// The recorded caller process no longer exists, so the handoff cannot be
+    /// bound to a live origin. Never treated as acceptable: fail closed.
+    CallerExited { pid: u32 },
+    /// The live caller does not match the recorded identity (PID, creation
+    /// time, or canonical image).
+    CallerIdentityMismatch { detail: String },
     Io { detail: String },
 }
 
@@ -179,6 +185,13 @@ impl std::fmt::Display for HandoffError {
                 write!(f, "installation cannot support a handoff: {detail}")
             }
             Self::LifecycleBusy { detail } => write!(f, "installation lifecycle busy: {detail}"),
+            Self::CallerExited { pid } => write!(
+                f,
+                "recorded caller process {pid} has exited; the handoff cannot be bound to a live origin"
+            ),
+            Self::CallerIdentityMismatch { detail } => {
+                write!(f, "live caller identity mismatch: {detail}")
+            }
             Self::Io { detail } => write!(f, "handoff IO failure: {detail}"),
         }
     }
@@ -264,7 +277,7 @@ pub fn derive_installed_source(paths: &Paths, trust: &TrustStore) -> Result<Vers
     })
 }
 
-fn read_bounded(path: &Path, what: &str) -> Result<Vec<u8>, HandoffError> {
+pub(crate) fn read_bounded(path: &Path, what: &str) -> Result<Vec<u8>, HandoffError> {
     let file = paths::open_regular(path).map_err(|e| HandoffError::Io {
         detail: format!("{what} unreadable: {e}"),
     })?;
@@ -314,6 +327,140 @@ fn hash_stream(file: &mut std::fs::File) -> Result<(u64, String), HandoffError> 
     }
     // Hex of the digest itself — `sha256_hex` would hash the digest again.
     Ok((size, format!("{:x}", hasher.finalize())))
+}
+
+/// Which invocation shape is being validated. The frozen contract has two
+/// legal handoff moments: the **Initial** validation from the installed
+/// helper (receipt still `Installed`, no authority transferred, the live
+/// caller must be bound), and the **Resume** validation executed by the
+/// session runner / recovery continuation (receipt `Updating` with
+/// `activeSessionId` — authority already transferred — and no live-caller
+/// requirement, because the caller is expected to have exited).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoffStage {
+    Initial,
+    Resume,
+}
+
+/// The live identity of a running process, as observed through the OS. PID
+/// alone is insufficient: the creation FILETIME and the exact canonical
+/// image path are what make PID reuse detectable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveProcessIdentity {
+    pub pid: u32,
+    pub creation_filetime: u64,
+    pub image_path: PathBuf,
+}
+
+/// Query the live identity of one process. A PID that no longer exists is
+/// [`HandoffError::CallerExited`] — never an empty match.
+pub fn query_live_process_identity(pid: u32) -> Result<LiveProcessIdentity, HandoffError> {
+    use windows::Win32::Foundation::{CloseHandle, FILETIME, STILL_ACTIVE};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW,
+        PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).map_err(|e| {
+            // An unknown PID surfaces as ERROR_INVALID_PARAMETER: the process
+            // is gone. Anything else (including ACCESS_DENIED) fails closed.
+            if (e.code().0 as u32) & 0xffff == 87 {
+                HandoffError::CallerExited { pid }
+            } else {
+                HandoffError::Io {
+                    detail: format!("open process {pid}: {e}"),
+                }
+            }
+        })?;
+        let result = (|| -> Result<LiveProcessIdentity, HandoffError> {
+            // A process that is terminating can open yet refuse its image or
+            // times; decide via its exit code whether it is already gone.
+            let gone = |error: windows::core::Error| -> HandoffError {
+                let mut code = 0u32;
+                let still_active = GetExitCodeProcess(handle, &mut code).is_ok()
+                    && code == STILL_ACTIVE.0 as u32;
+                if still_active {
+                    HandoffError::Io {
+                        detail: format!("process identity for {pid}: {error}"),
+                    }
+                } else {
+                    HandoffError::CallerExited { pid }
+                }
+            };
+            let mut created = FILETIME::default();
+            let mut exited = FILETIME::default();
+            let mut kernel = FILETIME::default();
+            let mut user = FILETIME::default();
+            GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user)
+                .map_err(gone)?;
+            let creation_filetime =
+                ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
+            let mut image = vec![0u16; 32768];
+            let mut len = image.len() as u32;
+            QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_WIN32,
+                windows::core::PWSTR(image.as_mut_ptr()),
+                &mut len,
+            )
+            .map_err(gone)?;
+            image.truncate(len as usize);
+            Ok(LiveProcessIdentity {
+                pid,
+                creation_filetime,
+                image_path: PathBuf::from(String::from_utf16_lossy(&image)),
+            })
+        })();
+        let _ = CloseHandle(handle);
+        result
+    }
+}
+
+/// Bind the live caller to the recorded `parentProcess` identity: exact PID,
+/// exact creation FILETIME (PID reuse produces a different creation time),
+/// exact canonical image, and the recorded image must be the installed main
+/// executable at the canonical install root. Two of the three identity facts
+/// alone are never sufficient.
+pub fn validate_caller_identity(
+    paths: &Paths,
+    expected: &ProcessIdentity,
+    live: &LiveProcessIdentity,
+) -> Result<(), HandoffError> {
+    if live.pid != expected.pid {
+        return Err(HandoffError::CallerIdentityMismatch {
+            detail: format!("live pid {} != recorded {}", live.pid, expected.pid),
+        });
+    }
+    let expected_created: u64 = expected.process_created_at.parse().map_err(|_| {
+        HandoffError::CallerIdentityMismatch {
+            detail: "recorded creation time is not numeric".to_string(),
+        }
+    })?;
+    if live.creation_filetime != expected_created {
+        return Err(HandoffError::CallerIdentityMismatch {
+            detail: format!(
+                "creation time {} != recorded {} (PID reuse or stale identity)",
+                live.creation_filetime, expected_created
+            ),
+        });
+    }
+    if !paths::equal(&live.image_path, &expected.image_path) {
+        return Err(HandoffError::CallerIdentityMismatch {
+            detail: format!(
+                "live image {:?} != recorded {:?}",
+                live.image_path, expected.image_path
+            ),
+        });
+    }
+    if !paths::equal(&expected.image_path, &paths.install().join(MAIN_EXE)) {
+        return Err(HandoffError::CallerIdentityMismatch {
+            detail: format!(
+                "recorded image {:?} is not the canonical installed main executable",
+                expected.image_path
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// The validated handoff outcome. Constructed only by
@@ -388,12 +535,96 @@ struct HelperJournal {
 /// [`derive_installed_source`] (the production CLI derives it; it is a
 /// parameter so tests can exercise the rebinding semantics deterministically
 /// without fabricating PE version resources).
+///
+/// This is the Phase 2C-B entry: [`HandoffStage::Initial`] with no live
+/// caller binding (the structural `parentProcess` checks only). The
+/// production entries are [`validate_initial`] (Initial + live caller) and
+/// [`validate_resume`] (Resume from the session runner / recovery
+/// continuation).
 pub fn validate_update_handoff(
     paths: &Paths,
     trust: &TrustStore,
     session_id_arg: &str,
     expected_manifest_sha256_arg: &str,
     installed_source: &Version,
+) -> Result<ValidatedHandoff, HandoffError> {
+    validate_with_source(
+        paths,
+        trust,
+        session_id_arg,
+        expected_manifest_sha256_arg,
+        HandoffStage::Initial,
+        Some(installed_source),
+        None,
+    )
+}
+
+/// The production Initial validation: independent installed-source derivation
+/// (provisional anchor plus committed-evidence chain), the production compiled
+/// trust store, and the live caller identity bound before anything mutates.
+pub fn validate_initial(
+    paths: &Paths,
+    trust: &TrustStore,
+    session_id_arg: &str,
+    expected_manifest_sha256_arg: &str,
+    live: &LiveProcessIdentity,
+) -> Result<ValidatedHandoff, HandoffError> {
+    let installed = derive_installed_source(paths, trust)?;
+    validate_initial_with_source(paths, trust, session_id_arg, expected_manifest_sha256_arg, &installed, live)
+}
+
+/// Initial validation with the installed source version already derived —
+/// the seam deterministic tests use, since sandbox fixtures carry no PE
+/// version resources. Semantics are identical to [`validate_initial`].
+pub fn validate_initial_with_source(
+    paths: &Paths,
+    trust: &TrustStore,
+    session_id_arg: &str,
+    expected_manifest_sha256_arg: &str,
+    installed_source: &Version,
+    live: &LiveProcessIdentity,
+) -> Result<ValidatedHandoff, HandoffError> {
+    validate_with_source(
+        paths,
+        trust,
+        session_id_arg,
+        expected_manifest_sha256_arg,
+        HandoffStage::Initial,
+        Some(installed_source),
+        Some(live),
+    )
+}
+
+/// The production Resume validation: executed by the session runner and the
+/// recovery continuation after the receipt became `Updating`. Everything is
+/// re-derived — signature over the persisted bytes, staged hashes, bindings —
+/// nothing is carried over from the Initial pass; the caller is expected to
+/// have exited and is deliberately not consulted.
+pub fn validate_resume(
+    paths: &Paths,
+    trust: &TrustStore,
+    session_id_arg: &str,
+    expected_manifest_sha256_arg: &str,
+) -> Result<ValidatedHandoff, HandoffError> {
+    validate_with_source(
+        paths,
+        trust,
+        session_id_arg,
+        expected_manifest_sha256_arg,
+        HandoffStage::Resume,
+        None,
+        None,
+    )
+}
+
+fn validate_with_source(
+    paths: &Paths,
+    trust: &TrustStore,
+    session_id_arg: &str,
+    expected_manifest_sha256_arg: &str,
+    stage: HandoffStage,
+    installed_source: Option<&Version>,
+    live: Option<&LiveProcessIdentity>,
 ) -> Result<ValidatedHandoff, HandoffError> {
     // A. resolve session — the CLI value is the only handle a caller names,
     // resolved strictly against the canonical sessions root.
@@ -441,7 +672,7 @@ pub fn validate_update_handoff(
             requested: "Update".to_string(),
         });
     }
-    if envelope.phase != SessionPhase::Staged {
+    if envelope.phase != SessionPhase::Staged && envelope.phase != SessionPhase::HandedOff {
         return Err(HandoffError::InvalidSessionState {
             detail: format!("phase {:?} is not a handoff-validation phase", envelope.phase),
         });
@@ -451,20 +682,76 @@ pub fn validate_update_handoff(
             detail: "generation must be monotonically increasing from 1".to_string(),
         });
     }
-    // Phase-gated fields: everything belonging to later phases must be
-    // absent before validation (frozen: acceptedHealth/commitIntent absent
-    // before validation; the rest cannot exist before their phase).
-    if envelope.probation_process.is_some()
-        || envelope.health_nonce.is_some()
-        || envelope.previous_receipt.is_some()
-        || envelope.previous_integration.is_some()
-        || envelope.accepted_health.is_some()
-        || envelope.commit_intent.is_some()
-        || envelope.last_error.is_some()
-    {
-        return Err(HandoffError::InvalidSessionState {
-            detail: "phase-gated fields are present before their phase".to_string(),
-        });
+    // Stage-specific state rules. The frozen envelope shape never changes;
+    // what differs is which fields belong to the phase this invocation is
+    // entering, and both entries refuse everything that has not frozen yet.
+    let resource_facts_present = envelope.resources.iter().any(|resource| {
+        resource.intent.is_some()
+            || resource.completed.is_some()
+            || resource.old_sha256.is_some()
+            || resource.old_size.is_some()
+    });
+    match (stage, envelope.phase) {
+        (HandoffStage::Initial, SessionPhase::Staged) => {
+            // Phase-gated fields: everything belonging to later phases must
+            // be absent before validation (frozen: acceptedHealth/commitIntent
+            // absent before validation; the rest cannot exist before their
+            // phase).
+            if envelope.probation_process.is_some()
+                || envelope.health_nonce.is_some()
+                || envelope.previous_receipt.is_some()
+                || envelope.previous_integration.is_some()
+                || envelope.accepted_health.is_some()
+                || envelope.commit_intent.is_some()
+                || envelope.last_error.is_some()
+            {
+                return Err(HandoffError::InvalidSessionState {
+                    detail: "phase-gated fields are present before their phase".to_string(),
+                });
+            }
+        }
+        (HandoffStage::Initial, SessionPhase::HandedOff) => {
+            // Crash between the journaled handoff intent and the receipt
+            // transition: the intent is durable, authority was never
+            // transferred (the receipt is still `Installed` — gated below),
+            // and zero mutation may have happened.
+            if envelope.previous_receipt.is_none() || envelope.previous_integration.is_none() {
+                return Err(HandoffError::InvalidSessionState {
+                    detail: "handoff intent is missing its previous-state snapshots".to_string(),
+                });
+            }
+            if resource_facts_present
+                || envelope.probation_process.is_some()
+                || envelope.health_nonce.is_some()
+                || envelope.accepted_health.is_some()
+                || envelope.commit_intent.is_some()
+                || envelope.last_error.is_some()
+            {
+                return Err(HandoffError::InvalidSessionState {
+                    detail: "handoff intent carries mutation facts without the Updating receipt"
+                        .to_string(),
+                });
+            }
+        }
+        (HandoffStage::Resume, SessionPhase::HandedOff) => {
+            // The apply is in progress or was interrupted: resource intent,
+            // old facts, completion and the probation record are its journal
+            // and may be present in any combination. Fields of phases that
+            // have not frozen yet stay rejected.
+            if envelope.health_nonce.is_some()
+                || envelope.accepted_health.is_some()
+                || envelope.commit_intent.is_some()
+            {
+                return Err(HandoffError::InvalidSessionState {
+                    detail: "probation/commit fields are present before their phase".to_string(),
+                });
+            }
+        }
+        _ => {
+            return Err(HandoffError::InvalidSessionState {
+                detail: format!("phase {:?} is not a handoff-validation phase", envelope.phase),
+            })
+        }
     }
 
     // Process identity: PID alone is insufficient — creation time and the
@@ -492,6 +779,24 @@ pub fn validate_update_handoff(
         return Err(HandoffError::InvalidSessionState {
             detail: "parent process image is not the canonical main executable".to_string(),
         });
+    }
+    // Live caller identity binding (Initial): the caller must still exist and
+    // match the recorded identity exactly — PID + creation FILETIME + image —
+    // and the recorded image must be the installed main executable at the
+    // canonical install root. A caller that already exited can never be
+    // bound: fail closed.
+    if stage == HandoffStage::Initial
+        && !paths::equal(&parent.image_path, &paths.install().join(MAIN_EXE))
+    {
+        return Err(HandoffError::CallerIdentityMismatch {
+            detail: format!(
+                "recorded caller image {:?} is not the canonical installed main executable",
+                parent.image_path
+            ),
+        });
+    }
+    if let Some(live) = live {
+        validate_caller_identity(paths, parent, live)?;
     }
 
     // L. install root / staging root snapshots validated against derived
@@ -536,21 +841,78 @@ pub fn validate_update_handoff(
         });
     }
 
-    // D. source version rebinding: the session's frozen source baseline must
-    // still be the actual installed source version.
-    let current = installed_source.to_string();
-    if receipt.current_version.as_deref() != Some(current.as_str()) {
-        return Err(HandoffError::SourceVersionChanged {
-            recorded: receipt.current_version.clone().unwrap_or_default(),
-            current: current.clone(),
-        });
-    }
-    if envelope.from_version != current {
-        return Err(HandoffError::SourceVersionChanged {
-            recorded: envelope.from_version.clone(),
-            current: current.clone(),
-        });
-    }
+    // Stage gates on the durable lifecycle state: the authority boundary
+    // between the two legal handoff moments. The journal leads and the
+    // receipt follows, so Initial requires `Installed` (no authority
+    // transferred) and Resume requires `Updating` + this exact session.
+    let current: String = match stage {
+        HandoffStage::Initial => {
+            if receipt.lifecycle_state != Lifecycle::Installed {
+                return Err(HandoffError::LifecycleBusy {
+                    detail: format!("receipt lifecycle is {:?}", receipt.lifecycle_state),
+                });
+            }
+            if receipt.maintenance.active_session_id.is_some() {
+                return Err(HandoffError::InstallationInvalid {
+                    detail: "receipt already carries an active session".to_string(),
+                });
+            }
+            // D. source version rebinding: the session's frozen source
+            // baseline must still be the actual installed source version
+            // (derived by the caller from the receipt, the PE image and any
+            // committed signed evidence).
+            let source = installed_source.ok_or_else(|| HandoffError::InstallationInvalid {
+                detail: "initial validation requires the derived installed source version"
+                    .to_string(),
+            })?;
+            let source = source.to_string();
+            if receipt.current_version.as_deref() != Some(source.as_str()) {
+                return Err(HandoffError::SourceVersionChanged {
+                    recorded: receipt.current_version.clone().unwrap_or_default(),
+                    current: source.clone(),
+                });
+            }
+            if envelope.from_version != source {
+                return Err(HandoffError::SourceVersionChanged {
+                    recorded: envelope.from_version.clone(),
+                    current: source.clone(),
+                });
+            }
+            source
+        }
+        HandoffStage::Resume => {
+            if receipt.lifecycle_state != Lifecycle::Updating {
+                return Err(HandoffError::LifecycleBusy {
+                    detail: format!(
+                        "resume requires the Updating receipt, found {:?}",
+                        receipt.lifecycle_state
+                    ),
+                });
+            }
+            if receipt.maintenance.active_session_id.as_deref() != Some(session_id_arg) {
+                return Err(HandoffError::InstallationInvalid {
+                    detail: "receipt Updating does not bind this session".to_string(),
+                });
+            }
+            // The compatibility anchor on resume is the receipt's committed
+            // version (`currentVersion` stays the last committed runtime
+            // until commit). The PE image is deliberately not compared: the
+            // installed main executable may already be replaced mid-apply.
+            let committed = receipt
+                .current_version
+                .clone()
+                .ok_or(HandoffError::InstallationInvalid {
+                    detail: "receipt carries no current version".to_string(),
+                })?;
+            if envelope.from_version != committed {
+                return Err(HandoffError::SourceVersionChanged {
+                    recorded: envelope.from_version.clone(),
+                    current: committed.clone(),
+                });
+            }
+            committed
+        }
+    };
 
     // E. the CLI digest binds the session.
     if expected_manifest_sha256_arg != envelope.manifest_sha256 {

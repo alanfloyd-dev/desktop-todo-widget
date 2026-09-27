@@ -1,5 +1,5 @@
 #![windows_subsystem = "windows"]
-use desktop_todo_maintenance::{elevation, handoff, lifecycle, native, paths::Paths, Error, ErrorKind, Result};
+use desktop_todo_maintenance::{apply, elevation, lifecycle, native, paths::Paths, Error, ErrorKind, Result};
 fn run() -> Result<()> {
     // Per-user product: an elevated helper targets the wrong profile/HKCU
     // under over-the-shoulder elevation and needs elevation for nothing.
@@ -37,18 +37,28 @@ fn run() -> Result<()> {
         }
         [mode] if mode == "--install" => install(&paths, true),
         [mode, flag] if mode == "--install" && flag == "--no-start-menu-shortcut" => install(&paths, false),
-        // The frozen update handoff (Phase 2C-B): strict frozen argument
+        // The frozen update transaction (Phase 2D-A): strict frozen argument
         // form only — `--update --session-id <UUID> --expected-manifest-sha256
-        // <64 hex>`. The helper independently re-verifies the persisted
-        // signed bytes and every local binding and STOPS at
-        // "validated and ready to mutate"; no file is replaced, no lifecycle
-        // transition is written.
+        // <64 hex>`. The installed helper binds the live caller, validates
+        // everything independently, journals the handoff intent, transitions
+        // the receipt to `Updating`, then delegates to a verified session
+        // runner which performs the backup/replace transaction and stops
+        // exactly before HealthAck acceptance.
         [mode, flag1, session_id, flag2, digest]
             if mode == "--update"
                 && flag1 == "--session-id"
                 && flag2 == "--expected-manifest-sha256" =>
         {
-            handoff::run_update_handoff(&paths, session_id, digest)?;
+            apply::update_entry(&paths, session_id, digest)?;
+            Ok(())
+        }
+        // The frozen recovery entrypoint (read-only in this phase): classify
+        // the interrupted transaction from the receipt, the durable journal
+        // and the actual files, and report. No resume, rollback or cleanup
+        // happens here.
+        [mode, flag, session_id] if mode == "--recover" && flag == "--session-id" => {
+            let report = apply::recover_report(&paths, session_id)?;
+            native::message(&report, false);
             Ok(())
         }
         #[cfg(feature = "qa")]
@@ -57,7 +67,7 @@ fn run() -> Result<()> {
             let _gate = desktop_todo_maintenance::lock::Gate::acquire(&paths)?;
             lifecycle::uninstall_locked(&paths, data)?; Ok(())
         }
-        _ => Err(Error::new(ErrorKind::InvalidInstallation, "Supported modes: --install [--no-start-menu-shortcut], --uninstall, --update --session-id <UUID> --expected-manifest-sha256 <64 hex>.")),
+        _ => Err(Error::new(ErrorKind::InvalidInstallation, "Supported modes: --install [--no-start-menu-shortcut], --uninstall, --update --session-id <UUID> --expected-manifest-sha256 <64 hex>, --recover --session-id <UUID>.")),
     }
 }
 

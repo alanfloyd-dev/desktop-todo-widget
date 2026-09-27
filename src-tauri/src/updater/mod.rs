@@ -17,6 +17,7 @@ pub(crate) mod acquisition;
 pub(crate) mod http_fetch;
 pub(crate) mod providers;
 pub(crate) mod session;
+pub(crate) mod spawn;
 #[cfg(test)]
 mod tests;
 

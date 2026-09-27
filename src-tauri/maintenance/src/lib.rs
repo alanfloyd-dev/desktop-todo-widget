@@ -1,4 +1,5 @@
 //! Local, offline lifecycle operations. No Tauri, network, or SQLite dependency.
+pub mod apply;
 pub mod integration;
 pub mod elevation;
 pub mod handoff;
@@ -43,6 +44,10 @@ pub enum ErrorKind {
     /// independent verification. The structured taxonomy lives in
     /// [`update_session`] / [`handoff`]; this kind only routes the refusal.
     UpdateHandoffRejected,
+    /// The Phase 2D runtime mutation transaction failed or refused. The
+    /// structured taxonomy lives in [`apply::MutationError`]; this kind only
+    /// routes the failure.
+    UpdateApplyFailed,
 }
 
 #[derive(Debug)]
