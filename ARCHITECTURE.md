@@ -37,9 +37,16 @@ Maintenance subsystem (v1.2 Phase 1 — implemented)
                             helper only revalidates at handoff); frozen
                             UpdateSession closed parsing/publication; helper
                             --update handoff verification producing the
-                            ValidatedHandoff boundary; QA feature is
-                            compile-time gated and absent from production
-                            binaries
+                            ValidatedHandoff boundary; runtime mutation
+                            transaction (c8e7c03): live caller identity,
+                            Gate/exclusive lease, Updating transition,
+                            intent-before-side-effect backup/replace journal,
+                            runner-based helper self-replacement, crash
+                            reconciliation, read-only recovery classification —
+                            ending at ReplacedAwaitingLaunch (installed
+                            runtime mutated, update success not declared);
+                            QA feature is compile-time gated and absent from
+                            production binaries
   update-core/              pure signed-update protocol core shared by product and
                             helper (no Tauri/network/SQLite/Win32): envelope/
                             trust-store/canonical signature verification, manifest
@@ -50,10 +57,14 @@ Maintenance subsystem (v1.2 Phase 1 — implemented)
                             eace586) plus the durable trusted-target record,
                             bounded package acquisition and session-bound
                             staging of the two managed EXEs through the shared
-                            ZIP primitive (c8a37ab), and frozen UpdateSession
+                            ZIP primitive (c8a37ab), frozen UpdateSession
                             publication + frozen handoff command construction
-                            for the canonical helper (27dbd55); crate-private
-                            until production wiring (no helper spawn yet); disk-
+                            for the canonical helper (27dbd55), and the
+                            production spawn boundary — canonical helper,
+                            exact frozen argv — with the durable-handoff wait
+                            the caller observes before its canonical shutdown
+                            (c8e7c03); the install_ready_update IPC command
+                            and the shutdown call remain unwired; disk-
                             recovered trusted state is re-authenticated
                             through the shared core on every recovery, never
                             trusted because it was once persisted; the
@@ -125,7 +136,7 @@ Public issue diagnostics use an explicit allowlist. They include runtime/window/
 
 ## Scope boundary
 
-The v1.2.0 [Application Lifecycle & Maintenance Architecture](docs/application-lifecycle.md) defines install, update, recovery, receipts, Windows integration, and uninstall. Its Phase 1 subset — manual bootstrap with v1.1 adoption, the installation receipt, launch admission, Windows integration, and native uninstall with keep/remove local-data semantics — is implemented and verified; the Phase 2 signed updater is partly implemented: the verification core (canonical signed bytes, signature envelope, trust store, version selection — implemented in `df75c83` as the shared pure `update-core` crate), the main-side provider discovery layer (bounded GitHub/Gitee/Auto enumeration and metadata fetch — implemented in `eace586`), the durable trusted-target/package-staging half (implemented in `c8a37ab` — persisted state is re-authenticated on every recovery), and the frozen `UpdateSession` envelope plus the authenticated helper handoff (implemented in `27dbd55` — the helper parses only the frozen `--update --session-id <UUID> --expected-manifest-sha256 <64 hex>` CLI, independently re-verifies the session, the persisted signed bytes, and every staged fact through the shared core and shared ZIP primitive, and produces a `ValidatedHandoff`, the typed capability a future mutation API will require; nothing is spawned and no runtime file is mutated yet) exist, while the production helper-spawn/live caller-identity wiring, the install transaction, `Updating`, HealthAck, and rollback remain frozen protocol design awaiting implementation ([protocol v1 contract](docs/maintenance-protocol-v1.md)). The maintenance architecture preserves the Standard-only rendering architecture and the frozen native boundary.
+The v1.2.0 [Application Lifecycle & Maintenance Architecture](docs/application-lifecycle.md) defines install, update, recovery, receipts, Windows integration, and uninstall. Its Phase 1 subset — manual bootstrap with v1.1 adoption, the installation receipt, launch admission, Windows integration, and native uninstall with keep/remove local-data semantics — is implemented and verified; the Phase 2 signed updater is partly implemented: the verification core (canonical signed bytes, signature envelope, trust store, version selection — implemented in `df75c83` as the shared pure `update-core` crate), the main-side provider discovery layer (bounded GitHub/Gitee/Auto enumeration and metadata fetch — implemented in `eace586`), the durable trusted-target/package-staging half (implemented in `c8a37ab` — persisted state is re-authenticated on every recovery), and the frozen `UpdateSession` envelope plus the authenticated helper handoff (implemented in `27dbd55` — the helper parses only the frozen `--update --session-id <UUID> --expected-manifest-sha256 <64 hex>` CLI, independently re-verifies the session, the persisted signed bytes, and every staged fact through the shared core and shared ZIP primitive, and produces a `ValidatedHandoff`, the typed capability every mutation API requires) exist, and the runtime mutation transaction is implemented through `ReplacedAwaitingLaunch` in `c8e7c03`: the main updater owns the authenticated spawn boundary for the canonical installed helper (exact frozen argv, plus the durable-handoff wait before any canonical shutdown — the IPC command and shutdown call are still unwired), and the helper owns live caller-identity binding (PID + creation FILETIME + canonical image), the Gate/exclusive lease, the durable `Updating` transition, the intent-before-side-effect backup/replace journal over exactly the two managed executables, runner-based helper self-replacement, crash reconciliation (a landed replacement with a missing completion journal is reconciled by preserving the verified OLD backup and recording only the completion — never rebuilding the rollback asset from the target), and read-only recovery classification. Phase 2D-A may mutate the installed runtime, but does not yet declare update success: its terminal state is `ReplacedAwaitingLaunch`, `currentVersion` and the registry `DisplayVersion` stay at the source version, and the probation launch, nonce, `PostUpdateProbation` admission, HealthAck, commit, rollback, and cleanup remain frozen protocol design awaiting implementation ([protocol v1 contract](docs/maintenance-protocol-v1.md)). The maintenance architecture preserves the Standard-only rendering architecture and the frozen native boundary.
 
 v1 stops at factual local Review and Reports. Charts, evaluative trends, AI summaries, hourly/multi-day weather products, downloadable themes, autostart, complex tray behavior, auto-hide, notifications, calendar integration, and sync remain later work. [FUTURE.md](FUTURE.md) tracks the deferred list.
 
