@@ -38,12 +38,18 @@ Maintenance subsystem (v1.2 Phase 1 — implemented)
                             trust-store/canonical signature verification, manifest
                             parsing, candidate policy (Phase 2B verification core,
                             implemented in df75c83)
-  src/updater/ (main crate) provider/network/discovery transport layer: GitHub/
-                            Gitee/Auto bounded enumeration and bounded metadata
-                            fetch feeding the shared core (implemented in
-                            eace586; crate-private until Phase 2C wiring);
-                            the maintenance helper keeps no network or
-                            provider responsibility
+  src/updater/ (main crate) provider/network/discovery transport (GitHub/Gitee/
+                            Auto bounded enumeration and metadata fetch,
+                            eace586) plus the durable trusted-target record,
+                            bounded package acquisition, ZIP validation and
+                            the exact 9-root-file allowlist, and session-bound
+                            staging of the two managed EXEs (c8a37ab);
+                            crate-private until production wiring; disk-
+                            recovered trusted state is re-authenticated
+                            through the shared core on every recovery, never
+                            trusted because it was once persisted; the
+                            maintenance helper keeps no network, provider,
+                            download, or staging responsibility
 ```
 
 ## Product and native separation
@@ -110,7 +116,7 @@ Public issue diagnostics use an explicit allowlist. They include runtime/window/
 
 ## Scope boundary
 
-The v1.2.0 [Application Lifecycle & Maintenance Architecture](docs/application-lifecycle.md) defines install, update, recovery, receipts, Windows integration, and uninstall. Its Phase 1 subset — manual bootstrap with v1.1 adoption, the installation receipt, launch admission, Windows integration, and native uninstall with keep/remove local-data semantics — is implemented and verified; the Phase 2 signed updater is only partly implemented: the verification core (canonical signed bytes, signature envelope, trust store, version selection — implemented in `df75c83` as the shared pure `update-core` crate) and the main-side provider discovery layer (bounded GitHub/Gitee/Auto enumeration and metadata fetch — implemented in `eace586`) exist, while package download/staging, UpdateSession, HealthAck, and rollback remain frozen protocol design awaiting implementation ([protocol v1 contract](docs/maintenance-protocol-v1.md)). The maintenance architecture preserves the Standard-only rendering architecture and the frozen native boundary.
+The v1.2.0 [Application Lifecycle & Maintenance Architecture](docs/application-lifecycle.md) defines install, update, recovery, receipts, Windows integration, and uninstall. Its Phase 1 subset — manual bootstrap with v1.1 adoption, the installation receipt, launch admission, Windows integration, and native uninstall with keep/remove local-data semantics — is implemented and verified; the Phase 2 signed updater is only partly implemented: the verification core (canonical signed bytes, signature envelope, trust store, version selection — implemented in `df75c83` as the shared pure `update-core` crate), the main-side provider discovery layer (bounded GitHub/Gitee/Auto enumeration and metadata fetch — implemented in `eace586`), and the durable trusted-target/package-staging half (implemented in `c8a37ab` — persisted state is re-authenticated on every recovery) exist, while the helper handoff, `UpdateSession`, the install transaction, HealthAck, and rollback remain frozen protocol design awaiting implementation ([protocol v1 contract](docs/maintenance-protocol-v1.md)). The maintenance architecture preserves the Standard-only rendering architecture and the frozen native boundary.
 
 v1 stops at factual local Review and Reports. Charts, evaluative trends, AI summaries, hourly/multi-day weather products, downloadable themes, autostart, complex tray behavior, auto-hide, notifications, calendar integration, and sync remain later work. [FUTURE.md](FUTURE.md) tracks the deferred list.
 
