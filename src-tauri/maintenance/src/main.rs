@@ -1,5 +1,5 @@
 #![windows_subsystem = "windows"]
-use desktop_todo_maintenance::{elevation, lifecycle, native, paths::Paths, Error, ErrorKind, Result};
+use desktop_todo_maintenance::{elevation, handoff, lifecycle, native, paths::Paths, Error, ErrorKind, Result};
 fn run() -> Result<()> {
     // Per-user product: an elevated helper targets the wrong profile/HKCU
     // under over-the-shoulder elevation and needs elevation for nothing.
@@ -37,13 +37,27 @@ fn run() -> Result<()> {
         }
         [mode] if mode == "--install" => install(&paths, true),
         [mode, flag] if mode == "--install" && flag == "--no-start-menu-shortcut" => install(&paths, false),
+        // The frozen update handoff (Phase 2C-B): strict frozen argument
+        // form only — `--update --session-id <UUID> --expected-manifest-sha256
+        // <64 hex>`. The helper independently re-verifies the persisted
+        // signed bytes and every local binding and STOPS at
+        // "validated and ready to mutate"; no file is replaced, no lifecycle
+        // transition is written.
+        [mode, flag1, session_id, flag2, digest]
+            if mode == "--update"
+                && flag1 == "--session-id"
+                && flag2 == "--expected-manifest-sha256" =>
+        {
+            handoff::run_update_handoff(&paths, session_id, digest)?;
+            Ok(())
+        }
         #[cfg(feature = "qa")]
         [mode, choice] if mode == "--qa-uninstall" && std::env::var("DTW_MAINTENANCE_QA_ID").is_ok() => {
             let data = match choice.as_str() { "keep" => lifecycle::DataMode::KeepUserData, "remove" => lifecycle::DataMode::RemoveUserData, _ => return Err(Error::new(ErrorKind::InvalidInstallation, "QA data choice must be keep/remove")) };
             let _gate = desktop_todo_maintenance::lock::Gate::acquire(&paths)?;
             lifecycle::uninstall_locked(&paths, data)?; Ok(())
         }
-        _ => Err(Error::new(ErrorKind::InvalidInstallation, "Supported modes: --install [--no-start-menu-shortcut], --uninstall. Updates are not implemented.")),
+        _ => Err(Error::new(ErrorKind::InvalidInstallation, "Supported modes: --install [--no-start-menu-shortcut], --uninstall, --update --session-id <UUID> --expected-manifest-sha256 <64 hex>.")),
     }
 }
 

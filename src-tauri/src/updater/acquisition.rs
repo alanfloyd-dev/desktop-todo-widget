@@ -265,7 +265,7 @@ pub enum AcquisitionError {
     BodyTooLarge { cap: u64 },
     SizeMismatch { declared: u64, actual: u64 },
     PackageHashMismatch { expected: String, actual: String },
-    Archive(crate::updater::package_zip::ArchiveError),
+    Archive(desktop_todo_maintenance::package_zip::ArchiveError),
     StateConflict { detail: String },
 }
 
@@ -634,7 +634,7 @@ pub fn acquire_and_stage(
             // Restart (scenario E): staged files must still verify.
             let staged_dir = session.dir.join(STAGED_DIR);
             let expectations = session.record.install_file_expectations();
-            crate::updater::package_zip::verify_staged_executables(&staged_dir, &expectations)
+            desktop_todo_maintenance::package_zip::verify_staged_executables(&staged_dir, &expectations)
                 .map_err(AcquisitionError::Archive)?;
             return Ok(());
         }
@@ -793,7 +793,7 @@ pub fn acquire_and_stage(
         })
     })?;
     let archive =
-        crate::updater::package_zip::validate_archive(std::io::Cursor::new(package_bytes))
+        desktop_todo_maintenance::package_zip::validate_archive(std::io::Cursor::new(package_bytes))
             .map_err(AcquisitionError::Archive)?;
     let expectations = session
         .target
@@ -812,7 +812,7 @@ pub fn acquire_and_stage(
         .collect::<Vec<_>>();
     let staged_dir = session.dir.join(STAGED_DIR);
     assert_no_reparse(&staged_dir).map_err(AcquisitionError::Persist)?;
-    crate::updater::package_zip::extract_managed_executables(archive, &staged_dir, &expectations)
+    desktop_todo_maintenance::package_zip::extract_managed_executables(archive, &staged_dir, &expectations)
         .map_err(AcquisitionError::Archive)?;
 
     // Atomically advance the typed state to PackageStaged. The marker write

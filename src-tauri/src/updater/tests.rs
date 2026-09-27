@@ -1245,7 +1245,7 @@ use crate::updater::acquisition::{
     acquire_and_stage, persist_trusted_target, recover_session, AcquisitionError, MilestoneState,
     ENVELOPE_FILE, MANIFEST_FILE, PACKAGE_DOWNLOADING_FILE, PACKAGE_FILE, RECORD_FILE, STAGED_DIR,
 };
-use crate::updater::package_zip::ArchiveError;
+use desktop_todo_maintenance::package_zip::ArchiveError;
 use std::path::PathBuf;
 
 /// Deterministic managed-executable payloads (synthetic bytes, never real

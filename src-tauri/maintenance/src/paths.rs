@@ -168,6 +168,15 @@ fn safe_syntax(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Validates a path string against the compiled Windows syntax policy
+/// (absolute local drive, no traversal/ADS/reserved/trailing-alias forms)
+/// without requiring the path to exist. Session snapshots and process-image
+/// identities are validated with this before they are compared against
+/// independently derived locations.
+pub fn validate_path_syntax(path: &Path) -> Result<()> {
+    safe_syntax(path)
+}
+
 /// Pins existing ancestors against rename/delete while a path operation executes.
 /// OPEN_REPARSE_POINT + handle inspection avoids following a swapped junction.
 pub fn pin_parents(path: &Path) -> Result<Vec<File>> {

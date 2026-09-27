@@ -15,8 +15,8 @@
 
 pub(crate) mod acquisition;
 pub(crate) mod http_fetch;
-pub(crate) mod package_zip;
 pub(crate) mod providers;
+pub(crate) mod session;
 #[cfg(test)]
 mod tests;
 

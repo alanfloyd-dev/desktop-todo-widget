@@ -1,5 +1,6 @@
 //! ZIP structural validation and allowlist-bounded staging extraction
-//! (Phase 2C-A).
+//! (Phase 2C-A; moved into the shared maintenance core in Phase 2C-B so the
+//! helper re-validates the package through the same single implementation).
 //!
 //! Frozen rules (protocol v1, "UpdateManifest" package section): the archive
 //! entry set must equal the compiled protocol package allowlist exactly —
@@ -415,7 +416,7 @@ pub fn extract_managed_executables<R: std::io::Read + std::io::Seek>(
         }
 
         // Publish the verified file atomically over any prior bytes.
-        desktop_todo_maintenance::paths::move_replace(&temp, &destination).map_err(|e| {
+        crate::paths::move_replace(&temp, &destination).map_err(|e| {
             ArchiveError::Io {
                 detail: e.to_string(),
             }

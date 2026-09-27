@@ -1,13 +1,16 @@
 //! Local, offline lifecycle operations. No Tauri, network, or SQLite dependency.
 pub mod integration;
 pub mod elevation;
+pub mod handoff;
 pub mod lifecycle;
 pub mod lock;
 pub mod native;
+pub mod package_zip;
 pub mod paths;
 pub mod receipt;
 pub mod resources;
 mod security;
+pub mod update_session;
 pub mod updater;
 pub mod version;
 pub const PRODUCT_VERSION: &str = env!("DTW_PRODUCT_VERSION");
@@ -36,6 +39,10 @@ pub enum ErrorKind {
     PartialUninstall,
     ElevatedExecution,
     Io,
+    /// The frozen `--update` helper handoff was refused by the helper's own
+    /// independent verification. The structured taxonomy lives in
+    /// [`update_session`] / [`handoff`]; this kind only routes the refusal.
+    UpdateHandoffRejected,
 }
 
 #[derive(Debug)]

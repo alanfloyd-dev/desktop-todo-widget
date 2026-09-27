@@ -64,16 +64,16 @@ desktop-todo-update-core = { path = "update-core" }
 # Package acquisition (Phase 2C): streaming SHA-256 of downloaded package
 # bytes against the signed manifest digest.
 sha2 = "0.10"
-# ZIP structural validation and allowlist-bounded staging extraction.
-# Minimal feature set: Stored + Deflate only — no crypto/legacy codecs, no
-# time-based features. Extraction never trusts archive metadata; every
-# entry is validated against the frozen path/allowlist rules first.
-zip = { version = "2", default-features = false, features = ["deflate"] }# This is the Standard product's whole Win32 surface: the widget-frame
+# ZIP structural validation and allowlist-bounded staging extraction now
+# lives in the shared maintenance core (single implementation used by the
+# main app and the helper); only the test ZIP fixtures need the crate here.
+# This is the Standard product's whole Win32 surface: the widget-frame
 # subclassing and window styles plus the WebView2 telemetry in qa_diagnostics.
 # `Win32_UI_Shell` is declared explicitly instead of relying on feature
 # unification from other crates in the dependency graph.
 windows = { version = "0.61.3", features = [
     "Win32_Foundation",
+    "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
@@ -90,6 +90,9 @@ desktop-todo-maintenance = { path = "maintenance", features = ["qa"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
 # Test-only envelope construction for the same fixtures.
 base64 = "0.22"
+# Test-only ZIP fixtures for the package allowlist/staging matrix (the
+# production ZIP validation lives in the maintenance core).
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [profile.dev]
 incremental = true

@@ -30,6 +30,20 @@ winreg = "0.55"
 # and manifest itself through this shared implementation (never on a main
 # app's claim). No Tauri, network, SQLite or Win32 dependency of its own.
 desktop-todo-update-core = { path = "../update-core" }
+# Package archive validation (moved here in Phase 2C-B so the helper
+# re-validates the staged package through the single shared implementation).
+# No network, Tauri or SQLite dependency is introduced.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Fixture-only signing/encoding for handoff tests. These crates are already
+# linked into every binary through desktop-todo-update-core (same versions,
+# zero new crates in the graph); no production code path in this crate uses
+# them, and the helper gains no network capability. Declared as regular
+# dependencies because dev-dependencies of a non-workspace-member path
+# dependency cannot be resolved through the canonical parent-manifest test
+# entry (`cargo test -p desktop-todo-maintenance --manifest-path
+# src-tauri/Cargo.toml`).
+ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
+base64 = { version = "0.22", default-features = false, features = ["std"] }
 windows = { version = "0.61.3", features = [
   "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization",
   "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Threading",

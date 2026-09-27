@@ -646,8 +646,10 @@ dependencies = [
 name = "desktop-todo-maintenance"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "desktop-todo-update-core",
+ "ed25519-dalek",
  "serde",
  "serde_json",
  "sha2",
@@ -655,6 +657,7 @@ dependencies = [
  "uuid",
  "windows",
  "winreg",
+ "zip",
 ]
 
 [[package]]
