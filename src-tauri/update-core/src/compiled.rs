@@ -51,16 +51,35 @@ pub fn identity_filename(identity: InstallIdentity) -> &'static str {
 
 /// The production compiled trust store.
 ///
-/// **Release-signing provisioning gate:** this store is intentionally empty
-/// until the publisher provisions the real v1.2 Ed25519 public key(s) during
-/// release preparation — no test key may ever be compiled here, and no
-/// placeholder key is fabricated. With an empty store every candidate is
-/// untrusted and every update fails closed, which is the correct behavior
-/// for a client that cannot authenticate anyone yet. Populating this store
-/// (as raw public keys, never private material) is a reviewed release gate
-/// alongside the pinned repository addresses and signing credentials.
+/// **Release-signing provisioning gate:** the store is built exclusively
+/// from the committed public-key table (`production_keys::PRODUCTION_KEYS`)
+/// — raw public keys only, never private material, never runtime input,
+/// never a test key. The table
+/// is currently empty (no real production key has been through the key
+/// ceremony), so with an empty store every candidate is untrusted and every
+/// update fails closed, which is the correct behavior for a client that
+/// cannot authenticate anyone yet. Provisioning is deterministic and
+/// reviewed (`docs/release-signing.md`); a table defect fails closed — a
+/// duplicate id or invalid material aborts the construction rather than
+/// ever trusting an unvalidated entry, and the consistency tests gate it at
+/// build time.
 pub fn production_trust_store() -> TrustStore {
-    TrustStore::empty()
+    let keys = crate::production_keys::PRODUCTION_KEYS;
+    if keys.is_empty() {
+        return TrustStore::empty();
+    }
+    crate::production_keys::store_from(keys)
+        .expect("provisioned production trust store failed validation")
+}
+
+/// The production key ids as compiled into both binaries (diagnostics and
+/// main/helper parity tests only — never a source of runtime key import).
+pub fn production_key_ids() -> Vec<String> {
+    production_trust_store()
+        .entries()
+        .iter()
+        .map(|entry| entry.key_id().to_string())
+        .collect()
 }
 
 #[cfg(test)]

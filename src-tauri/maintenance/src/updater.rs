@@ -50,6 +50,31 @@ mod tests {
     /// mock. (The TEST-ONLY key is never a production trust root; the
     /// production store stays empty until the release-signing provisioning
     /// gate.)
+    /// Main/helper trust parity (Phase 3A): the helper's runtime trust
+    /// store is the shared compiled production store — there is no local
+    /// override anywhere in this crate. The store it observes must equal
+    /// the shared crate's own view of the provisioned keys, entry for
+    /// entry; today both are empty (fail-closed until provisioning), and
+    /// after provisioning both sides must observe exactly the same key ids.
+    #[test]
+    fn helper_trust_store_is_the_shared_compiled_production_store() {
+        let store = desktop_todo_update_core::production_trust_store();
+        let store_ids: Vec<String> = store
+            .entries()
+            .iter()
+            .map(|entry| entry.key_id().to_string())
+            .collect();
+        assert_eq!(store_ids, desktop_todo_update_core::production_key_ids());
+        // Same answer on repeated construction: compiled data, not
+        // per-process state.
+        let again = desktop_todo_update_core::production_trust_store();
+        assert_eq!(store.len(), again.len());
+        for (entry, other) in store.entries().iter().zip(again.entries()) {
+            assert_eq!(entry.key_id(), other.key_id());
+            assert_eq!(entry.raw_public_key(), other.raw_public_key());
+        }
+    }
+
     #[test]
     fn helper_verifies_golden_bytes_independently() {
         let manifest = golden("manifest-A.json");

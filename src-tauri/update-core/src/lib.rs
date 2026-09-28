@@ -23,6 +23,10 @@ pub mod envelope;
 pub mod error;
 pub mod json;
 pub mod manifest;
+// Compiled production-key table: deliberately crate-private. Only public
+// key material may enter it, and only through a reviewed provisioning diff;
+// external code never needs (and can never get) write-side access.
+pub(crate) mod production_keys;
 pub mod rfc3339;
 pub mod trust;
 pub mod verify;
@@ -33,15 +37,16 @@ pub use candidate::{
     IneligibilityReason, RollbackCompatibility, SelectionContext,
 };
 pub use compiled::{
-    identity_filename, production_trust_store, APP_ID, CLIENT_PLATFORM, ENVELOPE_MAX_BYTES,
-    EXPANDED_MAX_BYTES, HELPER_EXECUTABLE_FILENAME, MAIN_EXECUTABLE_FILENAME,
+    identity_filename, production_key_ids, production_trust_store, APP_ID, CLIENT_PLATFORM,
+    ENVELOPE_MAX_BYTES, EXPANDED_MAX_BYTES, HELPER_EXECUTABLE_FILENAME, MAIN_EXECUTABLE_FILENAME,
     MANAGED_FILE_MAX_BYTES, MANIFEST_MAX_BYTES, PACKAGE_MAX_BYTES, SUPPORTED_CHANNEL,
     SUPPORTED_SCHEMA_VERSION, SUPPORTED_UPDATER_PROTOCOL,
 };
 pub use envelope::{EnvelopeAuth, SignedEnvelopeV1};
 pub use error::{ErrorKind, ProtocolError, SemanticViolation, TrustStoreError};
 pub use manifest::{
-    InstallFileEntry, InstallIdentity, PlatformAsset, RawManifest, ValidatedManifest,
+    validate_untrusted_manifest, InstallFileEntry, InstallIdentity, PlatformAsset, RawManifest,
+    ValidatedManifest,
 };
 pub use trust::{derive_key_id, TrustStore};
 pub use verify::{verify_and_parse, VerifiedTarget};

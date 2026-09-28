@@ -25,6 +25,14 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 # feature here would change signed-bytes semantics and needs a protocol
 # review first.
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "native-tls"] }
+# Offline release-signing tool (Phase 3A): operator CLI only. Declared as a
+# normal path dependency (like the maintenance helper) solely so the signer
+# resolves through the canonical parent manifest and lock:
+#   cargo build --release -p desktop-todo-release-signer --manifest-path src-tauri/Cargo.toml
+# No product code references it, so it is never linked into the shipped
+# binaries; the release-signing library exists to be exercised by its own
+# binary target and tests.
+desktop-todo-release-signer = { path = "release-signer" }
 tauri = { version = "2.11.5", features = ["tray-icon"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }

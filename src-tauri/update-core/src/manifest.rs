@@ -417,6 +417,24 @@ pub fn manifest_digest_hex(raw: &RawManifest) -> String {
     sha256_hex(raw.bytes())
 }
 
+/// Validation-only entry point for offline release tooling (Phase 3A):
+/// run the full frozen encoding/parse/semantic validation over raw manifest
+/// bytes and return nothing but the outcome.
+///
+/// This deliberately does **not** hand out a [`ValidatedManifest`] or any
+/// parsed value: the only producer of an authenticated target remains
+/// [`crate::verify_and_parse`] (audit F-1), so product code still cannot
+/// name a validated manifest that never passed signature verification. The
+/// signer uses this to fail an invalid manifest before signing; verification
+/// itself then runs again inside the signer's mandatory
+/// production-equivalent self-check.
+pub fn validate_untrusted_manifest(bytes: &[u8]) -> Result<(), ProtocolError> {
+    let raw = RawManifest::from_bytes(bytes.to_vec())?;
+    let manifest = parse_manifest(&raw)?;
+    validate_manifest(manifest)?;
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -636,5 +654,40 @@ pub(crate) mod tests {
         let raw = valid_manifest();
         assert_eq!(manifest_digest_hex(&raw).len(), 64);
         assert_eq!(manifest_digest_hex(&raw), sha256_hex(raw.bytes()));
+    }
+
+    #[test]
+    fn validate_untrusted_manifest_accepts_valid_bytes_and_types_rejections() {
+        // Valid bytes pass.
+        assert!(validate_untrusted_manifest(manifest_text("1.4.0").as_bytes()).is_ok());
+
+        // Encoding failures surface with their own kinds.
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend_from_slice(manifest_text("1.4.0").as_bytes());
+        assert_eq!(
+            validate_untrusted_manifest(&bom).unwrap_err().kind,
+            ErrorKind::ManifestBom
+        );
+
+        // Closed-parse failures (unknown field).
+        let text = manifest_text("1.4.0").replace(
+            r#""notes":"Application lifecycle management.","#,
+            r#""notes":"","extra":1,"#,
+        );
+        assert_eq!(
+            validate_untrusted_manifest(text.as_bytes())
+                .unwrap_err()
+                .kind,
+            ErrorKind::ManifestMalformed
+        );
+
+        // Semantic failures stay typed.
+        let text = manifest_text("1.4.0").replace("net.alanfloyd.desktop", "net.evil.desktop");
+        assert_eq!(
+            validate_untrusted_manifest(text.as_bytes())
+                .unwrap_err()
+                .kind,
+            ErrorKind::SemanticViolation(SemanticViolation::AppIdMismatch)
+        );
     }
 }

@@ -1,0 +1,37 @@
+[package]
+name = "desktop-todo-release-signer"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Offline release-signing tool for Maintenance Protocol 1 (operator tooling, never shipped)"
+
+[lib]
+name = "desktop_todo_release_signer"
+
+[[bin]]
+name = "desktop-todo-release-signer"
+path = "src/main.rs"
+
+# Offline operator tooling: no network, no Tauri, no SQLite, no async
+# runtime. Every dependency already exists in the canonical parent lock
+# (`src-tauri/Cargo.lock`) through the product crates — zero new crates.
+[dependencies]
+# The single shared protocol implementation: exact-byte verification,
+# canonical Base64, trust-store semantics, manifest validation.
+desktop-todo-update-core = { path = "../update-core" }
+# Ed25519 signing over the exact raw manifest bytes. Same frozen crate and
+# feature set the protocol core already pins; the algorithm is never
+# hand-implemented.
+ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
+# Canonical padded RFC 4648 encoding of the 64-byte signature.
+base64 = { version = "0.22", default-features = false, features = ["std"] }
+# Streaming SHA-256 for package/EXE fact computation (package facts are
+# computed over explicit file paths, chunked — never whole-file reads).
+sha2 = "0.10"
+# JSON output for the operator-facing summaries (key id, package facts,
+# sign/verify reports). Never used to reserialize a signed document.
+serde_json = "1"
+# Entropy for `generate-keypair` only (the operator's key ceremony runs
+# offline, outside the repo). Same resolved version the helper already uses.
+getrandom = "0.4"
