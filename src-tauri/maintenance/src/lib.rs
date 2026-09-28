@@ -8,6 +8,7 @@ pub mod lock;
 pub mod native;
 pub mod package_zip;
 pub mod paths;
+pub mod probation;
 pub mod receipt;
 pub mod resources;
 mod security;

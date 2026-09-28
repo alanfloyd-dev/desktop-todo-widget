@@ -136,10 +136,11 @@ impl AdmissionBlock {
     }
 }
 
-/// Which kind of launch admission produced. A `PostUpdateProbation` context
-/// will be added together with the HealthAck protocol; until an update
-/// transaction exists there is nothing to model it on, and no state silently
-/// stands in for it.
+/// Which kind of launch admission produced. `PostUpdateProbation` is the
+/// frozen helper-authorized probation child (protocol v1 "HealthAck",
+/// lifecycle §11): recognized only by its session/nonce environment
+/// bindings matching the `Updating` receipt's active session, the durable
+/// health nonce, and the journaled probation process identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupContext {
     /// Receipt present, fully acceptable, and this process runs from the
@@ -154,6 +155,10 @@ pub enum StartupContext {
     /// or a portable copy beside a managed install). Runs against the shared
     /// data root and holds the shared lease, but is not the managed runtime.
     Development,
+    /// The helper-launched probation child of an in-flight update: admitted
+    /// to initialize and write HealthAck, and nothing else. Holds the shared
+    /// lease like any instance; never runs conflicting maintenance.
+    PostUpdateProbation,
 }
 
 impl StartupContext {
@@ -162,8 +167,20 @@ impl StartupContext {
             Self::Managed => "managed",
             Self::Unmanaged => "unmanaged",
             Self::Development => "development",
+            Self::PostUpdateProbation => "post-update-probation",
         }
     }
+}
+
+/// The validated probation bindings of a `PostUpdateProbation` launch, kept
+/// on the [`Admission`] so the HealthAck write after core initialization
+/// needs no re-derivation.
+#[derive(Debug, Clone)]
+pub struct ProbationFacts {
+    pub session_id: String,
+    pub installation_id: String,
+    pub target_version: String,
+    pub nonce: String,
 }
 
 /// Long-lived admission record; holds the shared application lease so a
@@ -174,6 +191,9 @@ pub struct Admission {
     /// The install root this admission was resolved against (canonical for
     /// production; the QA sandbox under the maintenance-qa feature).
     pub(crate) install_root: PathBuf,
+    /// Validated probation bindings; `Some` only in the
+    /// `PostUpdateProbation` context.
+    pub(crate) probation: Option<ProbationFacts>,
     /// Set while an uninstaller handoff is in flight, so a double click can
     /// never spawn two helpers. Reset when the handoff is refused so the
     /// entry stays usable.
@@ -297,10 +317,268 @@ fn block_receipt(error: Error) -> AdmissionBlock {
     }
 }
 
+/// The result of one launch classification. `RecoverViaHelper` is the
+/// frozen single recovery entrypoint (protocol v1 Q14): a normal launch
+/// whose admission observed receipt `Updating` plus a valid update journal
+/// routes the canonical maintenance helper's recovery executable and exits
+/// — before any database open or UI work.
+pub enum LaunchOutcome {
+    Admitted(Admission),
+    RecoverViaHelper { session_id: String, helper: PathBuf },
+}
+impl std::fmt::Debug for LaunchOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Admitted(admission) => {
+                write!(f, "Admitted({:?})", admission.context)
+            }
+            Self::RecoverViaHelper { session_id, helper } => f
+                .debug_struct("RecoverViaHelper")
+                .field("session_id", session_id)
+                .field("helper", helper)
+                .finish(),
+        }
+    }
+}
+
+/// Snapshot of the frozen probation environment bindings, taken from (and
+/// cleared out of) the process environment before anything else runs — the
+/// child must not forward them to descendants, and leftover values must
+/// never leak into any spawned process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbationEnv {
+    pub session_id: String,
+    pub nonce: String,
+}
+
+/// Read and clear the probation bindings. Values are only meaningful when
+/// the fixed-purpose launch mode matches exactly; any other combination is
+/// treated as no probation launch (the values are cleared regardless, and
+/// an `Updating`-state launch still fails closed through the ordinary
+/// admission rules).
+pub fn take_probation_env() -> Option<ProbationEnv> {
+    use desktop_todo_maintenance::probation::{
+        ENV_LAUNCH_MODE, ENV_NONCE, ENV_SESSION_ID, LAUNCH_MODE_PROBATION,
+    };
+    let mode = std::env::var(ENV_LAUNCH_MODE).ok();
+    let session_id = std::env::var(ENV_SESSION_ID).ok();
+    let nonce = std::env::var(ENV_NONCE).ok();
+    std::env::remove_var(ENV_LAUNCH_MODE);
+    std::env::remove_var(ENV_SESSION_ID);
+    std::env::remove_var(ENV_NONCE);
+    if mode.as_deref() != Some(LAUNCH_MODE_PROBATION) {
+        return None;
+    }
+    let (session_id, nonce) = (session_id?, nonce?);
+    if session_id.is_empty() || nonce.is_empty() {
+        return None;
+    }
+    Some(ProbationEnv { session_id, nonce })
+}
+
+/// The helper-launched probation child (protocol v1 "HealthAck",
+/// lifecycle §10 step 2): no admission gate is taken — the maintenance
+/// transaction holds the gate for the whole probation, and the child only
+/// ever takes the ordinary shared lease. Every binding is checked against
+/// independently derived state; anything else refuses.
+fn classify_probation(
+    paths: &Paths,
+    env: &ProbationEnv,
+    own_image: Option<&Path>,
+) -> Result<Admission, AdmissionBlock> {
+    use std::os::windows::fs::MetadataExt;
+    if desktop_todo_maintenance::receipt::validate_uuid(&env.session_id).is_err() {
+        return Err(AdmissionBlock::UnsafeInstallation(
+            "probation session id is not a canonical UUID".into(),
+        ));
+    }
+    let receipt = Receipt::load(paths).map_err(block_receipt)?.ok_or(
+        AdmissionBlock::UnsafeInstallation("probation launch without an installation".into()),
+    )?;
+    if receipt.lifecycle_state != Lifecycle::Updating {
+        return Err(AdmissionBlock::LifecycleBusy(format!(
+            "{:?}",
+            receipt.lifecycle_state
+        )));
+    }
+    if receipt.maintenance.active_session_id.as_deref() != Some(env.session_id.as_str()) {
+        return Err(AdmissionBlock::UnsafeInstallation(
+            "probation session does not match the active update session".into(),
+        ));
+    }
+    let dir = paths
+        .state()
+        .join("updates")
+        .join("sessions")
+        .join(&env.session_id);
+    let envelope = desktop_todo_maintenance::update_session::load_update_session(&dir)
+        .map_err(|e| {
+            AdmissionBlock::UnsafeInstallation(format!("update journal unusable: {e}"))
+        })?;
+    if envelope.session_id != env.session_id {
+        return Err(AdmissionBlock::UnsafeInstallation(
+            "update journal does not bind the probation session".into(),
+        ));
+    }
+    // The nonce binding: canonical form, exact durable match.
+    let durable = envelope.health_nonce.ok_or_else(|| {
+        AdmissionBlock::UnsafeInstallation("no durable health nonce for the session".into())
+    })?;
+    if desktop_todo_maintenance::probation::canonical_nonce_bytes(&durable).is_err()
+        || desktop_todo_maintenance::probation::canonical_nonce_bytes(&env.nonce).is_err()
+        || durable != env.nonce
+    {
+        return Err(AdmissionBlock::UnsafeInstallation(
+            "probation nonce does not match the durable session nonce".into(),
+        ));
+    }
+    // This process must be the installed main executable at the canonical
+    // root, and must be the exact journaled probation instance. (The image
+    // is injectable for deterministic tests; production derives it from the
+    // running executable.)
+    let image = match own_image {
+        Some(image) => image.to_path_buf(),
+        None => std::env::current_exe()
+            .map_err(|e| AdmissionBlock::UnsafeInstallation(format!("image unresolved: {e}")))?,
+    };
+    if !paths::equal(&image, &paths.install().join(desktop_todo_maintenance::MAIN_EXE)) {
+        return Err(AdmissionBlock::UnsafeInstallation(
+            "the probation child must run from the installed main executable".into(),
+        ));
+    }
+    let journaled = envelope.probation_process.ok_or_else(|| {
+        AdmissionBlock::UnsafeInstallation(
+            "no probation launch is journaled for this session".into(),
+        )
+    })?;
+    let own_created: u64 = own_creation_filetime();
+    if journaled.pid != std::process::id()
+        || journaled.process_created_at != own_created.to_string()
+        || !paths::equal(&journaled.image_path, &image)
+    {
+        return Err(AdmissionBlock::UnsafeInstallation(
+            "this process is not the journaled probation launch instance".into(),
+        ));
+    }
+    // The installed main executable must currently hold the signed target
+    // bytes (fresh open, exact size and hash from the journal's signed
+    // facts).
+    let target = envelope
+        .resources
+        .iter()
+        .find(|entry| {
+            desktop_todo_update_core::InstallIdentity::from_manifest_text(&entry.identity)
+                == Some(desktop_todo_update_core::InstallIdentity::MainExecutable)
+        })
+        .ok_or_else(|| {
+            AdmissionBlock::UnsafeInstallation("journal has no main executable fact".into())
+        })?;
+    let metadata = std::fs::metadata(paths.install().join(desktop_todo_maintenance::MAIN_EXE))
+        .map_err(|e| AdmissionBlock::UnsafeInstallation(format!("installed main unreadable: {e}")))?;
+    if metadata.file_attributes() & 0x0400 != 0 {
+        return Err(AdmissionBlock::UnsafeInstallation(
+            "the installed main executable passes through a reparse point".into(),
+        ));
+    }
+    let mut file = paths::open_regular(&paths.install().join(desktop_todo_maintenance::MAIN_EXE))
+        .map_err(|e| AdmissionBlock::UnsafeInstallation(format!("installed main unreadable: {e}")))?;
+    let actual = desktop_todo_maintenance::probation::hash_file_facts(&mut file);
+    if actual.0 != target.new_size || actual.1 != target.new_sha256 {
+        return Err(AdmissionBlock::UnsafeInstallation(
+            "the installed main executable does not hold the signed target bytes".into(),
+        ));
+    }
+    // Everything binds: admit as the probation child on the ordinary
+    // shared lease.
+    let lease = lock::shared_app(paths).map_err(block_lock)?;
+    Ok(Admission {
+        context: StartupContext::PostUpdateProbation,
+        installation_id: Some(receipt.installation_id.clone()),
+        install_root: paths.install().to_path_buf(),
+        probation: Some(ProbationFacts {
+            session_id: env.session_id.clone(),
+            installation_id: receipt.installation_id.clone(),
+            target_version: envelope.to_version.clone(),
+            nonce: env.nonce.clone(),
+        }),
+        handoff_started: AtomicBool::new(false),
+        _lease: Some(lease),
+    })
+}
+
+fn own_creation_filetime() -> u64 {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    unsafe {
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        GetProcessTimes(GetCurrentProcess(), &mut created, &mut exited, &mut kernel, &mut user)
+            .expect("own process times are always queryable");
+        ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64
+    }
+}
+
+/// The frozen Q14 recovery route: receipt `Updating` with a valid update
+/// journal routes the canonical helper's `--recover` execution and exits
+/// without opening the database or UI. An unusable journal fails closed
+/// (recovery-required semantics: explicit repair, never a guessed launch).
+fn recover_route(paths: &Paths, receipt: &Receipt) -> Result<LaunchOutcome, AdmissionBlock> {
+    let Some(session_id) = receipt.maintenance.active_session_id.clone() else {
+        return Err(AdmissionBlock::LifecycleBusy("Updating".into()));
+    };
+    let dir = paths
+        .state()
+        .join("updates")
+        .join("sessions")
+        .join(&session_id);
+    if desktop_todo_maintenance::update_session::load_update_session(&dir).is_err() {
+        return Err(AdmissionBlock::UnsafeInstallation(
+            "the active update journal is missing or unreadable; the installation \
+             requires explicit recovery"
+                .into(),
+        ));
+    }
+    let helper = paths.install().join(HELPER_EXE);
+    paths::open_regular(&helper).map_err(|e| {
+        AdmissionBlock::UnsafeInstallation(format!(
+            "the maintenance recovery executable is unavailable: {e}"
+        ))
+    })?;
+    Ok(LaunchOutcome::RecoverViaHelper {
+        session_id,
+        helper,
+    })
+}
+
 /// Classifies one launch. `process_image_dir` is the directory of the running
-/// executable (`None` when it cannot be determined). Tests call this directly
-/// with sandbox paths; the binary entry uses [`admit_or_report`].
-pub fn admit(paths: &Paths, process_image_dir: Option<&Path>) -> Result<Admission, AdmissionBlock> {
+/// executable (`None` when it cannot be determined). `probation` is the
+/// taken-and-cleared environment snapshot (`None` for an ordinary launch).
+/// Tests call this directly with sandbox paths; the binary entry uses
+/// [`admit_or_report`].
+pub fn classify_launch(
+    paths: &Paths,
+    process_image_dir: Option<&Path>,
+    probation: Option<&ProbationEnv>,
+) -> Result<LaunchOutcome, AdmissionBlock> {
+    classify_launch_with_image(paths, process_image_dir, probation, None)
+}
+
+/// [`classify_launch`] with the running image injectable (deterministic
+/// probation tests; production derives it from the running executable).
+pub fn classify_launch_with_image(
+    paths: &Paths,
+    process_image_dir: Option<&Path>,
+    probation: Option<&ProbationEnv>,
+    own_image: Option<&Path>,
+) -> Result<LaunchOutcome, AdmissionBlock> {
+    // The probation child never takes the admission gate: the maintenance
+    // transaction holds it for the whole probation (frozen lease
+    // choreography), and the child only ever needs the shared lease.
+    if let Some(env) = probation {
+        return classify_probation(paths, env, own_image).map(LaunchOutcome::Admitted);
+    }
     // Short admission gate: held only while classifying durable state, never
     // for the session. Concurrent launches pass sequentially; a running
     // maintenance helper holds the same gate and excludes this check.
@@ -315,6 +593,14 @@ pub fn admit(paths: &Paths, process_image_dir: Option<&Path>) -> Result<Admissio
     // unmanaged. `Receipt::load` validates schema, appId, both canonical
     // roots, UUIDs, timestamps and the compiled resource-identity policy.
     let receipt = Receipt::load(paths).map_err(block_receipt)?;
+    if let Some(receipt) = &receipt {
+        if receipt.lifecycle_state == Lifecycle::Updating {
+            // The Q14 single recovery entrypoint — before any lease is
+            // taken (this process exits; the recovery helper needs the
+            // exclusive lease).
+            return recover_route(paths, receipt);
+        }
+    }
     // The lease is taken under the gate and held until process exit, so a
     // later uninstall sees every running instance.
     let lease = lock::shared_app(paths).map_err(block_lock)?;
@@ -333,13 +619,14 @@ pub fn admit(paths: &Paths, process_image_dir: Option<&Path>) -> Result<Admissio
                 Some(dir) if paths::equal(dir, paths.install()) => StartupContext::Managed,
                 _ => StartupContext::Development,
             };
-            Ok(Admission {
+            Ok(LaunchOutcome::Admitted(Admission {
                 context,
                 installation_id: Some(receipt.installation_id.clone()),
                 install_root: paths.install().to_path_buf(),
+                probation: None,
                 handoff_started: AtomicBool::new(false),
                 _lease: Some(lease),
-            })
+            }))
         }
         None => {
             // Helper present without a receipt is broken managed state, not a
@@ -347,14 +634,31 @@ pub fn admit(paths: &Paths, process_image_dir: Option<&Path>) -> Result<Admissio
             if paths.install().join(HELPER_EXE).exists() {
                 return Err(AdmissionBlock::ManagedReceiptMissing);
             }
-            Ok(Admission {
+            Ok(LaunchOutcome::Admitted(Admission {
                 context: StartupContext::Unmanaged,
                 installation_id: None,
                 install_root: paths.install().to_path_buf(),
+                probation: None,
                 handoff_started: AtomicBool::new(false),
                 _lease: Some(lease),
-            })
+            }))
         }
+    }
+}
+
+/// Test-only admitted-or-blocked wrapper over [`classify_launch`]: the
+/// existing deterministic admission fixtures classify ordinary launches
+/// without probation input.
+#[cfg(test)]
+pub(crate) fn admit(
+    paths: &Paths,
+    process_image_dir: Option<&Path>,
+) -> Result<Admission, AdmissionBlock> {
+    match classify_launch(paths, process_image_dir, None)? {
+        LaunchOutcome::Admitted(admission) => Ok(admission),
+        LaunchOutcome::RecoverViaHelper { .. } => Err(AdmissionBlock::LifecycleBusy(
+            "Updating".into(),
+        )),
     }
 }
 
@@ -381,11 +685,17 @@ fn show_block_dialog(message: &str) {
 
 /// Resolves the canonical roots, classifies this launch and reports refusal
 /// through the minimal safe surface (console in debug builds, a native dialog
-/// everywhere, then a non-zero exit). If the canonical roots themselves cannot
-/// be resolved the launch degrades to pre-maintenance behaviour without a
-/// lease, logged: on such a machine the helper could not run either, and the
-/// Tauri data-dir resolution in `setup` still guards the database path.
+/// everywhere, then a non-zero exit). The frozen Q14 recovery route spawns
+/// the canonical helper's `--recover` execution — identity validated exactly
+/// like the uninstall handoff — and exits without opening the database or
+/// UI. If the canonical roots themselves cannot be resolved the launch
+/// degrades to pre-maintenance behaviour without a lease, logged: on such a
+/// machine the helper could not run either, and the Tauri data-dir
+/// resolution in `setup` still guards the database path.
 pub fn admit_or_report() -> Admission {
+    // The probation bindings are read and cleared before anything else can
+    // observe them (the child never forwards them to descendants).
+    let probation = take_probation_env();
     let paths = match Paths::resolve() {
         Ok(paths) => paths,
         Err(error) => {
@@ -399,17 +709,77 @@ pub fn admit_or_report() -> Admission {
                 // Roots could not be resolved; this context is never Managed,
                 // so the handoff refuses before ever touching this path.
                 install_root: PathBuf::new(),
+                probation: None,
                 handoff_started: AtomicBool::new(false),
                 _lease: None,
             };
         }
     };
-    match admit(&paths, process_image_dir().as_deref()) {
-        Ok(admission) => admission,
+    match classify_launch(&paths, process_image_dir().as_deref(), probation.as_ref()) {
+        Ok(LaunchOutcome::Admitted(admission)) => admission,
+        Ok(LaunchOutcome::RecoverViaHelper { session_id, helper }) => {
+            eprintln!(
+                "[maintenance-admission] Updating receipt with a valid journal: \
+                 routing maintenance recovery for session {session_id}"
+            );
+            let spawned = std::process::Command::new(&helper)
+                .arg("--recover")
+                .arg("--session-id")
+                .arg(&session_id)
+                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                .spawn();
+            if spawned.is_err() {
+                show_block_dialog(
+                    "desktop-todo-widget cannot start because a previous update \
+                     did not finish and the maintenance helper could not be started.\n\n\
+                     Run desktop-todo-maintenance.exe from the installation folder \
+                     to finish or undo the update.",
+                );
+                std::process::exit(3);
+            }
+            std::process::exit(0);
+        }
         Err(block) => {
             eprintln!("[maintenance-admission] launch refused: {block:?}");
             show_block_dialog(&block.user_message());
             std::process::exit(3);
+        }
+    }
+}
+
+/// The probation child's HealthAck: called once core initialization has
+/// succeeded (backend, database, settings, tray, main window). The marker
+/// is the only proof of health the maintenance helper accepts; a failure to
+/// write it means the update cannot be proven healthy, so the process exits
+/// (the helper observes the exit and rolls back) after recording the cause.
+pub fn acknowledge_update_health(admission: &Admission, diagnostics: &crate::qa_diagnostics::QaDiagnostics) {
+    let Some(facts) = &admission.probation else {
+        return; // ordinary launch: never writes health (frozen)
+    };
+    let outcome = (|| -> Result<(), Error> {
+        use desktop_todo_maintenance::probation;
+        let ack = probation::build_current_health_ack(
+            &facts.session_id,
+            &facts.installation_id,
+            &facts.target_version,
+            &facts.nonce,
+        )?;
+        let paths = Paths::resolve()?;
+        probation::write_health_ack(&paths, &ack)
+    })();
+    match outcome {
+        Ok(()) => {
+            diagnostics
+                .record("post-update probation health acknowledged (durable marker written)");
+        }
+        Err(error) => {
+            diagnostics.record(format!(
+                "[probation-fatal] the health marker could not be written: {error}; \
+                 exiting so the update rolls back"
+            ));
+            // Never fake health by continuing: an unacknowledged probation
+            // is a rollback. No dialog — the recovery path owns the UX.
+            std::process::exit(6);
         }
     }
 }
@@ -741,5 +1111,379 @@ mod tests {
         // The failed attempt reset the guard, so the user can retry.
         let result = perform_uninstall_handoff(&admission, |_| Ok(()), || ());
         assert_eq!(result, Ok(()));
+    }
+
+    // --------------------------------------------- Phase 2D-B probation + Q14
+
+    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
+    use desktop_todo_maintenance::update_session::{
+        ProcessIdentity, SessionOperation, SessionPhase, SourceInfo, UpdateSessionEnvelope,
+    };
+
+    struct UpdateFixture {
+        paths: Paths,
+        session_id: String,
+        installation_id: String,
+        nonce: String,
+        journaled: ProcessIdentity,
+    }
+
+    /// A session at the `LaunchedAwaitingHealth` shape: `Updating` receipt
+    /// bound to a durable journal that carries the nonce and this process's
+    /// identity as the journaled probation child.
+    fn updating_fixture(_tag: &str) -> UpdateFixture {
+        let (paths, _dev) = fixture();
+        let installation_id = installed_receipt(&paths);
+        let mut receipt =
+            desktop_todo_maintenance::receipt::Receipt::load(&paths).unwrap().unwrap();
+        receipt.lifecycle_state = Lifecycle::Updating;
+        receipt.maintenance.active_session_id = Some({
+            // The receipt's active session is created below; rewrite after.
+            receipt.maintenance.active_session_id.clone().unwrap_or_default()
+        });
+        let session_id = uuid::Uuid::new_v4().to_string();
+        receipt.maintenance.active_session_id = Some(session_id.clone());
+        receipt.save(&paths).unwrap();
+
+        let main_bytes = b"signed target main fixture bytes".to_vec();
+        let helper_bytes = b"signed target helper fixture bytes".to_vec();
+        let sha = |bytes: &[u8]| desktop_todo_update_core::sha256_hex(bytes);
+        let journaled = ProcessIdentity {
+            pid: std::process::id(),
+            process_created_at: own_creation_filetime().to_string(),
+            image_path: paths.install().join(MAIN_EXE),
+        };
+        let envelope = UpdateSessionEnvelope {
+            schema_version: 1,
+            updater_protocol: 1,
+            operation: SessionOperation::Update,
+            session_id: session_id.clone(),
+            installation_id: installation_id.clone(),
+            app_id: desktop_todo_maintenance::APP_ID.to_string(),
+            from_version: "1.1.0".to_string(),
+            to_version: "1.2.0".to_string(),
+            source: SourceInfo {
+                discovered_via: "GitHub".to_string(),
+                package_url: "https://mirror.invalid/pkg.zip".to_string(),
+            },
+            manifest_sha256: "a".repeat(64),
+            package_sha256: "b".repeat(64),
+            package_size: 16,
+            phase: SessionPhase::HandedOff,
+            generation: 5,
+            install_root: paths.install().to_path_buf(),
+            staging_root: paths
+                .state()
+                .join("updates")
+                .join("sessions")
+                .join(&session_id),
+            created_at: "2026-10-01T00:00:00Z".to_string(),
+            updated_at: "2026-10-01T00:00:01Z".to_string(),
+            parent_process: ProcessIdentity {
+                pid: std::process::id(),
+                process_created_at: own_creation_filetime().to_string(),
+                image_path: paths.install().join(MAIN_EXE),
+            },
+            resources: vec![
+                desktop_todo_maintenance::update_session::SessionResource {
+                    identity: "mainExecutable".to_string(),
+                    new_sha256: sha(&main_bytes),
+                    new_size: main_bytes.len() as u64,
+                    old_present: true,
+                    backup_slot: format!(
+                        r".maintenance\{session_id}\mainExecutable.backup"
+                    ),
+                    old_sha256: None,
+                    old_size: None,
+                    intent: None,
+                    completed: None,
+                },
+                desktop_todo_maintenance::update_session::SessionResource {
+                    identity: "maintenanceHelper".to_string(),
+                    new_sha256: sha(&helper_bytes),
+                    new_size: helper_bytes.len() as u64,
+                    old_present: true,
+                    backup_slot: format!(
+                        r".maintenance\{session_id}\maintenanceHelper.backup"
+                    ),
+                    old_sha256: None,
+                    old_size: None,
+                    intent: None,
+                    completed: None,
+                },
+            ],
+            probation_process: Some(journaled.clone()),
+            health_nonce: Some(B64.encode([7u8; 32])),
+            previous_receipt: None,
+            previous_integration: None,
+            accepted_health: None,
+            commit_intent: None,
+            last_error: None,
+        };
+        let dir = paths
+            .state()
+            .join("updates")
+            .join("sessions")
+            .join(&session_id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("session.json"),
+            serde_json::to_vec_pretty(&envelope).unwrap(),
+        )
+        .unwrap();
+        fs::write(paths.install().join(MAIN_EXE), &main_bytes).unwrap();
+        UpdateFixture {
+            paths,
+            session_id,
+            installation_id,
+            nonce: B64.encode([7u8; 32]),
+            journaled,
+        }
+    }
+
+    fn own_image_of(paths: &Paths) -> PathBuf {
+        paths.install().join(MAIN_EXE)
+    }
+
+    #[test]
+    fn probation_launch_with_exact_bindings_is_admitted() {
+        let fx = updating_fixture("probation-ok");
+        let env = ProbationEnv {
+            session_id: fx.session_id.clone(),
+            nonce: fx.nonce.clone(),
+        };
+        let own_image = own_image_of(&fx.paths);
+        let outcome = classify_launch_with_image(
+            &fx.paths,
+            Some(&own_image),
+            Some(&env),
+            Some(&own_image),
+        )
+        .unwrap();
+        let LaunchOutcome::Admitted(admission) = outcome else {
+            panic!("expected admission, got {outcome:?}");
+        };
+        assert_eq!(admission.context, StartupContext::PostUpdateProbation);
+        let facts = admission.probation.as_ref().unwrap();
+        assert_eq!(facts.session_id, fx.session_id);
+        assert_eq!(facts.installation_id, fx.installation_id);
+        assert_eq!(facts.target_version, "1.2.0");
+        assert_eq!(facts.nonce, fx.nonce);
+        // The child holds the shared lease: maintenance cannot start.
+        assert!(desktop_todo_maintenance::lock::exclusive_app(&fx.paths).is_err());
+    }
+
+    #[test]
+    fn probation_launch_fails_closed_on_every_wrong_binding() {
+        // Wrong nonce (a copied or stale environment).
+        let fx = updating_fixture("probation-nonce");
+        let env = ProbationEnv {
+            session_id: fx.session_id.clone(),
+            nonce: B64.encode([9u8; 32]),
+        };
+        let own_image = own_image_of(&fx.paths);
+        assert!(classify_launch_with_image(
+            &fx.paths,
+            Some(&own_image),
+            Some(&env),
+            Some(&own_image)
+        )
+        .is_err());
+
+        // Wrong session id (an env splice from another session).
+        let fx = updating_fixture("probation-session");
+        let env = ProbationEnv {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            nonce: fx.nonce.clone(),
+        };
+        let own_image = own_image_of(&fx.paths);
+        assert!(classify_launch_with_image(
+            &fx.paths,
+            Some(&own_image),
+            Some(&env),
+            Some(&own_image)
+        )
+        .is_err());
+
+        // Wrong running image: not the installed main executable.
+        let fx = updating_fixture("probation-image");
+        let env = ProbationEnv {
+            session_id: fx.session_id.clone(),
+            nonce: fx.nonce.clone(),
+        };
+        let own_image = own_image_of(&fx.paths);
+        let elsewhere = fx.paths.install().parent().unwrap().join("elsewhere.exe");
+        fs::write(&elsewhere, b"not the installed runtime").unwrap();
+        assert!(classify_launch_with_image(
+            &fx.paths,
+            Some(&own_image),
+            Some(&env),
+            Some(&elsewhere),
+        )
+        .is_err());
+
+        // PID reuse: same image, different creation time.
+        let fx = updating_fixture("probation-pid-reuse");
+        let env = ProbationEnv {
+            session_id: fx.session_id.clone(),
+            nonce: fx.nonce.clone(),
+        };
+        let own_image = own_image_of(&fx.paths);
+        let mut stale = fx.journaled.clone();
+        stale.process_created_at = "1".to_string();
+        let dir = fx
+            .paths
+            .state()
+            .join("updates")
+            .join("sessions")
+            .join(&fx.session_id);
+        let mut envelope: UpdateSessionEnvelope = serde_json::from_slice(
+            &fs::read(dir.join("session.json")).unwrap(),
+        )
+        .unwrap();
+        envelope.probation_process = Some(stale);
+        fs::write(
+            dir.join("session.json"),
+            serde_json::to_vec_pretty(&envelope).unwrap(),
+        )
+        .unwrap();
+        assert!(classify_launch_with_image(
+            &fx.paths,
+            Some(&own_image),
+            Some(&env),
+            Some(&own_image),
+        )
+        .is_err());
+
+        // The installed main executable no longer holds the signed target
+        // bytes: refuse even though every binding matches.
+        let fx = updating_fixture("probation-bytes");
+        let env = ProbationEnv {
+            session_id: fx.session_id.clone(),
+            nonce: fx.nonce.clone(),
+        };
+        let own_image = own_image_of(&fx.paths);
+        fs::write(fx.paths.install().join(MAIN_EXE), b"tampered bytes").unwrap();
+        assert!(classify_launch_with_image(
+            &fx.paths,
+            Some(&own_image),
+            Some(&env),
+            Some(&own_image),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn probation_launch_without_an_updating_receipt_is_refused() {
+        let fx = updating_fixture("probation-installed");
+        let mut receipt =
+            desktop_todo_maintenance::receipt::Receipt::load(&fx.paths).unwrap().unwrap();
+        receipt.lifecycle_state = Lifecycle::Installed;
+        receipt.maintenance.active_session_id = None;
+        receipt.save(&fx.paths).unwrap();
+        let env = ProbationEnv {
+            session_id: fx.session_id.clone(),
+            nonce: fx.nonce.clone(),
+        };
+        let own_image = own_image_of(&fx.paths);
+        assert!(matches!(
+            classify_launch_with_image(
+                &fx.paths,
+                Some(&own_image),
+                Some(&env),
+                Some(&own_image),
+            ),
+            Err(AdmissionBlock::LifecycleBusy(_))
+        ));
+    }
+
+    #[test]
+    fn updating_receipt_routes_the_q14_recovery_helper() {
+        let fx = updating_fixture("q14");
+        // The helper image must be present and regular.
+        fs::write(fx.paths.install().join(HELPER_EXE), b"helper image").unwrap();
+        let outcome = classify_launch(&fx.paths, None, None).unwrap();
+        let LaunchOutcome::RecoverViaHelper { session_id, helper } = outcome else {
+            panic!("expected the Q14 recovery route, got {outcome:?}");
+        };
+        assert_eq!(session_id, fx.session_id);
+        assert_eq!(helper, fx.paths.install().join(HELPER_EXE));
+    }
+
+    #[test]
+    fn updating_receipt_fails_closed_without_a_valid_journal_or_helper() {
+        // Journal missing: recovery-required semantics, never a guessed
+        // launch and never a normal launch.
+        let fx = updating_fixture("q14-no-journal");
+        fs::remove_dir_all(
+            fx.paths
+                .state()
+                .join("updates")
+                .join("sessions")
+                .join(&fx.session_id),
+        )
+        .unwrap();
+        assert!(matches!(
+            classify_launch(&fx.paths, None, None),
+            Err(AdmissionBlock::UnsafeInstallation(_))
+        ));
+
+        // Valid journal but the helper image is missing: fail closed.
+        let fx = updating_fixture("q14-no-helper");
+        assert!(matches!(
+            classify_launch(&fx.paths, None, None),
+            Err(AdmissionBlock::UnsafeInstallation(_))
+        ));
+    }
+
+    #[test]
+    fn the_health_ack_write_uses_the_validated_bindings() {
+        let fx = updating_fixture("ack-write");
+        let admission = {
+            let env = ProbationEnv {
+                session_id: fx.session_id.clone(),
+                nonce: fx.nonce.clone(),
+            };
+            let own_image = own_image_of(&fx.paths);
+            match classify_launch_with_image(
+                &fx.paths,
+                Some(&own_image),
+                Some(&env),
+                Some(&own_image),
+            )
+            .unwrap()
+            {
+                LaunchOutcome::Admitted(admission) => admission,
+                other => panic!("expected admission, got {other:?}"),
+            }
+        };
+        // The child-side write uses the admission's validated facts (this
+        // process IS the journaled instance in this fixture, so the marker
+        // carries the journaled identity).
+        let facts = admission.probation.as_ref().unwrap();
+        let ack = desktop_todo_maintenance::probation::build_current_health_ack(
+            &facts.session_id,
+            &facts.installation_id,
+            &facts.target_version,
+            &facts.nonce,
+        )
+        .unwrap();
+        desktop_todo_maintenance::probation::write_health_ack(&fx.paths, &ack).unwrap();
+        let marker = fs::read(
+            fx.paths
+                .state()
+                .join("updates")
+                .join("sessions")
+                .join(&fx.session_id)
+                .join("health.json"),
+        )
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&marker).unwrap();
+        assert_eq!(parsed["sessionId"], fx.session_id.as_str());
+        assert_eq!(parsed["installationId"], fx.installation_id.as_str());
+        assert_eq!(parsed["version"], "1.2.0");
+        assert_eq!(parsed["nonce"], fx.nonce.as_str());
+        assert_eq!(parsed["schemaVersion"], 1);
     }
 }

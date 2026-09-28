@@ -33,16 +33,17 @@ mod reviews;
 mod settings;
 mod task_day;
 mod tasks;
-// Phase 2B updater: provider discovery and bounded metadata fetch. The
+// Phase 2 updater: provider discovery and bounded metadata fetch. The
 // verification/eligibility core is the shared `desktop-todo-update-core`
 // crate; this module only transports attacker-controlled bytes to it and
 // never writes durable state.
 //
-// Deliberately crate-private (pre-commit boundary review): the network
-// capability is not part of the product's public API. `#[allow(dead_code)]`
-// is scoped to the module because no production caller exists until the
-// Phase 2C wiring (trusted-target persistence, download, session); the
-// moment that lands, the allow and this note go.
+// Deliberately crate-private: the network capability is not part of the
+// product's public API. `#[allow(dead_code)]` remains scoped to the module
+// because the discovery half (provider enumeration, `discover`) still has
+// no production caller until the check-for-updates surface exists; the
+// staged-update install half (`install_ready_update`) is wired since
+// Phase 2D-B and no longer counts on the allow.
 #[allow(dead_code)]
 mod updater;
 mod weather;
@@ -237,6 +238,16 @@ pub fn run() {
                 &window,
                 &app.state::<qa_diagnostics::QaDiagnostics>(),
             );
+            // The probation child's single health obligation: once core
+            // initialization succeeded (backend, database, settings, tray,
+            // main window), write the durable HealthAck marker. Ordinary
+            // launches never write health; a failed write exits so the
+            // update rolls back instead of faking health.
+            #[cfg(target_os = "windows")]
+            maintenance_admission::acknowledge_update_health(
+                app.state::<maintenance_admission::Admission>().inner(),
+                app.state::<qa_diagnostics::QaDiagnostics>().inner(),
+            );
             Ok(())
         })
         .on_window_event(product_window::handle_window_event)
@@ -275,7 +286,8 @@ pub fn run() {
             window_mode::window_diagnostics,
             window_mode::start_win_d_trace,
             maintenance_admission::maintenance_admission_state,
-            maintenance_admission::start_uninstall
+            maintenance_admission::start_uninstall,
+            updater::install::install_ready_update
         ])
         .build(tauri::generate_context!())
     {

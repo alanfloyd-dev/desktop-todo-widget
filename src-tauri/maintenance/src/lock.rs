@@ -76,6 +76,11 @@ impl Drop for Gate {
 pub struct AppLease {
     _file: File,
 }
+impl std::fmt::Debug for AppLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AppLease")
+    }
+}
 fn lease_file(paths: &Paths, exclusive: bool) -> Result<File> {
     let path = paths.state().join("application.lock");
     let _parents = paths::pin_parents(&path)?;

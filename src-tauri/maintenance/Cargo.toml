@@ -26,6 +26,11 @@ serde_json = "1"
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 winreg = "0.55"
+# Secure nonce entropy (health nonce, protocol v1 "HealthAck": 256 random
+# bits). Already in the dependency closure through uuid's v4 feature — the
+# same resolved version, zero new crates in the graph; never a hand-rolled
+# PRNG.
+getrandom = "0.4"
 # Pure signed-update protocol core: the helper re-verifies every signature
 # and manifest itself through this shared implementation (never on a main
 # app's claim). No Tauri, network, SQLite or Win32 dependency of its own.

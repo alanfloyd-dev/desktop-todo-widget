@@ -329,17 +329,26 @@ fn hash_stream(file: &mut std::fs::File) -> Result<(u64, String), HandoffError> 
     Ok((size, format!("{:x}", hasher.finalize())))
 }
 
-/// Which invocation shape is being validated. The frozen contract has two
+/// Which invocation shape is being validated. The frozen contract has three
 /// legal handoff moments: the **Initial** validation from the installed
 /// helper (receipt still `Installed`, no authority transferred, the live
-/// caller must be bound), and the **Resume** validation executed by the
-/// session runner / recovery continuation (receipt `Updating` with
+/// caller must be bound), the **Resume** validation executed by the session
+/// runner for the replacement apply (receipt `Updating` with
 /// `activeSessionId` — authority already transferred — and no live-caller
-/// requirement, because the caller is expected to have exited).
+/// requirement, because the caller is expected to have exited; the
+/// probation/commit fields are still rejected there because they cannot
+/// exist before their phase), and the **PostApply** validation executed by
+/// the Phase 2D-B probation/commit/rollback executor (same receipt and
+/// session gates as Resume; the probation-phase fields — `healthNonce`,
+/// `acceptedHealth`, `commitIntent` — may now be present because the
+/// replacement phase completed and those phases are exactly what this
+/// validation precedes; `lastError` stays rejected because it belongs to a
+/// terminal write).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandoffStage {
     Initial,
     Resume,
+    PostApply,
 }
 
 /// The live identity of a running process, as observed through the OS. PID
@@ -617,6 +626,31 @@ pub fn validate_resume(
     )
 }
 
+/// The production PostApply validation (Phase 2D-B): the entry the
+/// probation/commit/rollback executor uses once the replacement phase has
+/// completed. Identical re-derivation to [`validate_resume`] — signature over
+/// the persisted bytes, staged hashes, bindings, the `Updating` receipt
+/// binding — except the probation-phase fields (`healthNonce`,
+/// `acceptedHealth`, `commitIntent`) may be present. `expected_manifest_sha256`
+/// comes from the helper's own journaled verified digest, never from the
+/// caller's memory of a previous process.
+pub fn validate_post_apply(
+    paths: &Paths,
+    trust: &TrustStore,
+    session_id_arg: &str,
+    expected_manifest_sha256_arg: &str,
+) -> Result<ValidatedHandoff, HandoffError> {
+    validate_with_source(
+        paths,
+        trust,
+        session_id_arg,
+        expected_manifest_sha256_arg,
+        HandoffStage::PostApply,
+        None,
+        None,
+    )
+}
+
 fn validate_with_source(
     paths: &Paths,
     trust: &TrustStore,
@@ -747,6 +781,18 @@ fn validate_with_source(
                 });
             }
         }
+        (HandoffStage::PostApply, SessionPhase::HandedOff) => {
+            // The Phase 2D-B executor's entry: the replacement phase has
+            // completed, so the probation fields belong to the phases this
+            // validation precedes and may be present. `lastError` stays
+            // rejected: it is only ever written together with a terminal
+            // phase, which is not resumable.
+            if envelope.last_error.is_some() {
+                return Err(HandoffError::InvalidSessionState {
+                    detail: "terminal error record present on a resumable session".to_string(),
+                });
+            }
+        }
         _ => {
             return Err(HandoffError::InvalidSessionState {
                 detail: format!("phase {:?} is not a handoff-validation phase", envelope.phase),
@@ -842,9 +888,9 @@ fn validate_with_source(
     }
 
     // Stage gates on the durable lifecycle state: the authority boundary
-    // between the two legal handoff moments. The journal leads and the
-    // receipt follows, so Initial requires `Installed` (no authority
-    // transferred) and Resume requires `Updating` + this exact session.
+    // between the legal handoff moments. The journal leads and the receipt
+    // follows, so Initial requires `Installed` (no authority transferred)
+    // and Resume/PostApply require `Updating` + this exact session.
     let current: String = match stage {
         HandoffStage::Initial => {
             if receipt.lifecycle_state != Lifecycle::Installed {
@@ -880,7 +926,7 @@ fn validate_with_source(
             }
             source
         }
-        HandoffStage::Resume => {
+        HandoffStage::Resume | HandoffStage::PostApply => {
             if receipt.lifecycle_state != Lifecycle::Updating {
                 return Err(HandoffError::LifecycleBusy {
                     detail: format!(

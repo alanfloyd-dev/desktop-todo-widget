@@ -64,10 +64,10 @@ use crate::paths::{self, Paths};
 use crate::receipt::{validate_uuid, Lifecycle, Receipt};
 use crate::resources::Resource;
 use crate::update_session::{
-    load_update_session, ProcessIdentity, ResourceAction, SessionPhase, UpdateSessionEnvelope,
+    load_update_session, ResourceAction, SessionPhase, UpdateSessionEnvelope,
     SESSION_FILE,
 };
-use crate::{Error, ErrorKind, HELPER_EXE, MAIN_EXE};
+use crate::{Error, ErrorKind, HELPER_EXE};
 
 /// The frozen per-session backup/workspace directory under the install root
 /// (the grammar of `update_session::backup_slot`): same-volume copies and
@@ -76,9 +76,9 @@ pub const SESSION_WORKSPACE_DIR: &str = r".maintenance";
 
 /// Production wait bounds (implementation policy, not protocol invariants):
 /// the runner-ready handshake and the app-exit lease wait.
-const RUNNER_READY_ATTEMPTS: u32 = 40; // 40 × 250 ms = 10 s
-const LEASE_ATTEMPTS: u32 = 120; // 120 × 250 ms = 30 s
-const RETRY_INTERVAL: Duration = Duration::from_millis(250);
+pub(crate) const RUNNER_READY_ATTEMPTS: u32 = 40; // 40 × 250 ms = 10 s
+pub(crate) const LEASE_ATTEMPTS: u32 = 120; // 120 × 250 ms = 30 s
+pub(crate) const RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Why the runtime mutation transaction refused or failed. A closed taxonomy
 /// of its own — never collapsed into a generic failure and never reusing a
@@ -127,6 +127,53 @@ pub enum MutationError {
     JournalWrite { detail: String },
     /// The new runtime could not be launched or its identity recorded.
     Launch { detail: String },
+    /// The session health nonce could not be minted from the OS CSPRNG.
+    NonceGeneration { detail: String },
+    /// The probation child terminated before any HealthAck was accepted.
+    ChildExitedBeforeAck { pid: u32 },
+    /// No accepted HealthAck arrived within the bounded probation window.
+    ProbationTimeout,
+    /// A health marker was present but failed strict closed parsing or its
+    /// size bound.
+    HealthAckMalformed { detail: String },
+    /// A health marker names a different session.
+    HealthAckWrongSession,
+    /// A health marker carries a nonce that is not the durable session
+    /// nonce (the value itself is never reproduced in diagnostics).
+    HealthAckWrongNonce,
+    /// A health marker's process facts do not match the journaled
+    /// probation child (PID, creation FILETIME, or image), or the process
+    /// is no longer live with that identity.
+    HealthAckWrongProcess { detail: String },
+    /// A health marker was offered after health was already accepted — the
+    /// nonce is consumed once; replay fails closed.
+    HealthAckReplay,
+    /// The commit could not publish the target receipt.
+    ReceiptCommit { detail: String },
+    /// The commit could not reconcile Windows integration at the target
+    /// version.
+    RegistryCommit { detail: String },
+    /// The commit could not publish the installed signed evidence.
+    EvidenceCommit { detail: String },
+    /// A rollback backup slot is missing while the old set must be
+    /// restored.
+    RollbackAssetMissing { resource: String },
+    /// A rollback backup slot does not hold the journaled preimage.
+    RollbackAssetMismatch { resource: String, expected: String, actual: String },
+    /// A rollback restoration could not be performed.
+    RollbackRestore { resource: String, detail: String },
+    /// A restored old runtime file does not verify against the journaled
+    /// preimage.
+    RollbackVerification { resource: String, expected: String, actual: String },
+    /// Rollback could not reconcile Windows integration at the source
+    /// version.
+    RegistryRollback { detail: String },
+    /// Rollback could not restore the previous (or absent) committed
+    /// signed evidence.
+    EvidenceRollback { detail: String },
+    /// Best-effort cleanup after a terminal state failed. Never degrades
+    /// the terminal verdict; recorded as cleanup debt.
+    Cleanup { detail: String },
     /// Recovery evidence conflicts or cannot be proven.
     RecoveryInconsistent { detail: String },
     /// A lower-layer handoff validation refusal.
@@ -196,6 +243,68 @@ impl std::fmt::Display for MutationError {
             ),
             Self::JournalWrite { detail } => write!(f, "journal write failure: {detail}"),
             Self::Launch { detail } => write!(f, "new runtime launch failed: {detail}"),
+            Self::NonceGeneration { detail } => {
+                write!(f, "health nonce generation failed: {detail}")
+            }
+            Self::ChildExitedBeforeAck { pid } => {
+                write!(f, "probation child {pid} exited before any HealthAck was accepted")
+            }
+            Self::ProbationTimeout => write!(
+                f,
+                "no accepted HealthAck arrived within the bounded probation window"
+            ),
+            Self::HealthAckMalformed { detail } => {
+                write!(f, "health marker rejected: {detail}")
+            }
+            Self::HealthAckWrongSession => {
+                write!(f, "health marker names a different session; refused")
+            }
+            Self::HealthAckWrongNonce => {
+                write!(f, "health marker nonce does not match the durable session nonce; refused")
+            }
+            Self::HealthAckWrongProcess { detail } => {
+                write!(f, "health marker process identity mismatch: {detail}")
+            }
+            Self::HealthAckReplay => write!(
+                f,
+                "health was already accepted for this session; the nonce is single-use"
+            ),
+            Self::ReceiptCommit { detail } => {
+                write!(f, "commit could not publish the target receipt: {detail}")
+            }
+            Self::RegistryCommit { detail } => write!(
+                f,
+                "commit could not reconcile Windows integration at the target version: {detail}"
+            ),
+            Self::EvidenceCommit { detail } => write!(
+                f,
+                "commit could not publish the installed signed evidence: {detail}"
+            ),
+            Self::RollbackAssetMissing { resource } => {
+                write!(f, "rollback asset for {resource} is missing; the old set is not provable")
+            }
+            Self::RollbackAssetMismatch { resource, expected, actual } => write!(
+                f,
+                "rollback asset for {resource} holds {actual}, journaled preimage is {expected}"
+            ),
+            Self::RollbackRestore { resource, detail } => {
+                write!(f, "rollback restoration of {resource} failed: {detail}")
+            }
+            Self::RollbackVerification { resource, expected, actual } => write!(
+                f,
+                "restored {resource} hash {actual} != journaled preimage {expected}"
+            ),
+            Self::RegistryRollback { detail } => write!(
+                f,
+                "rollback could not reconcile Windows integration at the source version: {detail}"
+            ),
+            Self::EvidenceRollback { detail } => write!(
+                f,
+                "rollback could not restore the previous committed evidence state: {detail}"
+            ),
+            Self::Cleanup { detail } => {
+                write!(f, "post-terminal cleanup debt: {detail}")
+            }
             Self::RecoveryInconsistent { detail } => {
                 write!(f, "recovery evidence is inconsistent: {detail}")
             }
@@ -225,17 +334,17 @@ impl From<MutationError> for Error {
     }
 }
 
-fn io_err(context: &str, error: impl std::fmt::Display) -> MutationError {
+pub(crate) fn io_err(context: &str, error: impl std::fmt::Display) -> MutationError {
     MutationError::Io {
         detail: format!("{context}: {error}"),
     }
 }
 
-fn now_utc() -> String {
+pub(crate) fn now_utc() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-fn hash_stream(file: &mut std::fs::File) -> Result<(u64, String), MutationError> {
+pub(crate) fn hash_stream(file: &mut std::fs::File) -> Result<(u64, String), MutationError> {
     use sha2::Digest;
     use std::io::Read;
     let mut hasher = sha2::Sha256::new();
@@ -260,7 +369,7 @@ fn fingerprint(path: &Path) -> Result<(u64, String), MutationError> {
 
 /// `paths::open_regular` already rejects reparse points and multi-link files;
 /// surface its refusal as the typed unsafe-path error.
-fn open_checked(path: &Path) -> Result<std::fs::File, MutationError> {
+pub(crate) fn open_checked(path: &Path) -> Result<std::fs::File, MutationError> {
     paths::open_regular(path).map_err(|e| match e.kind {
         ErrorKind::UnsafePath => MutationError::UnsafePath {
             path: path.to_path_buf(),
@@ -271,7 +380,7 @@ fn open_checked(path: &Path) -> Result<std::fs::File, MutationError> {
     })
 }
 
-fn assert_no_reparse(path: &Path) -> Result<(), MutationError> {
+pub(crate) fn assert_no_reparse(path: &Path) -> Result<(), MutationError> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
             use std::os::windows::fs::MetadataExt;
@@ -294,14 +403,14 @@ fn resource_from_identity(identity: &str) -> Option<Resource> {
 
 /// The frozen backup/workspace directory for this session under the install
 /// root: `<installRoot>\.maintenance\<sessionId>\`.
-fn session_workspace(paths: &Paths, session_id: &str) -> PathBuf {
+pub(crate) fn session_workspace(paths: &Paths, session_id: &str) -> PathBuf {
     paths.install().join(SESSION_WORKSPACE_DIR).join(session_id)
 }
 
 /// The fixed backup slot path for one resource — the frozen grammar
 /// `.maintenance/<UUID>/<identity>.backup`, deterministically derived, never
 /// a dynamic or provider-supplied filename.
-fn backup_slot_path(paths: &Paths, session_id: &str, identity: &str) -> PathBuf {
+pub(crate) fn backup_slot_path(paths: &Paths, session_id: &str, identity: &str) -> PathBuf {
     session_workspace(paths, session_id).join(format!("{identity}.backup"))
 }
 
@@ -332,7 +441,7 @@ fn frozen_agree(validated: &ValidatedHandoff, current: &UpdateSessionEnvelope) -
 
 /// Load the durable journal and re-verify every frozen fact against the
 /// validated handoff.
-fn load_journal(validated: &ValidatedHandoff) -> Result<UpdateSessionEnvelope, MutationError> {
+pub(crate) fn load_journal(validated: &ValidatedHandoff) -> Result<UpdateSessionEnvelope, MutationError> {
     let envelope = load_update_session(validated.session_dir()).map_err(|e| {
         MutationError::JournalConflict {
             field: format!("journal unreadable: {e}"),
@@ -349,7 +458,7 @@ fn load_journal(validated: &ValidatedHandoff) -> Result<UpdateSessionEnvelope, M
 /// Journal one mutation step: write-new-generation → atomic publish →
 /// read-back verification. The frozen facts are re-verified on the durable
 /// result; generation is monotonic by construction.
-fn publish_mutation(
+pub(crate) fn publish_mutation(
     validated: &ValidatedHandoff,
     mutate: impl FnOnce(&mut UpdateSessionEnvelope),
 ) -> Result<UpdateSessionEnvelope, MutationError> {
@@ -559,7 +668,7 @@ fn verify_rollback_asset(
 /// temporary, sync, hash-verify, then atomically move into place. Reuses the
 /// Phase 1 primitives (`open_regular`, `move_replace`); creates no second
 /// copy implementation.
-fn copy_verified_to(
+pub(crate) fn copy_verified_to(
     source: &Path,
     destination: &Path,
     expected: (u64, String),
@@ -781,67 +890,10 @@ fn apply_resource(
     Ok(())
 }
 
-/// Launch the new runtime from the exact canonical installed path — never a
-/// shell, never PATH lookup, no arguments (the frozen startup contract passes
-/// coordination only through the child's own environment block, which the
-/// HealthAck phase owns). Records the child's PID + creation identity.
-///
-/// **Phase 2D-B tool, deliberately not invoked by this phase:** until the
-/// HealthAck half mints the session nonce and admission gains the
-/// `PostUpdateProbation` context, a launched runtime is refused by ordinary
-/// admission (`LifecycleBusy`) — the frozen probation entry cannot be
-/// split from HealthAck, so this phase stops at `ReplacedAwaitingLaunch`.
-#[allow(dead_code)]
-pub fn launch_installed_main(paths: &Paths) -> Result<ProcessIdentity, MutationError> {
-    let exe = paths.install().join(MAIN_EXE);
-    assert_no_reparse(&exe)?;
-    let child = Command::new(&exe).spawn().map_err(|e| MutationError::Launch {
-        detail: format!("{}: {e}", exe.display()),
-    })?;
-    let pid = child.id();
-    // The handle is deliberately not retained across phases here: probation
-    // control (waiting, termination on timeout) belongs to the HealthAck
-    // phase, which journals `probationProcess` and owns the handle.
-    drop(child);
-    let live = query_live_process_identity(pid).map_err(|e| MutationError::Launch {
-        detail: format!("launched child identity unrecordable: {e}"),
-    })?;
-    if !paths::equal(&live.image_path, &exe) {
-        return Err(MutationError::Launch {
-            detail: format!(
-                "launched child image {:?} does not match the canonical path",
-                live.image_path
-            ),
-        });
-    }
-    Ok(ProcessIdentity {
-        pid: live.pid,
-        process_created_at: live.creation_filetime.to_string(),
-        image_path: exe,
-    })
-}
-
-/// Journal the probation launch record (the frozen `probationProcess`
-/// field). Written immediately after process creation so the
-/// `LaunchedAwaitingHealth` window is as small as the OS allows.
-///
-/// **Phase 2D-B tool, deliberately not invoked by this phase** (see
-/// [`launch_installed_main`]).
-#[allow(dead_code)]
-fn journal_probation_process(
-    validated: &ValidatedHandoff,
-    probation: &ProcessIdentity,
-) -> Result<(), MutationError> {
-    publish_mutation(validated, |envelope| {
-        envelope.probation_process = Some(probation.clone());
-    })?;
-    Ok(())
-}
-
 /// Run every runtime mutation: derive the plan, precheck both resources
 /// against their durable facts, then the ordered per-resource apply. The
 /// receipt stays `Updating` throughout; nothing else is touched.
-fn apply_replacements(paths: &Paths, validated: &ValidatedHandoff) -> Result<(), MutationError> {
+pub(crate) fn apply_replacements(paths: &Paths, validated: &ValidatedHandoff) -> Result<(), MutationError> {
     let session_id = validated.session_id().to_string();
     let receipt = Receipt::load(paths)
         .map_err(|e| MutationError::InstallationInvalid {
@@ -912,7 +964,7 @@ fn apply_replacements(paths: &Paths, validated: &ValidatedHandoff) -> Result<(),
 /// Wait (bounded) for the exclusive application lease: the spawning app is
 /// expected to exit and release its shared lease. Handle-based, so a crashed
 /// owner releases it immediately — file existence is never consulted.
-fn wait_exclusive_lease(
+pub(crate) fn wait_exclusive_lease(
     paths: &Paths,
     attempts: u32,
     interval: Duration,
@@ -947,23 +999,21 @@ struct ReadyMarker {
 /// and the full Resume validation re-derives every fact from disk before the
 /// lease wait and the first mutation.
 ///
-/// **Success endpoint: `ReplacedAwaitingLaunch`.** The probation launch is
-/// deliberately NOT part of this phase: admitting the new runtime requires
-/// the frozen session+nonce environment bindings and the
-/// `PostUpdateProbation` admission context (protocol v1 "HealthAck",
-/// lifecycle §10 step 2, §11), which are inseparable from the HealthAck
-/// machinery this phase must not implement. A launch without them would be
-/// refused by admission by design — so none is performed. The exclusive
-/// lease is held until this process exits; nothing is committed, accepted,
-/// rolled back or cleaned up. Phase 2D-B resumes at exactly this state:
-/// launch the new runtime, journal `probationProcess`, then HealthAck.
+/// **The replacement phase's success endpoint is the durable
+/// `ReplacedAwaitingLaunch` state**: both executables replaced and verified,
+/// receipt `Updating`, backups retained — and, deliberately, the exclusive
+/// lease still held by this process. The returned validated handoff and
+/// lease are exactly what the Phase 2D-B probation flow continues from: it
+/// journals the probation-ready record, releases the lease, launches the
+/// child and owns the commit/rollback decision. Nothing here commits,
+/// accepts health, rolls back or cleans up.
 pub fn continue_update_transaction(
     paths: &Paths,
     trust: &TrustStore,
     runner_dir: &Path,
     session_id: &str,
     expected_manifest_sha256: &str,
-) -> Result<(), MutationError> {
+) -> Result<(ValidatedHandoff, lock::AppLease), MutationError> {
     validate_uuid(session_id).map_err(|e| {
         MutationError::Validation(HandoffError::CliArgument {
             detail: e.to_string(),
@@ -991,12 +1041,7 @@ pub fn continue_update_transaction(
         detail: e.to_string(),
     })?;
     apply_replacements(paths, &validated)?;
-    // The exclusive lease is held until this process exits: with no
-    // probation child to admit, there is no frozen reason to release it
-    // early (the 2D-B choreography releases it only after its own
-    // probation-ready record is durable).
-    drop(lease);
-    Ok(())
+    Ok((validated, lease))
 }
 
 /// Stage the session runner: copy this (installed helper) image into a fresh
@@ -1193,14 +1238,19 @@ pub fn detect_runner_provenance(paths: &Paths) -> Result<Option<PathBuf>, Mutati
 
 /// The full production `--update` entry: detects whether this process is the
 /// installed helper or a verified session runner and executes the
-/// corresponding half. The success endpoint is the durable
-/// `ReplacedAwaitingLaunch` state (both executables replaced and verified,
-/// receipt `Updating`, backups retained) — the probation launch belongs to
-/// the HealthAck phase.
+/// corresponding half. The runner half completes the replacement phase (the
+/// durable `ReplacedAwaitingLaunch` state) and then continues straight into
+/// the Phase 2D-B probation flow — nonce, launch, HealthAck, and the
+/// commit/rollback decision — which owns the transaction's terminal verdict.
+/// On a rollback verdict the caller reports through the returned outcome so
+/// the failure is surfaced, never relabeled update success.
 pub fn update_entry(paths: &Paths, session_id: &str, expected_manifest_sha256: &str) -> Result<(), Error> {
     let trust = desktop_todo_update_core::production_trust_store();
     if let Some(runner_dir) = detect_runner_provenance(paths).map_err(Error::from)? {
-        continue_update_transaction(paths, &trust, &runner_dir, session_id, expected_manifest_sha256)
+        let (validated, lease) =
+            continue_update_transaction(paths, &trust, &runner_dir, session_id, expected_manifest_sha256)
+                .map_err(Error::from)?;
+        crate::probation::settle_after_apply(paths, &trust, validated, lease)
             .map_err(Error::from)?;
         Ok(())
     } else {
@@ -1294,6 +1344,31 @@ pub enum MutationRecoveryState {
     ReplacedAwaitingLaunch,
     /// The new runtime was launched and recorded; health is pending.
     LaunchedAwaitingHealth,
+    /// Health was accepted (or a commit decision is journaled) and the
+    /// receipt is still `Updating`: the commit transaction resumes here —
+    /// never a re-run of the replacement (Phase 2D-B).
+    CommitPending,
+    /// A rollback decision is journaled and the receipt is still `Updating`:
+    /// the rollback transaction resumes here. Per-resource restoration
+    /// progress is visible in the resource facts (destination old vs new).
+    RollbackPending,
+    /// The receipt is `Installed` at the target version but the session is
+    /// not finalized: the receipt is authoritative (frozen lattice) — verify
+    /// the installed set and integration, then finalize `committed`.
+    CommittedPendingFinalization,
+    /// The receipt is `Installed` at the previous version after a rollback
+    /// decision but the session is not finalized: verify the restored old
+    /// set, then finalize `rolled-back`.
+    RolledBackPendingFinalization,
+    /// The session reached its `committed` terminal with the receipt at the
+    /// target: only bounded cleanup may remain.
+    CommittedCleanupPending,
+    /// The session reached its `rolled-back` terminal with the receipt at
+    /// the previous version: only bounded cleanup may remain.
+    RolledBackCleanupPending,
+    /// The session reached the `recovery-required` terminal: no resume; a
+    /// new session (or manual repair) is required.
+    RecoveryRequired,
     /// Evidence conflicts or cannot be proven: recovery-required semantics —
     /// no guessed destructive action.
     Inconsistent { detail: String },
@@ -1495,10 +1570,60 @@ pub fn classify_update_recovery(
 
     let all_completed = facts.iter().all(|fact| fact.replace_completed);
     let any_intent = facts.iter().any(|fact| fact.intent_recorded);
-    let tampered_completed = facts
+
+    // The journaled decision boundary (Phase 2D-B): a typed commit/rollback
+    // decision. A present but malformed value cannot be interpreted — the
+    // journal is evidence, and unreadable evidence is inconsistency, never
+    // permission to guess.
+    let decision: Option<Result<crate::probation::CommitIntent, String>> = envelope
+        .commit_intent
+        .as_ref()
+        .map(|value| crate::probation::parse_commit_intent(value));
+    let rollback_in_progress = matches!(
+        &decision,
+        Some(Ok(crate::probation::CommitIntent {
+            decision: crate::probation::CommitDecision::Rollback,
+            ..
+        }))
+    );
+    let decisions: Vec<&crate::probation::CommitIntent> = decision
         .iter()
-        .any(|fact| fact.replace_completed && fact.installed_matches_new == Some(false));
-    let state = if let Some(first) = notes.first() {
+        .filter_map(|parsed| parsed.as_ref().ok())
+        .collect();
+
+    // Phase-ordering invariants over the probation fields: the nonce is
+    // minted only after every replacement completed, health is accepted only
+    // after a nonce exists, a decision is journaled only after a nonce
+    // exists, and the launch record only after a nonce exists. (A rollback
+    // decision needs no accepted health — timeouts and launch failures roll
+    // back without any ack — but it still lives in the post-replacement
+    // phase.) While a rollback is in progress the "completed ⇒ target bytes"
+    // invariant is deliberately suspended: the transaction is un-replacing
+    // the managed set, so a completed resource legitimately holds its OLD
+    // bytes again.
+    let tampered_completed = !rollback_in_progress
+        && facts
+            .iter()
+            .any(|fact| fact.replace_completed && fact.installed_matches_new == Some(false));
+    let ordering_notes = [
+        (!all_completed && (envelope.health_nonce.is_some() || envelope.accepted_health.is_some() || envelope.commit_intent.is_some()))
+            .then(|| "probation/commit fields present before the replacements completed".to_string()),
+        (envelope.accepted_health.is_some() && envelope.health_nonce.is_none())
+            .then(|| "health accepted without any journaled nonce".to_string()),
+        (envelope.commit_intent.is_some() && envelope.health_nonce.is_none())
+            .then(|| "a decision was journaled without any journaled nonce".to_string()),
+        (envelope.probation_process.is_some() && envelope.health_nonce.is_none())
+            .then(|| "a probation launch was journaled without any journaled nonce".to_string()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<String>>();
+
+    let state = if let Some(Err(detail)) = &decision {
+        MutationRecoveryState::Inconsistent {
+            detail: format!("journaled decision is malformed: {detail}"),
+        }
+    } else if let Some(first) = notes.first().or_else(|| ordering_notes.first()) {
         MutationRecoveryState::Inconsistent {
             detail: first.clone(),
         }
@@ -1509,7 +1634,45 @@ pub fn classify_update_recovery(
     } else {
         match receipt.lifecycle_state {
             Lifecycle::Installed => {
-                if !any_intent && envelope.probation_process.is_none() {
+                let commit_shape = matches!(
+                    decisions.first(),
+                    Some(crate::probation::CommitIntent {
+                        decision: crate::probation::CommitDecision::Commit,
+                        ..
+                    })
+                ) && receipt.current_version.as_deref() == Some(envelope.to_version.as_str());
+                let rollback_shape = matches!(
+                    decisions.first(),
+                    Some(crate::probation::CommitIntent {
+                        decision: crate::probation::CommitDecision::Rollback,
+                        ..
+                    })
+                ) && receipt.current_version.as_deref() == Some(envelope.from_version.as_str());
+                if envelope.phase == SessionPhase::Committed
+                    && receipt.current_version.as_deref() == Some(envelope.to_version.as_str())
+                {
+                    MutationRecoveryState::CommittedCleanupPending
+                } else if envelope.phase == SessionPhase::RolledBack
+                    && receipt.current_version.as_deref() == Some(envelope.from_version.as_str())
+                {
+                    MutationRecoveryState::RolledBackCleanupPending
+                } else if envelope.phase == SessionPhase::RecoveryRequired {
+                    MutationRecoveryState::RecoveryRequired
+                } else if envelope.phase == SessionPhase::HandedOff
+                    && !any_pending_mutation(&facts)
+                    && (commit_shape || rollback_shape)
+                {
+                    if commit_shape {
+                        MutationRecoveryState::CommittedPendingFinalization
+                    } else {
+                        MutationRecoveryState::RolledBackPendingFinalization
+                    }
+                } else if !any_intent
+                    && envelope.probation_process.is_none()
+                    && envelope.health_nonce.is_none()
+                    && envelope.accepted_health.is_none()
+                    && envelope.commit_intent.is_none()
+                {
                     MutationRecoveryState::HandoffPrepared
                 } else {
                     MutationRecoveryState::Inconsistent {
@@ -1518,13 +1681,26 @@ pub fn classify_update_recovery(
                 }
             }
             Lifecycle::Updating => {
-                if envelope.phase != SessionPhase::HandedOff {
+                if envelope.phase == SessionPhase::RecoveryRequired {
+                    // The recovery-required terminal was journaled while the
+                    // receipt write may not have landed; the journal leads.
+                    MutationRecoveryState::RecoveryRequired
+                } else if envelope.phase != SessionPhase::HandedOff {
                     MutationRecoveryState::Inconsistent {
                         detail: format!(
                             "Updating receipt with session phase {:?}",
                             envelope.phase
                         ),
                     }
+                } else if let Some(intent) = decisions.first() {
+                    match intent.decision {
+                        crate::probation::CommitDecision::Commit => MutationRecoveryState::CommitPending,
+                        crate::probation::CommitDecision::Rollback => MutationRecoveryState::RollbackPending,
+                    }
+                } else if envelope.accepted_health.is_some() {
+                    // Health accepted but the decision not yet journaled:
+                    // the next legal step is the commit transaction.
+                    MutationRecoveryState::CommitPending
                 } else if !any_intent {
                     if envelope.probation_process.is_some() {
                         MutationRecoveryState::Inconsistent {
@@ -1565,6 +1741,14 @@ pub fn classify_update_recovery(
     })
 }
 
+/// True when any resource still sits between its durable intent and a
+/// completed, verified replacement — the mutation set is mid-flight.
+fn any_pending_mutation(facts: &[ResourceRecoveryFact]) -> bool {
+    facts
+        .iter()
+        .any(|fact| fact.intent_recorded && !fact.replace_completed)
+}
+
 /// The `--recover` entry: classify and report, read-only. This phase never
 /// resumes, rolls back or cleans up — the classification output is the
 /// recovery phase's input.
@@ -1581,7 +1765,8 @@ mod tests {
     use super::*;
     use crate::handoff::{validate_update_handoff, HandoffError, LiveProcessIdentity};
     use crate::paths::Paths;
-    use crate::update_session::{publish_update_session, HandoffFacts, SessionPhase};
+    use crate::update_session::{publish_update_session, HandoffFacts, ProcessIdentity, SessionPhase};
+    use crate::MAIN_EXE;
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
     use desktop_todo_update_core::{derive_key_id, TrustStore};
@@ -1666,7 +1851,7 @@ mod tests {
                 &self.digest,
             )
         }
-        fn continue_apply(&self) -> Result<(), MutationError> {
+        fn continue_apply(&self) -> Result<(ValidatedHandoff, crate::lock::AppLease), MutationError> {
             let runner_dir = self.paths.state().join("runners").join("test-runner");
             paths::create_dir(&runner_dir).unwrap();
             continue_update_transaction(
@@ -2394,14 +2579,20 @@ mod tests {
             MutationRecoveryState::ReplacedAwaitingLaunch
         );
 
-        // H. Launched and journaled (2D-B will write this record after the
-        // frozen probation entry exists), crash before any health decision.
-        // The state is reachable only through the journaled probation
-        // record, which this phase never writes.
+        // H. Launched and journaled (2D-B writes the nonce first, then the
+        // launch record), crash before any health decision. The journal
+        // writes reuse the one validated handoff — a re-validation after
+        // the nonce exists is deliberately refused, so the test mirrors the
+        // production single-handoff write pattern.
         let fixture = tx_fixture("crash-h");
         fixture.begin().unwrap();
         fixture.continue_apply().unwrap();
-        publish_mutation(&validated(&fixture), |envelope| {
+        let handoff = validated(&fixture);
+        publish_mutation(&handoff, |envelope| {
+            envelope.health_nonce = Some(STANDARD.encode([7u8; 32]));
+        })
+        .unwrap();
+        publish_mutation(&handoff, |envelope| {
             envelope.probation_process = Some(ProcessIdentity {
                 pid: 4242,
                 process_created_at: "133000000000000000".to_string(),
@@ -2413,6 +2604,27 @@ mod tests {
             fixture.classify().state,
             MutationRecoveryState::LaunchedAwaitingHealth
         );
+
+        // H-illegal (2D-B ordering invariant): a launch record without any
+        // journaled nonce cannot exist — the nonce is minted and durable
+        // before the launch, so this shape is evidence tampering and the
+        // classifier refuses it.
+        let fixture = tx_fixture("crash-h-illegal");
+        fixture.begin().unwrap();
+        fixture.continue_apply().unwrap();
+        let handoff = validated(&fixture);
+        publish_mutation(&handoff, |envelope| {
+            envelope.probation_process = Some(ProcessIdentity {
+                pid: 4242,
+                process_created_at: "133000000000000000".to_string(),
+                image_path: fixture.paths.install().join(MAIN_EXE),
+            });
+        })
+        .unwrap();
+        assert!(matches!(
+            fixture.classify().state,
+            MutationRecoveryState::Inconsistent { .. }
+        ));
     }
 
     #[test]

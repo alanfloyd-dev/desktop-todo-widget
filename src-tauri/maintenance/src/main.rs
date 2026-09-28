@@ -1,5 +1,5 @@
 #![windows_subsystem = "windows"]
-use desktop_todo_maintenance::{apply, elevation, lifecycle, native, paths::Paths, Error, ErrorKind, Result};
+use desktop_todo_maintenance::{apply, elevation, lifecycle, native, paths::Paths, probation, Error, ErrorKind, Result};
 fn run() -> Result<()> {
     // Per-user product: an elevated helper targets the wrong profile/HKCU
     // under over-the-shoulder elevation and needs elevation for nothing.
@@ -37,13 +37,14 @@ fn run() -> Result<()> {
         }
         [mode] if mode == "--install" => install(&paths, true),
         [mode, flag] if mode == "--install" && flag == "--no-start-menu-shortcut" => install(&paths, false),
-        // The frozen update transaction (Phase 2D-A): strict frozen argument
-        // form only — `--update --session-id <UUID> --expected-manifest-sha256
-        // <64 hex>`. The installed helper binds the live caller, validates
-        // everything independently, journals the handoff intent, transitions
-        // the receipt to `Updating`, then delegates to a verified session
-        // runner which performs the backup/replace transaction and stops
-        // exactly before HealthAck acceptance.
+        // The frozen update transaction (Phase 2D-A/2D-B): strict frozen
+        // argument form only — `--update --session-id <UUID>
+        // --expected-manifest-sha256 <64 hex>`. The installed helper binds
+        // the live caller, validates everything independently, journals the
+        // handoff intent, transitions the receipt to `Updating`, then
+        // delegates to a verified session runner which performs the
+        // backup/replace transaction and continues through the probation
+        // launch, HealthAck acceptance and the commit/rollback decision.
         [mode, flag1, session_id, flag2, digest]
             if mode == "--update"
                 && flag1 == "--session-id"
@@ -52,12 +53,15 @@ fn run() -> Result<()> {
             apply::update_entry(&paths, session_id, digest)?;
             Ok(())
         }
-        // The frozen recovery entrypoint (read-only in this phase): classify
+        // The frozen recovery entrypoint (Phase 2D-B, executed): classify
         // the interrupted transaction from the receipt, the durable journal
-        // and the actual files, and report. No resume, rollback or cleanup
-        // happens here.
+        // and the actual files, then perform exactly the frozen-safe action
+        // the classification names — resume apply/probation, observe
+        // probation, resume commit or rollback, finalize a terminal receipt,
+        // bounded cleanup, or mark `recovery-required` on inconsistency.
+        // Ambiguous evidence is never guessed through.
         [mode, flag, session_id] if mode == "--recover" && flag == "--session-id" => {
-            let report = apply::recover_report(&paths, session_id)?;
+            let report = probation::recover_and_execute(&paths, session_id)?;
             native::message(&report, false);
             Ok(())
         }

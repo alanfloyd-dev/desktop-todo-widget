@@ -650,6 +650,7 @@ dependencies = [
  "chrono",
  "desktop-todo-update-core",
  "ed25519-dalek",
+ "getrandom 0.4.3",
  "serde",
  "serde_json",
  "sha2",
