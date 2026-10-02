@@ -104,7 +104,20 @@ pub const GITHUB_DOWNLOAD_ORIGINS: &[&str] = &[
     "https://objects.githubusercontent.com",
     "https://release-assets.githubusercontent.com",
 ];
-pub const GITEE_DOWNLOAD_ORIGINS: &[&str] = &["https://gitee.com"];
+pub const GITEE_DOWNLOAD_ORIGINS: &[&str] = &[
+    "https://gitee.com",
+    // Observed live (Phase 4A-2 rehearsal smoke, 2026-10-02): Gitee serves
+    // release assets through a two-hop redirect chain,
+    // gitee.com/.../releases/download/... → gitee.com/attach_files/<id>/
+    // download/... → https://foruda.gitee.com/attach_file/... (signed CDN
+    // URL) → 200. foruda.gitee.com is Gitee's own attachment CDN host on
+    // the same registrable domain; it is admitted as an exact origin —
+    // never a wildcard, never a suffix rule — so every other host
+    // (including sibling subdomains and look-alike domains) still fails
+    // closed, and the chain remains bounded by the shared redirect-count
+    // limit and verified by the byte-exact digest rules downstream.
+    "https://foruda.gitee.com",
+];
 
 /// The compiled production endpoints, GitHub first (Auto's frozen primary).
 pub fn production_endpoints() -> Vec<ProviderEndpoints> {

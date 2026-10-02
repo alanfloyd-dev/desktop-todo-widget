@@ -300,4 +300,43 @@ mod tests {
         let url = reqwest::Url::parse("https://github.com/x").unwrap();
         assert_eq!(origin(&url).as_deref(), Some("https://github.com"));
     }
+
+    /// Phase 4B: the Gitee allowlist admits the observed attachment CDN as
+    /// one exact origin. The decision stays a scheme+host+port equality on
+    /// the canonicalized origin — no wildcard, no suffix trust, no sibling
+    /// or look-alike host, no scheme downgrade, no non-default port.
+    #[test]
+    fn gitee_origin_matrix_admits_only_the_two_compiled_origins() {
+        let allowlist: HashSet<String> = ["https://gitee.com", "https://foruda.gitee.com"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let allowed = |url: &str| {
+            redirect_allowed(&reqwest::Url::parse(url).unwrap(), &allowlist)
+        };
+        // Both compiled origins allow paths of any shape.
+        assert!(allowed("https://gitee.com/alanfloyd-dev/desktop-todo-widget/releases/download/v1.1.0/f"));
+        assert!(allowed("https://gitee.com/alanfloyd-dev/desktop-todo-widget/attach_files/3308927/download/f"));
+        assert!(allowed("https://foruda.gitee.com/attach_file/1790954961346017399/f?token=x&ts=1"));
+        // Scheme downgrade: a different origin, refused.
+        assert!(!allowed("http://foruda.gitee.com/attach_file/1/f"));
+        assert!(!allowed("http://gitee.com/x"));
+        // Suffix / sibling / look-alike hosts: exact match only.
+        assert!(!allowed("https://foruda.gitee.com.evil.example/f"));
+        assert!(!allowed("https://evilforuda.gitee.com/f"));
+        assert!(!allowed("https://sub.foruda.gitee.com/f"));
+        assert!(!allowed("https://gitee.com.evil.example/f"));
+        // A non-default port is a different origin; the default port
+        // canonicalizes away, so an explicit :443 stays equivalent.
+        assert!(!allowed("https://foruda.gitee.com:444/attach_file/1/f"));
+        assert!(allowed("https://foruda.gitee.com:443/attach_file/1/f"));
+        // Userinfo is not part of a URL origin (scheme+host+port), so
+        // https://user@foruda.gitee.com is the same origin as its host —
+        // the URL-standard behavior of reqwest::Url, asserted here rather
+        // than invented. It grants nothing beyond that exact host.
+        assert!(allowed("https://user@foruda.gitee.com/f"));
+        assert!(!allowed("https://user@evil.example/f"));
+        // The path/query never widens the decision.
+        assert!(!allowed("https://foruda.gitee.com.evil.example/https://gitee.com/"));
+    }
 }

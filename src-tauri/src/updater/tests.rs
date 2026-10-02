@@ -3390,3 +3390,110 @@ fn pipeline_asset_names_match_the_frozen_discovery_names() {
         desktop_todo_release_signer::ENVELOPE_FILENAME
     );
 }
+
+/// LIVE transport probe (Phase 4B; `#[ignore]`d, run explicitly with
+/// `cargo test -p alan-desktop --lib live_gitee -- --ignored`): proves the
+/// production updater transport — the shared discovery client built from
+/// the combined compiled origin allowlist, with the same custom redirect
+/// policy, redirect bound, identity-only encoding rule, and body caps as
+/// every runtime fetch — can consume a real Gitee asset through the full
+/// live redirect chain observed in the Phase 4A-2 rehearsal smoke:
+/// gitee.com → gitee.com/attach_files → https://foruda.gitee.com → 200.
+/// Requires real gitee.com network access and the retained 4A-2 rehearsal
+/// release; it performs no provider mutation and no trust relaxation.
+#[test]
+#[ignore = "live-network probe: real gitee.com access + the retained Phase 4A-2 rehearsal release required"]
+fn live_gitee_asset_fetch_traverses_the_real_redirect_chain() {
+    use crate::updater::providers::{production_endpoints, GITEE_DOWNLOAD_ORIGINS};
+
+    // The Phase 4A-2 real remote read-back measured this digest for the
+    // rehearsal release's signed update-manifest.json; the probe must
+    // re-download exactly those bytes through the live redirect chain.
+    const REHEARSAL_MANIFEST_SHA256: &str =
+        "4ce815deba6cb1638dc32be93e86488ccdf5390482ee81b9f7cfcb78fe145cd1";
+
+    let endpoints = production_endpoints();
+    let gitee = endpoints
+        .iter()
+        .find(|e| e.kind == ProviderKind::Gitee)
+        .expect("compiled production endpoints carry the Gitee provider");
+    // The compiled allowlist must already admit the observed CDN origin:
+    // this probe is meaningless without the Phase 4B allowlist entry.
+    assert!(
+        GITEE_DOWNLOAD_ORIGINS.contains(&"https://foruda.gitee.com"),
+        "the foruda.gitee.com allowlist entry is missing"
+    );
+
+    let config = DiscoveryConfig {
+        max_candidates: 10,
+        provider_index_body_cap: 1024 * 1024,
+        connect_timeout: Duration::from_secs(10),
+        request_timeout: Duration::from_secs(30),
+        max_retries: 2,
+        retry_backoff: Duration::from_secs(1),
+        retry_after_cap: Duration::from_secs(5),
+        max_redirects: 4,
+        scan_budget: None,
+    };
+    let client = discovery_client(&config, &combined_origin_allowlist(&endpoints))
+        .expect("discovery client builds");
+
+    // Locate the retained rehearsal release through the real (bounded)
+    // provider index — the exact production enumeration transport.
+    let index_url = gitee.releases_url.replace("{bound}", "10");
+    let index = fetch_bounded(
+        &client,
+        &index_url,
+        config.provider_index_body_cap,
+        BodyKind::ProviderIndex,
+        config.request_timeout,
+    )
+    .expect("real Gitee releases index fetches through the production transport");
+    let releases: Vec<serde_json::Value> = serde_json::from_slice(&index)
+        .expect("Gitee releases index is the expected JSON shape");
+    let rehearsal = releases
+        .iter()
+        .find(|r| {
+            r.get("tag_name").and_then(|t| t.as_str()).map(|t| {
+                t.starts_with("updater-rehearsal-gitee-")
+            }) == Some(true)
+                && r.get("prerelease").and_then(|p| p.as_bool()) == Some(true)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no retained Gitee updater-rehearsal-gitee-* prerelease release found; \
+                 re-create a rehearsal release (Phase 4A-2) before running this probe"
+            )
+        });
+    let manifest_url = rehearsal
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .and_then(|assets| {
+            assets
+                .iter()
+                .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(MANIFEST_ASSET_NAME))
+        })
+        .and_then(|a| a.get("browser_download_url").and_then(|u| u.as_str()))
+        .expect("the rehearsal release carries the manifest asset");
+
+    // The real fetch: gitee.com initial URL → attach_files redirect →
+    // foruda.gitee.com CDN redirect → 200 bytes, all under the production
+    // redirect policy. Any allowlist gap fails closed here.
+    let bytes = fetch_bounded(
+        &client,
+        manifest_url,
+        desktop_todo_update_core::MANIFEST_MAX_BYTES,
+        BodyKind::Manifest,
+        config.request_timeout,
+    )
+    .expect("real Gitee asset fetch traverses the full live redirect chain");
+
+    // Byte identity: exactly the signed manifest bytes the 4A-2 read-back
+    // verified on the wire.
+    assert_eq!(
+        desktop_todo_update_core::sha256_hex(&bytes),
+        REHEARSAL_MANIFEST_SHA256,
+        "the bytes served through the live redirect chain are not the signed manifest bytes"
+    );
+    assert!(bytes.starts_with(b"{\"schemaVersion\":1"));
+}
