@@ -23,9 +23,15 @@
 //!   explicit operator deletion on the provider);
 //! - partial previous upload → observed as different bytes → fail closed.
 //!
-//! Rehearsal safety: rehearsal artifacts are refused against the compiled
-//! production endpoints. A rehearsal publish requires an explicit isolated
-//! endpoint override (local mock or isolated test repository).
+//! Rehearsal safety (exposure invariant): rehearsal artifacts may only ever
+//! touch a production endpoint through a release that is invisible to
+//! updater discovery. Concretely: GitHub, which has a draft state, accepts
+//! a rehearsal publish/read-back only against a **draft** release — a
+//! published release carrying rehearsal material is a safety violation, and
+//! finalizing a rehearsal release on the production endpoint is refused.
+//! Gitee has no draft state, so its production endpoint refuses rehearsal
+//! artifacts entirely. Non-production endpoints (local mocks, isolated test
+//! endpoints) are unrestricted.
 //!
 //! Publication eligibility (§16 of application-lifecycle): a release is
 //! exposed to updater discovery only after read-back verification — the
@@ -64,6 +70,14 @@ impl Provider {
             Provider::GitHub => "DTW_GITHUB_TOKEN",
             Provider::Gitee => "DTW_GITEE_TOKEN",
         }
+    }
+
+    /// Whether the provider can hold a release in a state invisible to
+    /// updater discovery. This is the only channel a rehearsal release may
+    /// ever take through a production endpoint (see `enforce_mode_safety`
+    /// and `enforce_rehearsal_draft_isolation`).
+    fn has_draft_isolation(self) -> bool {
+        matches!(self, Provider::GitHub)
     }
 }
 
@@ -218,6 +232,37 @@ fn json_string(value: &serde_json::Value, field: &str) -> Result<String, Pipelin
     }
 }
 
+/// The URL the pipeline downloads an asset's exact bytes from.
+///
+/// Real GitHub shape (Phase 4A-1 smoke): a draft release's
+/// `browser_download_url` is an `untagged-…` URL that does not serve asset
+/// bytes to an API token (HTTP 404). The API asset URL (`url` field) is the
+/// authenticated exact-bytes download endpoint for both drafts and
+/// published releases when requested with `Accept: application/octet-stream`
+/// — which `download` always sends. The `browser_download_url` remains the
+/// fallback (local mock fixtures carry only that field) and the Gitee form.
+fn asset_download_url(
+    entry: &serde_json::Value,
+    provider: Provider,
+) -> Result<String, PipelineError> {
+    match provider {
+        Provider::GitHub => entry
+            .get("url")
+            .and_then(|u| u.as_str())
+            .map(|u| u.to_string())
+            .or_else(|| {
+                entry
+                    .get("browser_download_url")
+                    .and_then(|u| u.as_str())
+                    .map(|u| u.to_string())
+            })
+            .ok_or(PipelineError::Publish {
+                detail: "asset carries no downloadable url".to_string(),
+            }),
+        Provider::Gitee => json_string(entry, "browser_download_url"),
+    }
+}
+
 fn parse_release(value: &serde_json::Value, provider: Provider) -> Result<RemoteRelease, PipelineError> {
     let id = match provider {
         Provider::GitHub => json_string(value, "id")?,
@@ -233,7 +278,7 @@ fn parse_release(value: &serde_json::Value, provider: Provider) -> Result<Remote
                 Ok(RemoteAsset {
                     name: json_string(entry, "name")?,
                     size: entry.get("size").and_then(|s| s.as_u64()),
-                    url: json_string(entry, "browser_download_url")?,
+                    url: asset_download_url(entry, provider)?,
                 })
             })
             .collect::<Result<Vec<RemoteAsset>, PipelineError>>()?,
@@ -298,6 +343,44 @@ impl GitHubPublisher {
         format!("{}{}", self.api_base, path)
     }
 
+    /// Bounded scan of the authenticated releases list (which includes the
+    /// caller's draft releases) for a release carrying this tag. Three
+    /// pages of 100 — far beyond this repository's release count — keep
+    /// the scan bounded; the scan never paginates unboundedly.
+    fn find_release_by_list_scan(&self, tag: &str) -> Result<Option<RemoteRelease>, PipelineError> {
+        for page in 1..=3 {
+            let url = self.url(&format!(
+                "/repos/{}/releases?per_page=100&page={page}",
+                self.repo
+            ));
+            let response = self
+                .request(reqwest::Method::GET, &url)
+                .send()
+                .map_err(|e| PipelineError::Publish {
+                    detail: format!("releases list scan failed: {e}"),
+                })?;
+            let status = response.status().as_u16();
+            if status != 200 {
+                return Err(PipelineError::Publish {
+                    detail: format!("releases list scan returned HTTP {status}"),
+                });
+            }
+            let values: Vec<serde_json::Value> =
+                response.json().map_err(|e| PipelineError::Publish {
+                    detail: format!("releases list is not JSON: {e}"),
+                })?;
+            for value in &values {
+                if value.get("tag_name").and_then(|t| t.as_str()) == Some(tag) {
+                    return parse_release(value, Provider::GitHub).map(Some);
+                }
+            }
+            if values.len() < 100 {
+                break;
+            }
+        }
+        Ok(None)
+    }
+
     fn request(&self, method: reqwest::Method, url: &str) -> reqwest::blocking::RequestBuilder {
         self.client
             .request(method, url)
@@ -332,7 +415,15 @@ impl ProviderApi for GitHubPublisher {
                     })?;
                 Ok(Some(parse_release(&value, Provider::GitHub)?))
             }
-            404 => Ok(None),
+            404 => {
+                // Real GitHub shape (Phase 4A-1 smoke): a DRAFT release is
+                // not resolvable by tag — the tag ref is created only when
+                // the draft is published, so `releases/tags/{tag}` 404s
+                // even though the draft exists. The authenticated releases
+                // list does include the caller's drafts: fall back to a
+                // bounded list scan.
+                self.find_release_by_list_scan(tag)
+            }
             status => Err(PipelineError::Publish {
                 detail: format!("GET release by tag returned HTTP {status}"),
             }),
@@ -697,6 +788,7 @@ pub fn plan_publish(
     let existing = api.find_release(tag)?;
     let mut decisions = Vec::new();
     if let Some(release) = &existing {
+        enforce_rehearsal_draft_isolation(api, release, mode)?;
         // Never point an existing tag elsewhere and never recreate; the
         // asset-level collision policy (read-only downloads included)
         // produces the exact per-asset decisions.
@@ -727,6 +819,7 @@ pub fn execute_publish(
     let mut decisions = Vec::new();
     let release = match api.find_release(tag)? {
         Some(release) => {
+            enforce_rehearsal_draft_isolation(api, &release, mode)?;
             decide_assets(api, &release, artifacts, &mut decisions, true)?;
             release
         }
@@ -742,10 +835,56 @@ pub fn execute_publish(
 }
 
 fn enforce_mode_safety(api: &dyn ProviderApi, mode: ReleaseMode) -> Result<(), PipelineError> {
+    // Endpoint-level refusal for providers that cannot isolate a rehearsal
+    // release from discovery (no draft state — rehearsal on Gitee is
+    // immediately visible). GitHub rehearsal is admitted here and instead
+    // held to the per-release draft-isolation invariant below.
+    if mode == ReleaseMode::Rehearsal
+        && api.is_production_endpoint()
+        && !api.provider().has_draft_isolation()
+    {
+        return Err(PipelineError::RehearsalSafety {
+            detail: "rehearsal artifacts are refused on this production provider endpoint \
+                     (the provider has no draft state to keep them invisible to discovery); \
+                     publish rehearsals only against an explicit isolated endpoint"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// The per-release half of the rehearsal safety invariant: on a production
+/// endpoint, rehearsal artifacts may only be attached to a release that is
+/// invisible to updater discovery (a draft). A published release carrying
+/// rehearsal material is a safety violation, never an idempotence case.
+pub(crate) fn enforce_rehearsal_draft_isolation(
+    api: &dyn ProviderApi,
+    release: &RemoteRelease,
+    mode: ReleaseMode,
+) -> Result<(), PipelineError> {
+    if mode == ReleaseMode::Rehearsal && api.is_production_endpoint() && !release.draft {
+        return Err(PipelineError::RehearsalSafety {
+            detail: format!(
+                "release {} is published on the production endpoint; rehearsal artifacts may \
+                 only touch a production endpoint through a DRAFT release",
+                release.tag
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// The exposure act (`--finalize`, draft → published) must never run for
+/// rehearsal artifacts against a production endpoint: finalizing is the one
+/// operation that makes a release visible to updater discovery.
+pub fn enforce_finalize_safety(
+    api: &dyn ProviderApi,
+    mode: ReleaseMode,
+) -> Result<(), PipelineError> {
     if mode == ReleaseMode::Rehearsal && api.is_production_endpoint() {
         return Err(PipelineError::RehearsalSafety {
-            detail: "rehearsal artifacts are refused on production provider endpoints; \
-                     publish rehearsals only against an explicit isolated endpoint"
+            detail: "finalize would expose the release to production updater discovery; \
+                     rehearsal releases must stay drafts"
                 .to_string(),
         });
     }
@@ -862,19 +1001,26 @@ pub struct ReadBackResult {
 /// artifacts, verify the envelope + manifest under the requested mode's
 /// trust store, verify the manifest's package facts, validate the package
 /// ZIP through the shared validator, and verify the two managed EXEs.
+///
+/// The remote tag is passed explicitly: the frozen convention is
+/// `v{version}` (`tag_for_version`), but a rehearsal release publishes
+/// under an explicit non-production tag, and read-back must verify the
+/// release the publisher actually created — never a re-derived one.
 pub fn read_back(
     api: &dyn ProviderApi,
     artifacts: &ArtifactSet,
     facts: &ReleaseFacts,
     trust: &desktop_todo_update_core::TrustStore,
     staging: &Path,
+    tag: &str,
 ) -> Result<ReadBackResult, PipelineError> {
     enforce_mode_safety(api, facts.mode)?;
     let release = api
-        .find_release(&tag_for_version(&facts.target_version)?)?
+        .find_release(tag)?
         .ok_or(PipelineError::ReadBack {
             detail: "no remote release exists for the tag".to_string(),
         })?;
+    enforce_rehearsal_draft_isolation(api, &release, facts.mode)?;
 
     let temp = staging.join("read-back-temp");
     std::fs::create_dir_all(&temp).map_err(|e| PipelineError::Io {

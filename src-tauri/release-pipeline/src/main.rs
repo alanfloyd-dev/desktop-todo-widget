@@ -123,8 +123,9 @@ USAGE:
         [--mode rehearsal --trust-public <test-public>]
 
 Provider tokens come from DTW_GITHUB_TOKEN / DTW_GITEE_TOKEN (provider auth
-only, never logged). Rehearsal artifacts are refused on production endpoints:
-a rehearsal publish/read-back requires an explicit --api-base override.
+only, never logged). Rehearsal artifacts touch production endpoints only as
+GitHub DRAFT releases (finalize is refused in rehearsal mode); providers
+without a draft state (Gitee) refuse rehearsal artifacts entirely.
 See docs/release-signing.md and docs/application-lifecycle.md §16.
 "#;
     Ok(text.to_string())
@@ -315,7 +316,9 @@ fn publish_command(args: &[String]) -> Result<String, PipelineError> {
 
     if flags.switch("finalize") {
         // Exposure gate: the release may only leave draft state after its
-        // read-back verification passed (§16.6).
+        // read-back verification passed (§16.6) — and a rehearsal release
+        // must never be exposed through a production endpoint at all.
+        pipeline::publish::enforce_finalize_safety(api.as_ref(), mode)?;
         if !pipeline::report::provider_verified(&staging, provider.as_str(), &tag)? {
             return Err(PipelineError::ReadBack {
                 detail: format!(
@@ -366,14 +369,27 @@ fn publish_command(args: &[String]) -> Result<String, PipelineError> {
     }
 
     if flags.switch("upload") {
-        let (release, decisions) = pipeline::publish::execute_publish(
-            api.as_ref(),
-            &artifacts,
-            &tag,
-            &format!("desktop-todo-widget {}", facts.target_version),
-            "Application lifecycle management.",
-            mode,
-        )?;
+        // The release title/body must be unambiguous about the mode: a
+        // rehearsal release is visibly marked non-production on the
+        // provider, and carries no local paths, tokens, or key material.
+        let (title, body) = match mode {
+            ReleaseMode::Rehearsal => (
+                format!(
+                    "REHEARSAL (DO NOT USE) desktop-todo-widget {}",
+                    facts.target_version
+                ),
+                "NON-PRODUCTION updater smoke rehearsal. This release is signed with a TEST \
+                 key that verifies under NO production trust store; it must never be \
+                 finalized or installed. Safe to delete."
+                    .to_string(),
+            ),
+            ReleaseMode::Production => (
+                format!("desktop-todo-widget {}", facts.target_version),
+                "Application lifecycle management.".to_string(),
+            ),
+        };
+        let (release, decisions) =
+            pipeline::publish::execute_publish(api.as_ref(), &artifacts, &tag, &title, &body, mode)?;
         let mut text = format!("published {tag} on {}:\n", provider.as_str());
         for decision in &decisions {
             match decision {
@@ -460,7 +476,8 @@ fn read_back_command(args: &[String]) -> Result<String, PipelineError> {
     let mut results = Vec::new();
     for provider in providers {
         let api = build_publisher(provider, &flags, mode)?;
-        match pipeline::publish::read_back(api.as_ref(), &artifacts, &facts, &trust, &staging) {
+        match pipeline::publish::read_back(api.as_ref(), &artifacts, &facts, &trust, &staging, &tag)
+        {
             Ok(result) => {
                 records.push(VerificationRecord::from_result(&result, &tag, mode));
                 results.push(result);

@@ -125,9 +125,35 @@ fn spawn_mock(state: SharedState, tag: &'static str) -> String {
                 let mut st = state.lock().unwrap();
                 let response = match (method.as_str(), target.as_str()) {
                     ("GET", t) if t.starts_with("/repos/o/r/releases/tags/") => {
+                        // Real GitHub shape (Phase 4A-1): a DRAFT release is
+                        // not reachable by tag — the tag ref exists only
+                        // after publish — so a draft 404s here and must be
+                        // found through the releases list instead.
                         match release_json(&st, tag) {
-                            Some(value) => http_response("HTTP/1.1 200 OK", &value.to_string().into_bytes()),
-                            None => http_response("HTTP/1.1 404 Not Found", b"missing"),
+                            Some(value)
+                                if !value
+                                    .get("draft")
+                                    .and_then(|d| d.as_bool())
+                                    .unwrap_or(false) =>
+                            {
+                                http_response("HTTP/1.1 200 OK", &value.to_string().into_bytes())
+                            }
+                            _ => http_response("HTTP/1.1 404 Not Found", b"missing"),
+                        }
+                    }
+                    ("GET", t)
+                        if t.starts_with("/repos/o/r/releases")
+                            && !t.contains("/tags/")
+                            && !t.contains("/attach_files") =>
+                    {
+                        // The authenticated list includes the caller's
+                        // drafts (the draft-resolution fallback path).
+                        match release_json(&st, tag) {
+                            Some(value) => http_response(
+                                "HTTP/1.1 200 OK",
+                                format!("[{value}]").into_bytes().as_slice(),
+                            ),
+                            None => http_response("HTTP/1.1 200 OK", b"[]"),
                         }
                     }
                     ("GET", t) if t.starts_with("/api/v5/repos/o/r/releases/tags/") => {
@@ -433,7 +459,7 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
         let api = mock_publisher_github(&base);
         execute_publish(api.as_ref(), &artifacts, "v1.2.0", "t", "b", ReleaseMode::Rehearsal).unwrap();
 
-        let result = read_back(api.as_ref(), &artifacts, &facts, &trust, &staging).unwrap();
+        let result = read_back(api.as_ref(), &artifacts, &facts, &trust, &staging, "v1.2.0").unwrap();
         assert_eq!(result.provider, "github");
         assert_eq!(result.artifact_sha256.len(), 4);
 
@@ -448,7 +474,7 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
                 .unwrap();
             entry.1 = tampered;
         }
-        let error = read_back(api.as_ref(), &artifacts, &facts, &trust, &staging).unwrap_err();
+        let error = read_back(api.as_ref(), &artifacts, &facts, &trust, &staging, "v1.2.0").unwrap_err();
         assert!(matches!(error, crate::PipelineError::ReadBack { .. }), "{error}");
         assert!(!staging.join("read-back-temp").exists());
         fs::remove_dir_all(&repo).ok();
@@ -467,7 +493,7 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
         execute_publish(api.as_ref(), &artifacts, "v1.2.0", "t", "b", ReleaseMode::Rehearsal).unwrap();
 
         let production = crate::signing::verification_trust(ReleaseMode::Production, None).unwrap();
-        let error = read_back(api.as_ref(), &artifacts, &facts, &production, &staging).unwrap_err();
+        let error = read_back(api.as_ref(), &artifacts, &facts, &production, &staging, "v1.2.0").unwrap_err();
         assert!(matches!(error, crate::PipelineError::ReadBack { .. }), "{error}");
         fs::remove_dir_all(&repo).ok();
     }
@@ -490,8 +516,8 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
         execute_publish(github.as_ref(), &artifacts, "v1.2.0", "t", "b", ReleaseMode::Rehearsal).unwrap();
         execute_publish(gitee.as_ref(), &artifacts, "v1.2.0", "t", "b", ReleaseMode::Rehearsal).unwrap();
 
-        let left = read_back(github.as_ref(), &artifacts, &facts, &trust, &staging).unwrap();
-        let right = read_back(gitee.as_ref(), &artifacts, &facts, &trust, &staging).unwrap();
+        let left = read_back(github.as_ref(), &artifacts, &facts, &trust, &staging, "v1.2.0").unwrap();
+        let right = read_back(gitee.as_ref(), &artifacts, &facts, &trust, &staging, "v1.2.0").unwrap();
         assert_mirror_consistency(&left, &right).unwrap();
 
         {
@@ -503,18 +529,22 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
                 .unwrap();
             entry.1[0] ^= 0xFF;
         }
-        let error = read_back(gitee.as_ref(), &artifacts, &facts, &trust, &staging).unwrap_err();
+        let error = read_back(gitee.as_ref(), &artifacts, &facts, &trust, &staging, "v1.2.0").unwrap_err();
         assert!(matches!(error, crate::PipelineError::ReadBack { .. }), "{error}");
         fs::remove_dir_all(&repo).ok();
     }
 
     #[test]
-    fn rehearsal_artifacts_are_refused_on_production_endpoints() {
+    fn gitee_rehearsal_artifacts_are_refused_on_the_production_endpoint() {
         ensure_tokens();
-        let (repo, staging) = prepared_staging("safety");
+        let (repo, staging) = prepared_staging("safety-gitee");
         let facts = load_facts(&staging);
         let artifacts = ArtifactSet::from_staging(&staging, &facts);
-        let api: Box<dyn ProviderApi> = Box::new(GitHubPublisher::production("o/r").unwrap());
+        let api: Box<dyn ProviderApi> = Box::new(GiteePublisher::production("o/r").unwrap());
+        // Gitee has no draft state, so a rehearsal release could never be
+        // kept invisible: both entry points must refuse before any network
+        // mutation (the safety check precedes find_release, so this test
+        // makes no network call at all).
         let error =
             plan_publish(api.as_ref(), &artifacts, "v1.2.0", ReleaseMode::Rehearsal).unwrap_err();
         assert!(matches!(error, crate::PipelineError::RehearsalSafety { .. }), "{error}");
@@ -529,6 +559,82 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
         .unwrap_err();
         assert!(matches!(error, crate::PipelineError::RehearsalSafety { .. }), "{error}");
         fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn github_rehearsal_on_the_production_endpoint_requires_draft_isolation() {
+        ensure_tokens();
+        // Constructed, never used for I/O: the isolation gate is a pure
+        // predicate over the provider endpoint and the release draft state.
+        let api: Box<dyn ProviderApi> = Box::new(GitHubPublisher::production("o/r").unwrap());
+        let published = crate::publish::RemoteRelease {
+            id: "1".to_string(),
+            tag: "v0.0.903".to_string(),
+            draft: false,
+            prerelease: true,
+            assets: Vec::new(),
+            upload_url: None,
+        };
+        // A published release must never carry rehearsal artifacts.
+        let error = crate::publish::enforce_rehearsal_draft_isolation(
+            api.as_ref(),
+            &published,
+            ReleaseMode::Rehearsal,
+        )
+        .unwrap_err();
+        assert!(matches!(error, crate::PipelineError::RehearsalSafety { .. }), "{error}");
+        // A draft is the one permitted channel.
+        let draft = crate::publish::RemoteRelease {
+            draft: true,
+            ..published.clone()
+        };
+        crate::publish::enforce_rehearsal_draft_isolation(api.as_ref(), &draft, ReleaseMode::Rehearsal)
+            .unwrap();
+        // Production mode is never restricted by rehearsal gates.
+        crate::publish::enforce_rehearsal_draft_isolation(
+            api.as_ref(),
+            &published,
+            ReleaseMode::Production,
+        )
+        .unwrap();
+        // And a non-production endpoint never restricts rehearsal.
+        let mock: Box<dyn ProviderApi> = Box::new(
+            GitHubPublisher::for_rehearsal(
+                "o/r",
+                "http://127.0.0.1:1".to_string(),
+                "http://127.0.0.1:1".to_string(),
+            )
+            .unwrap(),
+        );
+        crate::publish::enforce_rehearsal_draft_isolation(
+            mock.as_ref(),
+            &published,
+            ReleaseMode::Rehearsal,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn finalize_is_refused_for_rehearsal_on_production_endpoints() {
+        ensure_tokens();
+        let api: Box<dyn ProviderApi> = Box::new(GitHubPublisher::production("o/r").unwrap());
+        let error =
+            crate::publish::enforce_finalize_safety(api.as_ref(), ReleaseMode::Rehearsal)
+                .unwrap_err();
+        assert!(matches!(error, crate::PipelineError::RehearsalSafety { .. }), "{error}");
+        // A non-production endpoint is unrestricted (mock finalize stays
+        // testable), and production mode on the production endpoint is the
+        // legitimate finalize use.
+        let mock: Box<dyn ProviderApi> = Box::new(
+            GitHubPublisher::for_rehearsal(
+                "o/r",
+                "http://127.0.0.1:1".to_string(),
+                "http://127.0.0.1:1".to_string(),
+            )
+            .unwrap(),
+        );
+        crate::publish::enforce_finalize_safety(mock.as_ref(), ReleaseMode::Rehearsal).unwrap();
+        crate::publish::enforce_finalize_safety(api.as_ref(), ReleaseMode::Production).unwrap();
     }
 
     #[test]
@@ -553,7 +659,7 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
                 .count(),
             4
         );
-        read_back(api.as_ref(), &artifacts, &facts, &trust, &staging).unwrap();
+        read_back(api.as_ref(), &artifacts, &facts, &trust, &staging, "v1.2.0").unwrap();
         let error = api.set_publication(&release, false).unwrap_err();
         assert!(matches!(error, crate::PipelineError::Publish { .. }), "{error}");
         fs::remove_dir_all(&repo).ok();
