@@ -24,6 +24,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "desktop-todo-maintenance",
+ "desktop-todo-release-pipeline",
  "desktop-todo-release-signer",
  "desktop-todo-update-core",
  "ed25519-dalek",
@@ -659,6 +660,19 @@ dependencies = [
  "uuid",
  "windows",
  "winreg",
+ "zip",
+]
+
+[[package]]
+name = "desktop-todo-release-pipeline"
+version = "0.1.0"
+dependencies = [
+ "desktop-todo-maintenance",
+ "desktop-todo-release-signer",
+ "desktop-todo-update-core",
+ "reqwest",
+ "serde_json",
+ "sha2",
  "zip",
 ]
 

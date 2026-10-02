@@ -3306,3 +3306,87 @@ fn main_trust_store_is_the_shared_compiled_production_store() {
         assert_eq!(entry.raw_public_key(), other.raw_public_key());
     }
 }
+
+// ---------------------------------------------------------------- Phase 3B
+// Release-pipeline discovery compatibility.
+
+/// Discovery compatibility gate (Phase 3B §16): a release published as a
+/// TEST/rehearsal — marked `prerelease` (or `draft`) on the provider — is
+/// never selected by production stable discovery, while the genuine stable
+/// release beside it is discovered and accepted under the unchanged frozen
+/// rules. The rehearsal release here is otherwise a perfectly good
+/// candidate: trusted key, complete frozen asset names, signed metadata —
+/// only its publication flag keeps it out of the stable channel.
+#[test]
+fn rehearsal_publication_is_not_selected_by_stable_discovery() {
+    let addr = serve(move |target, bound| {
+        // Newest: a rehearsal release (prerelease=true) carrying complete,
+        // correctly signed metadata assets.
+        if target.starts_with("/github/releases") {
+            let rehearsal_entries = asset_entries(bound, "rehearsal");
+            let stable_entries = asset_entries(bound, "stable");
+            let rehearsal = release_json(
+                10,
+                "v1.4.0-rehearsal",
+                false,
+                true,
+                &[
+                    (rehearsal_entries[0].0.as_str(), rehearsal_entries[0].1.as_str()),
+                    (rehearsal_entries[1].0.as_str(), rehearsal_entries[1].1.as_str()),
+                ],
+            );
+            let stable = release_json(
+                9,
+                "v1.3.0",
+                false,
+                false,
+                &[
+                    (stable_entries[0].0.as_str(), stable_entries[0].1.as_str()),
+                    (stable_entries[1].0.as_str(), stable_entries[1].1.as_str()),
+                ],
+            );
+            let body = format!("[{rehearsal},{stable}]");
+            return http_ok(body.as_bytes());
+        }
+        // Serve both candidates' metadata bytes; the rehearsal manifest is
+        // a fully valid, signed schema-1 document for 1.4.0.
+        if let Some(bytes) = serve_candidate_bytes(target, "rehearsal", "1.4.0", 1, &signing_k1())
+        {
+            return bytes;
+        }
+        if let Some(bytes) = serve_candidate_bytes(target, "stable", "1.3.0", 1, &signing_k1()) {
+            return bytes;
+        }
+        not_found()
+    });
+
+    let fixture = fixture(addr);
+    let outcome = run(&fixture, ReleaseSource::GitHub);
+    // The rehearsal (newer) release must not have been taken; the stable
+    // 1.3.0 candidate is accepted instead.
+    let target = assert_target(outcome, "1.3.0");
+    assert_eq!(target.manifest().version().to_string(), "1.3.0");
+}
+
+/// The discovery layer's frozen metadata asset names and the release
+/// pipeline's published names are the same two strings — the pipeline may
+/// never drift from what discovery matches by exact name.
+#[test]
+fn pipeline_asset_names_match_the_frozen_discovery_names() {
+    // The pipeline crate pins these as public constants; discovery pins
+    // them in providers.rs. Both must equal the protocol v1 convention
+    // (`update-manifest.json` / `update-manifest.json.sig`), and the
+    // signer's envelope filename is the third pin on the same value.
+    assert_eq!(
+        desktop_todo_release_pipeline::MANIFEST_ASSET_NAME,
+        MANIFEST_ASSET_NAME
+    );
+    assert_eq!(
+        desktop_todo_release_pipeline::ENVELOPE_ASSET_NAME,
+        ENVELOPE_ASSET_NAME
+    );
+    assert_eq!(
+        desktop_todo_release_pipeline::ENVELOPE_ASSET_NAME,
+        desktop_todo_release_signer::ENVELOPE_FILENAME
+    );
+}

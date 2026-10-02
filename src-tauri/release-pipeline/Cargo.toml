@@ -1,0 +1,41 @@
+[package]
+name = "desktop-todo-release-pipeline"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Release package assembly, manifest generation, signing hand-off, and provider publishing orchestration for Maintenance Protocol 1 (operator tooling, never shipped)"
+
+[lib]
+name = "desktop_todo_release_pipeline"
+
+[[bin]]
+name = "desktop-todo-release-pipeline"
+path = "src/main.rs"
+
+# Operator tooling: every dependency already exists in the canonical parent
+# lock (`src-tauri/Cargo.lock`) through the product crates — zero new crates.
+[dependencies]
+# The single shared protocol implementation: manifest validation, exact-byte
+# verification, trust-store semantics, digest helpers.
+desktop-todo-update-core = { path = "../update-core" }
+# Signing is delegated to the existing offline signer (Phase 3A): the
+# production path runs its compiled production trust gate; the rehearsal path
+# uses its explicitly-injected trust-store entry point. This crate never
+# touches Ed25519 primitives itself.
+desktop-todo-release-signer = { path = "../release-signer" }
+# Package validation reuses the single shared ZIP rule implementation
+# (maintenance::package_zip) — never a second copy of the security rules.
+desktop-todo-maintenance = { path = "../maintenance" }
+# Deterministic package writing (same crate/version/features the shared
+# validator accepts: Stored and Deflate only).
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Streaming SHA-256 for package/EXE fact hashing (the same crate the
+# protocol core and the signer pin).
+sha2 = "0.10"
+# Report/facts serialization (never used to reserialize a signed document).
+serde_json = "1"
+# Publish/read-back transport. Deliberately the same declaration as the
+# product's updater client: blocking + native-tls, NO decompression features,
+# so read-back always compares the exact served bytes.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "native-tls"] }

@@ -324,6 +324,30 @@ pub fn sign_manifest(manifest_bytes: &[u8], key: &SigningKey) -> Result<SignOutc
     )
 }
 
+/// **TEST/REHEARSAL-ONLY** signing entry point for the release pipeline's
+/// explicit rehearsal mode (Phase 3B): identical gates with an operator- or
+/// test-supplied trust store. This is *not* a production path and never can
+/// become one implicitly:
+///
+/// - the production CLI (`sign` subcommand) and the pipeline's production
+///   mode both go through [`sign_manifest`], which is hard-pinned to the
+///   compiled `production_trust_store()`;
+/// - a rehearsal store built around a TEST key can never pass that compiled
+///   gate, and no production binary ever links a rehearsal store;
+/// - callers must label the produced artifacts as rehearsal (the pipeline
+///   records the mode in `facts.json` and refuses rehearsal artifacts on
+///   production provider endpoints).
+///
+/// This wrapper widens nothing inside the signer: it only exposes the same
+/// injected-store core the unit tests exercise.
+pub fn sign_manifest_for_rehearsal(
+    manifest_bytes: &[u8],
+    key: &SigningKey,
+    trust: &TrustStore,
+) -> Result<SignOutcome, ToolError> {
+    sign_manifest_with_trust(manifest_bytes, key, trust)
+}
+
 /// Testable signing core: identical gates with an explicitly injected trust
 /// store. Crate-internal on purpose — the production CLI is fixed to
 /// [`sign_manifest`], which pins the real compiled production store; only
