@@ -11,7 +11,7 @@ Implemented tooling:
 - Manifest pre-sign validation, exact-byte Ed25519 signing, and a mandatory production-equivalent self-verification round-trip (`update_core::verify_and_parse`) before any envelope is written.
 - Package/EXE fact computation (SHA-256 + byte size) for authoring the manifest.
 
-Not yet implemented (deliberately out of scope): release ZIP assembly automation, provider publish automation, mirror readback verification, CI-held signing keys (never planned).
+Implemented in commit `712a7bb` as separate operator tooling (`desktop-todo-release-pipeline`; never a runtime component): release package assembly, release facts, deterministic manifest generation, provider publishing orchestration, remote read-back verification, and mirror consistency. That pipeline delegates cryptographic signing to this signer and is never a trust authority; it has been exercised only against local mock/integration provider tests and a local rehearsal prepare. Still not performed: real GitHub/Gitee provider smoke (including Gitee multipart online compatibility), the real production key ceremony, the first signed RC, and any production publish. Deliberately out of scope, never planned: CI-held signing keys.
 
 ## Ground rules
 
@@ -122,7 +122,7 @@ desktop-todo-release-signer verify --manifest <update-manifest.json> --envelope 
 
 ## 8. Publish
 
-Upload **identical** `update-manifest.json`, `update-manifest.json.sig`, the ZIP, and the ZIP `.sha256` sidecar to every provider — never rebuild or re-sign per source (protocol doc, "Compatibility and commit rules"). Publication automation is not implemented; this step is manual for now and stays subject to the §16 release-requirements gates (notices completeness, cargo audit/deny, mirror readback verification).
+Upload **identical** `update-manifest.json`, `update-manifest.json.sig`, the ZIP, and the ZIP `.sha256` sidecar to every provider — never rebuild or re-sign per source (protocol doc, "Compatibility and commit rules"). Publishing orchestration for GitHub and Gitee is implemented (commit `712a7bb`, `desktop-todo-release-pipeline`) with an explicit collision/idempotence policy, remote read-back verification, and mirror consistency by artifact digests — but no real provider publish has been executed: real GitHub/Gitee smoke and Gitee multipart online compatibility remain unverified, no production key ceremony has happened, no first signed RC exists, and production publishing stays subject to the §16 release-requirements gates (notices completeness, cargo audit/deny, real remote read-back/mirror consistency). The signing steps above are unchanged: the private seed never enters the publishing layer, and ordering is still key ceremony → public-key provisioning → build → sign → publish.
 
 ## What must NEVER be committed or logged
 
