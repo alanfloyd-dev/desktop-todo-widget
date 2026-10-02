@@ -23,14 +23,17 @@
 //!   explicit operator deletion on the provider);
 //! - partial previous upload → observed as different bytes → fail closed.
 //!
-//! Rehearsal safety (exposure invariant): rehearsal artifacts may only ever
-//! touch a production endpoint through a release that is invisible to
-//! updater discovery. Concretely: GitHub, which has a draft state, accepts
-//! a rehearsal publish/read-back only against a **draft** release — a
-//! published release carrying rehearsal material is a safety violation, and
+//! Rehearsal safety (visibility-isolation invariant): rehearsal artifacts
+//! may only ever touch a production endpoint through a release that stable
+//! updater discovery will not select. Concretely: GitHub rehearsal requires
+//! a **draft** release (invisible to discovery entirely) — a published
+//! release carrying rehearsal material is a safety violation, and
 //! finalizing a rehearsal release on the production endpoint is refused.
-//! Gitee has no draft state, so its production endpoint refuses rehearsal
-//! artifacts entirely. Non-production endpoints (local mocks, isolated test
+//! Gitee has no draft state (a created release is immediately visible), so
+//! its rehearsal isolation is the provider's **prerelease** publication
+//! flag — the exact field the discovery adapters' publication-eligibility
+//! step filters on — chosen with an explicitly non-production version
+//! identity. Non-production endpoints (local mocks, isolated test
 //! endpoints) are unrestricted.
 //!
 //! Publication eligibility (§16 of application-lifecycle): a release is
@@ -70,14 +73,6 @@ impl Provider {
             Provider::GitHub => "DTW_GITHUB_TOKEN",
             Provider::Gitee => "DTW_GITEE_TOKEN",
         }
-    }
-
-    /// Whether the provider can hold a release in a state invisible to
-    /// updater discovery. This is the only channel a rehearsal release may
-    /// ever take through a production endpoint (see `enforce_mode_safety`
-    /// and `enforce_rehearsal_draft_isolation`).
-    fn has_draft_isolation(self) -> bool {
-        matches!(self, Provider::GitHub)
     }
 }
 
@@ -623,6 +618,36 @@ impl GiteePublisher {
     fn url(&self, path: &str) -> String {
         format!("{}{}?access_token={}", self.api_base, path, self.token)
     }
+
+    /// The repository's default branch (real Gitee shape, Phase 4A-2:
+    /// required as `target_commitish` when a release creates its own tag).
+    fn default_branch(&self) -> Result<String, PipelineError> {
+        let url = self.url(&format!("/repos/{}", self.repo));
+        let response = self.client.get(&url).send().map_err(|e| PipelineError::Publish {
+            detail: format!("GET repository failed: {e}"),
+        })?;
+        let status = response.status().as_u16();
+        if status != 200 {
+            return Err(PipelineError::Publish {
+                detail: format!("GET repository returned HTTP {status}"),
+            });
+        }
+        let value: serde_json::Value = response.json().map_err(|e| PipelineError::Publish {
+            detail: format!("repository response is not JSON: {e}"),
+        })?;
+        if value.is_null() {
+            return Err(PipelineError::Publish {
+                detail: "repository response is null".to_string(),
+            });
+        }
+        let branch = json_string(&value, "default_branch")?;
+        if branch.is_empty() {
+            return Err(PipelineError::Publish {
+                detail: "repository response carries no default_branch".to_string(),
+            });
+        }
+        Ok(branch)
+    }
 }
 
 impl ProviderApi for GiteePublisher {
@@ -645,6 +670,12 @@ impl ProviderApi for GiteePublisher {
                     response.json().map_err(|e| PipelineError::Publish {
                         detail: format!("release response is not JSON: {e}"),
                     })?;
+                // Real Gitee shape (Phase 4A-2): a release lookup for a tag
+                // with no release returns HTTP 200 with a literal `null`
+                // body, not 404 — treat it as "no release exists".
+                if value.is_null() {
+                    return Ok(None);
+                }
                 Ok(Some(parse_release(&value, Provider::Gitee)?))
             }
             404 => Ok(None),
@@ -665,11 +696,17 @@ impl ProviderApi for GiteePublisher {
         // Gitee has no draft state; `_draft` is recorded as unsupported and
         // the caller's report must state the release is immediately visible.
         let url = self.url(&format!("/repos/{}/releases", self.repo));
+        // Real Gitee shape (Phase 4A-2): creating a release for a tag that
+        // does not exist yet requires `target_commitish` — the branch or
+        // commit the tag is created on. Resolve the repository's actual
+        // default branch (one authenticated read) instead of assuming it.
+        let target_commitish = self.default_branch()?;
         let payload = serde_json::json!({
             "tag_name": tag,
             "name": title,
             "body": body,
             "prerelease": prerelease,
+            "target_commitish": target_commitish,
         });
         let response = self.client.post(&url).json(&payload).send().map_err(|e| {
             PipelineError::Publish {
@@ -784,11 +821,10 @@ pub fn plan_publish(
     tag: &str,
     mode: ReleaseMode,
 ) -> Result<(Option<RemoteRelease>, Vec<PublishDecision>), PipelineError> {
-    enforce_mode_safety(api, mode)?;
     let existing = api.find_release(tag)?;
     let mut decisions = Vec::new();
     if let Some(release) = &existing {
-        enforce_rehearsal_draft_isolation(api, release, mode)?;
+        enforce_rehearsal_visibility_isolation(api, release, mode)?;
         // Never point an existing tag elsewhere and never recreate; the
         // asset-level collision policy (read-only downloads included)
         // produces the exact per-asset decisions.
@@ -815,11 +851,10 @@ pub fn execute_publish(
     body: &str,
     mode: ReleaseMode,
 ) -> Result<(RemoteRelease, Vec<PublishDecision>), PipelineError> {
-    enforce_mode_safety(api, mode)?;
     let mut decisions = Vec::new();
     let release = match api.find_release(tag)? {
         Some(release) => {
-            enforce_rehearsal_draft_isolation(api, &release, mode)?;
+            enforce_rehearsal_visibility_isolation(api, &release, mode)?;
             decide_assets(api, &release, artifacts, &mut decisions, true)?;
             release
         }
@@ -834,42 +869,35 @@ pub fn execute_publish(
     Ok((release, decisions))
 }
 
-fn enforce_mode_safety(api: &dyn ProviderApi, mode: ReleaseMode) -> Result<(), PipelineError> {
-    // Endpoint-level refusal for providers that cannot isolate a rehearsal
-    // release from discovery (no draft state — rehearsal on Gitee is
-    // immediately visible). GitHub rehearsal is admitted here and instead
-    // held to the per-release draft-isolation invariant below.
-    if mode == ReleaseMode::Rehearsal
-        && api.is_production_endpoint()
-        && !api.provider().has_draft_isolation()
-    {
-        return Err(PipelineError::RehearsalSafety {
-            detail: "rehearsal artifacts are refused on this production provider endpoint \
-                     (the provider has no draft state to keep them invisible to discovery); \
-                     publish rehearsals only against an explicit isolated endpoint"
-                .to_string(),
-        });
-    }
-    Ok(())
-}
-
 /// The per-release half of the rehearsal safety invariant: on a production
-/// endpoint, rehearsal artifacts may only be attached to a release that is
-/// invisible to updater discovery (a draft). A published release carrying
-/// rehearsal material is a safety violation, never an idempotence case.
-pub(crate) fn enforce_rehearsal_draft_isolation(
+/// endpoint, rehearsal artifacts may only be attached to a release that
+/// stable updater discovery will not select. GitHub isolation is the draft
+/// state (invisible to discovery entirely); Gitee has no draft state, so its
+/// isolation is the provider's prerelease publication flag — the exact field
+/// the discovery adapters' publication-eligibility step filters on — chosen
+/// together with an explicitly non-production version identity. A release
+/// carrying rehearsal material that is publication-visible on its provider
+/// is a safety violation, never an idempotence case.
+pub(crate) fn enforce_rehearsal_visibility_isolation(
     api: &dyn ProviderApi,
     release: &RemoteRelease,
     mode: ReleaseMode,
 ) -> Result<(), PipelineError> {
-    if mode == ReleaseMode::Rehearsal && api.is_production_endpoint() && !release.draft {
-        return Err(PipelineError::RehearsalSafety {
-            detail: format!(
-                "release {} is published on the production endpoint; rehearsal artifacts may \
-                 only touch a production endpoint through a DRAFT release",
-                release.tag
-            ),
-        });
+    if mode == ReleaseMode::Rehearsal && api.is_production_endpoint() {
+        let isolated = match api.provider() {
+            Provider::GitHub => release.draft,
+            Provider::Gitee => release.prerelease,
+        };
+        if !isolated {
+            return Err(PipelineError::RehearsalSafety {
+                detail: format!(
+                    "release {} is publication-visible on the production endpoint; rehearsal \
+                     artifacts may only touch a production endpoint through a DRAFT release \
+                     (GitHub) or a prerelease-marked release (Gitee)",
+                    release.tag
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -1014,13 +1042,12 @@ pub fn read_back(
     staging: &Path,
     tag: &str,
 ) -> Result<ReadBackResult, PipelineError> {
-    enforce_mode_safety(api, facts.mode)?;
     let release = api
         .find_release(tag)?
         .ok_or(PipelineError::ReadBack {
             detail: "no remote release exists for the tag".to_string(),
         })?;
-    enforce_rehearsal_draft_isolation(api, &release, facts.mode)?;
+    enforce_rehearsal_visibility_isolation(api, &release, facts.mode)?;
 
     let temp = staging.join("read-back-temp");
     std::fs::create_dir_all(&temp).map_err(|e| PipelineError::Io {

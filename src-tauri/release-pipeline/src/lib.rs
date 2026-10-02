@@ -53,9 +53,10 @@ pub const SIDECAR_SUFFIX: &str = ".sha256";
 
 /// Execution mode of a pipeline run. Recorded in `facts.json` and enforced:
 /// rehearsal artifacts may touch a production provider endpoint only through
-/// a release invisible to discovery (a GitHub draft — finalize is refused in
-/// rehearsal mode), never on a provider without a draft state, and a staging
-/// directory's mode can never be silently switched.
+/// a release stable discovery will not select — a GitHub draft (finalize is
+/// refused in rehearsal mode) or a prerelease-marked Gitee release (which
+/// has no draft state) — and a staging directory's mode can never be
+/// silently switched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReleaseMode {
     /// Real production signing (compiled production trust gate; fails closed

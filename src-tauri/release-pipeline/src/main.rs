@@ -124,8 +124,8 @@ USAGE:
 
 Provider tokens come from DTW_GITHUB_TOKEN / DTW_GITEE_TOKEN (provider auth
 only, never logged). Rehearsal artifacts touch production endpoints only as
-GitHub DRAFT releases (finalize is refused in rehearsal mode); providers
-without a draft state (Gitee) refuse rehearsal artifacts entirely.
+GitHub DRAFT releases (finalize is refused in rehearsal mode) or as
+prerelease-marked Gitee releases; a publication-visible release is refused.
 See docs/release-signing.md and docs/application-lifecycle.md §16.
 "#;
     Ok(text.to_string())

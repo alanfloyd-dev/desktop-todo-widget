@@ -159,14 +159,22 @@ fn spawn_mock(state: SharedState, tag: &'static str) -> String {
                     ("GET", t) if t.starts_with("/api/v5/repos/o/r/releases/tags/") => {
                         match release_json(&st, tag) {
                             Some(value) => http_response("HTTP/1.1 200 OK", &value.to_string().into_bytes()),
-                            None => http_response("HTTP/1.1 404 Not Found", b"missing"),
+                            // Real Gitee shape (Phase 4A-2): a missing release
+                            // is HTTP 200 with a literal `null` body.
+                            None => http_response("HTTP/1.1 200 OK", b"null"),
                         }
                     }
-                    ("POST", t)
-                        if (t.starts_with("/repos/o/r/releases")
-                            || t.starts_with("/api/v5/repos/o/r/releases"))
-                            && !t.contains("/attach_files") =>
+                    ("GET", t)
+                        if t.starts_with("/api/v5/repos/o/r") && !t.contains("/releases") =>
                     {
+                        // Real Gitee shape: the repository endpoint supplies
+                        // the default branch used as `target_commitish`.
+                        http_response(
+                            "HTTP/1.1 200 OK",
+                            br#"{"id":1,"full_name":"o/r","default_branch":"main"}"#,
+                        )
+                    }
+                    ("POST", t) if t.starts_with("/repos/o/r/releases") && !t.contains("/attach_files") => {
                         if st.release.is_some() {
                             http_response("HTTP/1.1 422 Unprocessable", b"exists")
                         } else {
@@ -177,6 +185,40 @@ fn spawn_mock(state: SharedState, tag: &'static str) -> String {
                             st.release = Some((1, draft));
                             let value = release_json(&st, tag).unwrap();
                             http_response("HTTP/1.1 201 Created", &value.to_string().into_bytes())
+                        }
+                    }
+                    ("POST", t)
+                        if t.starts_with("/api/v5/repos/o/r/releases")
+                            && !t.contains("/attach_files") =>
+                    {
+                        if st.release.is_some() {
+                            http_response("HTTP/1.1 422 Unprocessable", b"exists")
+                        } else {
+                            let payload = serde_json::from_slice::<serde_json::Value>(&body)
+                                .ok()
+                                .unwrap_or_default();
+                            // Real Gitee shape (Phase 4A-2): creating a release
+                            // for a not-yet-existing tag requires
+                            // `target_commitish`; refuse without it.
+                            if payload
+                                .get("target_commitish")
+                                .and_then(|v| v.as_str())
+                                .map(|s| !s.is_empty())
+                                != Some(true)
+                            {
+                                http_response(
+                                    "HTTP/1.1 400 Bad Request",
+                                    br#"{"messages":["target_commitish is missing"]}"#,
+                                )
+                            } else {
+                                let draft = payload
+                                    .get("draft")
+                                    .and_then(|d| d.as_bool())
+                                    .unwrap_or(false);
+                                st.release = Some((1, draft));
+                                let value = release_json(&st, tag).unwrap();
+                                http_response("HTTP/1.1 201 Created", &value.to_string().into_bytes())
+                            }
                         }
                     }
                     ("POST", t) if t.starts_with("/uploads/o/r/releases/") => {
@@ -535,30 +577,57 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
     }
 
     #[test]
-    fn gitee_rehearsal_artifacts_are_refused_on_the_production_endpoint() {
+    fn gitee_rehearsal_on_the_production_endpoint_requires_prerelease_isolation() {
         ensure_tokens();
-        let (repo, staging) = prepared_staging("safety-gitee");
-        let facts = load_facts(&staging);
-        let artifacts = ArtifactSet::from_staging(&staging, &facts);
+        // Constructed, never used for I/O: the isolation gate is a pure
+        // predicate over the provider endpoint and the release visibility
+        // state. Gitee has no draft state, so the discovery-equivalent
+        // isolation is the prerelease publication flag.
         let api: Box<dyn ProviderApi> = Box::new(GiteePublisher::production("o/r").unwrap());
-        // Gitee has no draft state, so a rehearsal release could never be
-        // kept invisible: both entry points must refuse before any network
-        // mutation (the safety check precedes find_release, so this test
-        // makes no network call at all).
-        let error =
-            plan_publish(api.as_ref(), &artifacts, "v1.2.0", ReleaseMode::Rehearsal).unwrap_err();
-        assert!(matches!(error, crate::PipelineError::RehearsalSafety { .. }), "{error}");
-        let error = execute_publish(
+        let published = crate::publish::RemoteRelease {
+            id: "1".to_string(),
+            tag: "updater-rehearsal-gitee-test".to_string(),
+            draft: false,
+            prerelease: false,
+            assets: Vec::new(),
+            upload_url: None,
+        };
+        // A publication-visible release must never carry rehearsal artifacts.
+        let error = crate::publish::enforce_rehearsal_visibility_isolation(
             api.as_ref(),
-            &artifacts,
-            "v1.2.0",
-            "t",
-            "b",
+            &published,
             ReleaseMode::Rehearsal,
         )
         .unwrap_err();
         assert!(matches!(error, crate::PipelineError::RehearsalSafety { .. }), "{error}");
-        fs::remove_dir_all(&repo).ok();
+        // A prerelease-marked release is the one permitted Gitee channel.
+        let prerelease = crate::publish::RemoteRelease {
+            prerelease: true,
+            ..published.clone()
+        };
+        crate::publish::enforce_rehearsal_visibility_isolation(
+            api.as_ref(),
+            &prerelease,
+            ReleaseMode::Rehearsal,
+        )
+        .unwrap();
+        // Production mode is never restricted by rehearsal gates.
+        crate::publish::enforce_rehearsal_visibility_isolation(
+            api.as_ref(),
+            &published,
+            ReleaseMode::Production,
+        )
+        .unwrap();
+        // And a non-production endpoint never restricts rehearsal.
+        let mock: Box<dyn ProviderApi> = Box::new(
+            GiteePublisher::for_rehearsal("o/r", "http://127.0.0.1:1/api/v5".to_string()).unwrap(),
+        );
+        crate::publish::enforce_rehearsal_visibility_isolation(
+            mock.as_ref(),
+            &published,
+            ReleaseMode::Rehearsal,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -576,7 +645,7 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
             upload_url: None,
         };
         // A published release must never carry rehearsal artifacts.
-        let error = crate::publish::enforce_rehearsal_draft_isolation(
+        let error = crate::publish::enforce_rehearsal_visibility_isolation(
             api.as_ref(),
             &published,
             ReleaseMode::Rehearsal,
@@ -588,10 +657,10 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
             draft: true,
             ..published.clone()
         };
-        crate::publish::enforce_rehearsal_draft_isolation(api.as_ref(), &draft, ReleaseMode::Rehearsal)
+        crate::publish::enforce_rehearsal_visibility_isolation(api.as_ref(), &draft, ReleaseMode::Rehearsal)
             .unwrap();
         // Production mode is never restricted by rehearsal gates.
-        crate::publish::enforce_rehearsal_draft_isolation(
+        crate::publish::enforce_rehearsal_visibility_isolation(
             api.as_ref(),
             &published,
             ReleaseMode::Production,
@@ -606,7 +675,7 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
             )
             .unwrap(),
         );
-        crate::publish::enforce_rehearsal_draft_isolation(
+        crate::publish::enforce_rehearsal_visibility_isolation(
             mock.as_ref(),
             &published,
             ReleaseMode::Rehearsal,
@@ -648,6 +717,11 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
         let state: SharedState = Arc::new(Mutex::new(MockState::default()));
         let base = spawn_mock(state.clone(), "v1.2.0");
         let api = mock_publisher_gitee(&base);
+
+        // Real Gitee shape regression (Phase 4A-2): a tag with no release
+        // resolves to HTTP 200 with a literal `null` body, which find_release
+        // must map to None — never a parse failure.
+        assert!(api.find_release("v1.2.0").unwrap().is_none());
 
         let (release, decisions) =
             execute_publish(api.as_ref(), &artifacts, "v1.2.0", "t", "b", ReleaseMode::Rehearsal)
