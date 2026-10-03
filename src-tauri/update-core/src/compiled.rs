@@ -100,8 +100,11 @@ mod tests {
     }
 
     #[test]
-    fn empty_production_store_is_fail_closed() {
-        assert!(production_trust_store().is_empty());
+    fn unknown_keys_stay_fail_closed_under_the_provisioned_store() {
+        // Post-Phase-5A posture: the compiled store carries the one real
+        // provisioned key, and every other key — including a fabricated
+        // keyId over unrelated material — is still rejected before parsing.
+        assert_eq!(production_trust_store().len(), 1);
         let manifest = format!(
             r#"{{"schemaVersion":1,"appId":"{APP_ID}","channel":"stable","version":"1.4.0","publishedAt":"2026-10-01T00:00:00Z","notes":"","updaterProtocol":1,"assets":{{}}}}"#
         );

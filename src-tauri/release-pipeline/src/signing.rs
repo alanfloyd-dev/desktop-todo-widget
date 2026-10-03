@@ -198,9 +198,10 @@ mod tests {
         let key_path = dir.join("test.seed");
         let public_path = dir.join("test.pub");
         signer::generate_keypair(&key_path, &public_path).unwrap();
-        // The compiled production store stays empty; the rehearsal key id
-        // cannot appear in it.
-        assert!(desktop_todo_update_core::production_trust_store().is_empty());
+        // The compiled production store carries only the real provisioned
+        // ceremony key (Phase 5A); a freshly generated rehearsal/test key
+        // can never appear in it.
+        assert_eq!(desktop_todo_update_core::production_trust_store().len(), 1);
         let public = signer::load_public_key(&public_path).unwrap();
         assert!(!desktop_todo_update_core::production_key_ids()
             .contains(&signer::key_id_of(&public)));

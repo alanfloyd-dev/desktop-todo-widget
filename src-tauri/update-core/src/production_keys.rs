@@ -34,11 +34,25 @@ pub(crate) struct ProvisionedKey<'a> {
 /// The provisioned production keys, in provisioning order.
 ///
 /// **Currently empty (fail-closed):** no real v1.2 production signing key
-/// has been through the key ceremony yet, so the production trust store is
-/// empty and every candidate is untrusted. Populating this table is the
+/// has been through the key ceremony. Populating this table is the
 /// release-signing provisioning gate described in the module docs and in
 /// `docs/release-signing.md`. Never add test keys here.
-pub(crate) const PRODUCTION_KEYS: &[ProvisionedKey] = &[];
+///
+/// Provisioning history: the first (and currently only) entry was added in
+/// the Phase 5A key ceremony (2026-10-03) — an Ed25519 keypair generated
+/// outside the repository with OS CSPRNG entropy via
+/// `desktop-todo-release-signer generate-keypair`; the private seed is held
+/// offline by the operator and exists nowhere in the repository, its
+/// remotes, or CI.
+pub(crate) const PRODUCTION_KEYS: &[ProvisionedKey] = &[ProvisionedKey {
+    declared_key_id: "7ac26bf0df6dc17fd229d886fac67172b475eefdec31eff3cf2e1ed9285128db",
+    raw: [
+        0x9a, 0x0c, 0xa4, 0x6e, 0xa1, 0x11, 0xd8, 0x2d,
+        0x8a, 0x9a, 0x75, 0x6a, 0xc0, 0x08, 0xdd, 0x07,
+        0xd0, 0xb8, 0x5a, 0x6f, 0xaa, 0x79, 0xfc, 0x1b,
+        0xe0, 0x53, 0x59, 0x26, 0x87, 0x4f, 0x26, 0x51,
+    ],
+}];
 
 /// Build the production trust store from the provisioned table.
 ///
@@ -64,14 +78,20 @@ pub(crate) fn store_from(keys: &[ProvisionedKey]) -> Result<TrustStore, TrustSto
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compiled::production_key_ids;
     use crate::trust::is_lowercase_hex_64;
 
     #[test]
-    fn empty_table_provisions_a_fail_closed_store() {
-        // The current release posture: no provisioned production key, so
-        // every candidate is untrusted.
-        assert!(PRODUCTION_KEYS.is_empty());
-        assert!(store_from(PRODUCTION_KEYS).unwrap().is_empty());
+    fn provisioned_table_carries_the_phase_5a_production_key() {
+        // The current release posture: exactly one provisioned production
+        // key from the Phase 5A ceremony, so candidates verify only under
+        // that compiled trust root.
+        assert_eq!(PRODUCTION_KEYS.len(), 1);
+        let store = store_from(PRODUCTION_KEYS).unwrap();
+        assert_eq!(store.len(), 1);
+        assert!(production_key_ids().contains(
+            &"7ac26bf0df6dc17fd229d886fac67172b475eefdec31eff3cf2e1ed9285128db".to_string()
+        ));
     }
 
     #[test]
