@@ -41,7 +41,7 @@ fn temp_dir(label: &str) -> PathBuf {
 
 #[derive(Default)]
 struct MockState {
-    release: Option<(u64, bool)>, // (id, draft)
+    release: Option<(u64, bool, bool)>, // (id, draft, prerelease)
     assets: Vec<(String, Vec<u8>)>,
     /// Absolute base for the download URLs the mock hands out (real
     /// providers always return absolute URLs).
@@ -61,7 +61,7 @@ fn http_response(status: &str, body: &[u8]) -> Vec<u8> {
 }
 
 fn release_json(state: &MockState, tag: &str) -> Option<serde_json::Value> {
-    let (id, draft) = state.release?;
+    let (id, draft, prerelease) = state.release?;
     let assets: Vec<serde_json::Value> = state
         .assets
         .iter()
@@ -77,7 +77,7 @@ fn release_json(state: &MockState, tag: &str) -> Option<serde_json::Value> {
         "id": id,
         "tag_name": tag,
         "draft": draft,
-        "prerelease": false,
+        "prerelease": prerelease,
         "upload_url": format!("/uploads/o/r/releases/{id}/assets{{?name,label}}"),
         "assets": assets,
     }))
@@ -178,11 +178,17 @@ fn spawn_mock(state: SharedState, tag: &'static str) -> String {
                         if st.release.is_some() {
                             http_response("HTTP/1.1 422 Unprocessable", b"exists")
                         } else {
-                            let draft = serde_json::from_slice::<serde_json::Value>(&body)
-                                .ok()
+                            let payload =
+                                serde_json::from_slice::<serde_json::Value>(&body).ok();
+                            let draft = payload
+                                .as_ref()
                                 .and_then(|v| v.get("draft").and_then(|d| d.as_bool()))
                                 .unwrap_or(false);
-                            st.release = Some((1, draft));
+                            let payload_prerelease = payload
+                                .as_ref()
+                                .and_then(|v| v.get("prerelease").and_then(|p| p.as_bool()))
+                                .unwrap_or(false);
+                            st.release = Some((1, draft, payload_prerelease));
                             let value = release_json(&st, tag).unwrap();
                             http_response("HTTP/1.1 201 Created", &value.to_string().into_bytes())
                         }
@@ -215,7 +221,11 @@ fn spawn_mock(state: SharedState, tag: &'static str) -> String {
                                     .get("draft")
                                     .and_then(|d| d.as_bool())
                                     .unwrap_or(false);
-                                st.release = Some((1, draft));
+                                let payload_prerelease = payload
+                                    .get("prerelease")
+                                    .and_then(|p| p.as_bool())
+                                    .unwrap_or(false);
+                                st.release = Some((1, draft, payload_prerelease));
                                 let value = release_json(&st, tag).unwrap();
                                 http_response("HTTP/1.1 201 Created", &value.to_string().into_bytes())
                             }
@@ -264,7 +274,7 @@ fn spawn_mock(state: SharedState, tag: &'static str) -> String {
                         }
                     }
                     ("PATCH", t) if t.starts_with("/repos/o/r/releases/") => {
-                        if let Some((_, draft)) = st.release.as_mut() {
+                        if let Some((_, draft, _)) = st.release.as_mut() {
                             *draft = serde_json::from_slice::<serde_json::Value>(&body)
                                 .ok()
                                 .and_then(|v| v.get("draft").and_then(|d| d.as_bool()))
@@ -375,7 +385,7 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
         let api = mock_publisher_github(&base);
 
         let (release, decisions) =
-            execute_publish(api.as_ref(), &artifacts, tag, "title", "body", ReleaseMode::Rehearsal)
+            execute_publish(api.as_ref(), &artifacts, tag, "title", "body", ReleaseMode::Rehearsal, false)
                 .unwrap();
         assert!(
             decisions
@@ -402,7 +412,7 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
         }
 
         let (_, decisions) =
-            execute_publish(api.as_ref(), &artifacts, tag, "title", "body", ReleaseMode::Rehearsal)
+            execute_publish(api.as_ref(), &artifacts, tag, "title", "body", ReleaseMode::Rehearsal, false)
                 .unwrap();
         assert_eq!(
             decisions
@@ -427,7 +437,7 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
             "title",
             "body",
             ReleaseMode::Rehearsal,
-        )
+        false,)
         .unwrap_err();
         assert!(matches!(error, crate::PipelineError::PublishCollision { .. }), "{error}");
         {
@@ -469,7 +479,7 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
         let artifacts = ArtifactSet::from_staging(&staging, &facts);
 
         let state: SharedState = Arc::new(Mutex::new(MockState {
-            release: Some((7, true)),
+            release: Some((7, true, false)),
             assets: vec![(facts.package_filename.clone(), vec![0u8; 10])],
             ..MockState::default()
         }));
@@ -482,7 +492,7 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
             "t",
             "b",
             ReleaseMode::Rehearsal,
-        )
+        false,)
         .unwrap_err();
         assert!(matches!(error, crate::PipelineError::PublishCollision { .. }), "{error}");
         fs::remove_dir_all(&repo).ok();
@@ -499,7 +509,7 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
         let state: SharedState = Arc::new(Mutex::new(MockState::default()));
         let base = spawn_mock(state.clone(), "v1.2.0");
         let api = mock_publisher_github(&base);
-        execute_publish(api.as_ref(), &artifacts, "v1.2.0", "t", "b", ReleaseMode::Rehearsal).unwrap();
+        execute_publish(api.as_ref(), &artifacts, "v1.2.0", "t", "b", ReleaseMode::Rehearsal, false).unwrap();
 
         let result = read_back(api.as_ref(), &artifacts, &facts, &trust, &staging, "v1.2.0").unwrap();
         assert_eq!(result.provider, "github");
@@ -532,7 +542,7 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
         let state: SharedState = Arc::new(Mutex::new(MockState::default()));
         let base = spawn_mock(state.clone(), "v1.2.0");
         let api = mock_publisher_github(&base);
-        execute_publish(api.as_ref(), &artifacts, "v1.2.0", "t", "b", ReleaseMode::Rehearsal).unwrap();
+        execute_publish(api.as_ref(), &artifacts, "v1.2.0", "t", "b", ReleaseMode::Rehearsal, false).unwrap();
 
         let production = crate::signing::verification_trust(ReleaseMode::Production, None).unwrap();
         let error = read_back(api.as_ref(), &artifacts, &facts, &production, &staging, "v1.2.0").unwrap_err();
@@ -555,8 +565,8 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
         let github = mock_publisher_github(&github_base);
         let gitee = mock_publisher_gitee(&gitee_base);
 
-        execute_publish(github.as_ref(), &artifacts, "v1.2.0", "t", "b", ReleaseMode::Rehearsal).unwrap();
-        execute_publish(gitee.as_ref(), &artifacts, "v1.2.0", "t", "b", ReleaseMode::Rehearsal).unwrap();
+        execute_publish(github.as_ref(), &artifacts, "v1.2.0", "t", "b", ReleaseMode::Rehearsal, false).unwrap();
+        execute_publish(gitee.as_ref(), &artifacts, "v1.2.0", "t", "b", ReleaseMode::Rehearsal, false).unwrap();
 
         let left = read_back(github.as_ref(), &artifacts, &facts, &trust, &staging, "v1.2.0").unwrap();
         let right = read_back(gitee.as_ref(), &artifacts, &facts, &trust, &staging, "v1.2.0").unwrap();
@@ -706,6 +716,57 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
         crate::publish::enforce_finalize_safety(api.as_ref(), ReleaseMode::Production).unwrap();
     }
 
+    /// Phase 5D regression: a production publish may explicitly request RC
+    /// metadata (`--prerelease`), so the created Gitee release is marked
+    /// prerelease=true and held out of stable discovery by the
+    /// publication-eligibility filter. Without the flag the production
+    /// release stays publication-visible (prerelease=false), exactly as a
+    /// final stable release must be.
+    #[test]
+    fn production_prerelease_flag_marks_the_gitee_release_for_rc_isolation() {
+        ensure_tokens();
+        let (repo, staging) = prepared_staging("rc-prerelease");
+        let facts = load_facts(&staging);
+        let artifacts = ArtifactSet::from_staging(&staging, &facts);
+
+        let state: SharedState = Arc::new(Mutex::new(MockState::default()));
+        let base = spawn_mock(state.clone(), "v1.2.0");
+        let api = mock_publisher_gitee(&base);
+
+        // Without the flag: publication-visible immediately.
+        let (release, _) = execute_publish(
+            api.as_ref(),
+            &artifacts,
+            "v1.2.0",
+            "desktop-todo-widget 1.2.0",
+            "Application lifecycle management.",
+            ReleaseMode::Production,
+            false,
+        )
+        .unwrap();
+        assert!(!release.prerelease);
+        assert!(!release.draft);
+        // Reset the mock to exercise the flagged path on a fresh state.
+        let base = state.lock().unwrap().base.clone();
+        *state.lock().unwrap() = MockState {
+            base,
+            ..MockState::default()
+        };
+        let (release, _) = execute_publish(
+            api.as_ref(),
+            &artifacts,
+            "v1.2.0",
+            "desktop-todo-widget 1.2.0",
+            "Application lifecycle management.",
+            ReleaseMode::Production,
+            true,
+        )
+        .unwrap();
+        assert!(release.prerelease, "the RC flag must mark the release prerelease");
+        assert!(!release.draft);
+        fs::remove_dir_all(&repo).ok();
+    }
+
     #[test]
     fn gitee_publish_round_trips_and_has_no_draft_state() {
         ensure_tokens();
@@ -724,7 +785,7 @@ fn mock_publisher_gitee(base: &str) -> Box<dyn ProviderApi> {
         assert!(api.find_release("v1.2.0").unwrap().is_none());
 
         let (release, decisions) =
-            execute_publish(api.as_ref(), &artifacts, "v1.2.0", "t", "b", ReleaseMode::Rehearsal)
+            execute_publish(api.as_ref(), &artifacts, "v1.2.0", "t", "b", ReleaseMode::Rehearsal, false)
                 .unwrap();
         assert_eq!(
             decisions

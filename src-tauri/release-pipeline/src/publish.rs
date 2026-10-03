@@ -843,6 +843,12 @@ pub fn plan_publish(
 
 /// Execute the publish with the full collision policy. Returns the
 /// (possibly newly created) release record.
+///
+/// `prerelease` lets a production publish carry explicit RC metadata: the
+/// provider release is marked prerelease so stable discovery's
+/// publication-eligibility filter holds it out of the stable channel (the
+/// GitHub counterpart isolation is the draft state). Rehearsal publishes
+/// are always prerelease regardless of this flag.
 pub fn execute_publish(
     api: &dyn ProviderApi,
     artifacts: &ArtifactSet,
@@ -850,6 +856,7 @@ pub fn execute_publish(
     title: &str,
     body: &str,
     mode: ReleaseMode,
+    prerelease: bool,
 ) -> Result<(RemoteRelease, Vec<PublishDecision>), PipelineError> {
     let mut decisions = Vec::new();
     let release = match api.find_release(tag)? {
@@ -860,7 +867,8 @@ pub fn execute_publish(
         }
         None => {
             let draft = matches!(api.provider(), Provider::GitHub);
-            let created = api.create_release(tag, title, body, mode == ReleaseMode::Rehearsal, draft)?;
+            let marked_prerelease = mode == ReleaseMode::Rehearsal || prerelease;
+            let created = api.create_release(tag, title, body, marked_prerelease, draft)?;
             decisions.push(PublishDecision::CreateRelease { draft });
             decide_assets(api, &created, artifacts, &mut decisions, true)?;
             created

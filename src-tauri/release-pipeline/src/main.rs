@@ -115,6 +115,9 @@ USAGE:
   desktop-todo-release-pipeline publish (--github | --gitee) --staging <dir>
         [--repo <owner/name>] [--tag <vX.Y.Z>] [--api-base <url>] [--upload-base <url>]
         [--dry-run] [--upload] [--finalize]
+      [--prerelease] (production RC metadata: mark the created release
+       prerelease so stable discovery's publication filter holds it; the
+       GitHub release stays draft-first regardless)
       (--dry-run plans only; --upload executes with the collision policy;
        --finalize exposes a verified GitHub draft — requires a passed read-back)
 
@@ -283,7 +286,7 @@ fn publish_command(args: &[String]) -> Result<String, PipelineError> {
     let flags = parse_flags(
         args,
         &["staging", "repo", "tag", "api-base", "upload-base", "mode"],
-        &["github", "gitee", "dry-run", "upload", "finalize"],
+        &["github", "gitee", "dry-run", "upload", "finalize", "prerelease"],
     )?;
     let provider = if flags.switch("github") ^ flags.switch("gitee") {
         if flags.switch("github") {
@@ -388,13 +391,21 @@ fn publish_command(args: &[String]) -> Result<String, PipelineError> {
                 "Application lifecycle management.".to_string(),
             ),
         };
-        let (release, decisions) =
-            pipeline::publish::execute_publish(api.as_ref(), &artifacts, &tag, &title, &body, mode)?;
+        let rc_prerelease = flags.switch("prerelease");
+        let (release, decisions) = pipeline::publish::execute_publish(
+            api.as_ref(),
+            &artifacts,
+            &tag,
+            &title,
+            &body,
+            mode,
+            rc_prerelease,
+        )?;
         let mut text = format!("published {tag} on {}:\n", provider.as_str());
         for decision in &decisions {
             match decision {
                 PublishDecision::CreateRelease { draft } => text.push_str(&format!(
-                    "  created release {tag} (draft: {draft})\n"
+                    "  created release {tag} (draft: {draft}, prerelease: {rc_prerelease})\n"
                 )),
                 PublishDecision::UploadAsset { name } => {
                     text.push_str(&format!("  uploaded asset {name}\n"))
