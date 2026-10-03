@@ -16,6 +16,13 @@ desktop-todo-widget's own source is licensed under MIT. Dependencies remain unde
 | url | MIT OR Apache-2.0 |
 | webview2-com | MIT |
 | windows / windows-core | MIT OR Apache-2.0 |
+| base64 | MIT OR Apache-2.0 |
+| sha2 | MIT OR Apache-2.0 |
+| ed25519-dalek | BSD-3-Clause |
+| getrandom | MIT OR Apache-2.0 |
+| zip | MIT |
+| tauri-winres | MIT |
+| winreg | MIT |
 
 ## Direct frontend and build dependencies
 
@@ -25,9 +32,9 @@ desktop-todo-widget's own source is licensed under MIT. Dependencies remain unde
 | @tauri-apps/api / @tauri-apps/cli | Apache-2.0 OR MIT |
 | TypeScript | Apache-2.0 |
 
-The checked Windows Cargo dependency graph also contains compatible permissive dependencies under MIT, Apache-2.0, BSD, Zlib, Unicode-3.0, CC0, 0BSD, and Unlicense terms. Several transitive parser/style crates declare MPL-2.0. They are consumed as unmodified external dependencies; their files remain governed by MPL-2.0 and are not relicensed by this repository.
+The checked Windows Cargo dependency graph also contains compatible permissive dependencies under MIT (including MIT-0), Apache-2.0, BSD, Zlib, Unicode-3.0, CC0, 0BSD, and Unlicense terms. Several transitive parser/style crates declare MPL-2.0. They are consumed as unmodified external dependencies; their files remain governed by MPL-2.0 and are not relicensed by this repository.
 
-A future binary release pipeline should generate and ship a complete dependency notice bundle for the exact release lockfiles. v1 ships no release pipeline (the Tauri bundler is disabled), so a `pnpm tauri build --no-bundle` output carries only the executable; it is packaged by the repository's own `install.ps1`, which adds no third-party code. The product ships no Windows App SDK runtime: the retired composition path that required it is gone, and the windowed WebView2 backend uses only the WebView2 Runtime already part of Windows.
+This file ships inside the release package, so it is the dependency notice for the exact release lockfiles: the repository's own release pipeline (`desktop-todo-release-pipeline`) packages the canonical nine-entry ZIP whose only runtime code is the two managed executables built from this repository; `install.ps1` adds no third-party code. The product ships no Windows App SDK runtime: the retired composition path that required it is gone, and the windowed WebView2 backend uses only the WebView2 Runtime already part of Windows.
 
 ## Local appearance assets
 
