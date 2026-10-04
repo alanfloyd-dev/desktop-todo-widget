@@ -65,6 +65,14 @@ custom-protocol = ["tauri/custom-protocol"]
 # the real admission path without touching the production canonical roots.
 # Never enabled for release/packaging builds.
 maintenance-qa = ["desktop-todo-maintenance/qa"]
+# QA-only discovery visibility seam (Phase 5E-A): compiles
+# `providers::qa_config_from_env`, the ONLY code path that may set
+# `DiscoveryConfig::qa_include_prerelease` (from DTW_QA_INCLUDE_PRERELEASE)
+# so an E2E QA run can see a prerelease-marked RC candidate. Visibility
+# only — every cryptographic/package gate downstream is unchanged, and
+# without this feature the updater reads no QA environment variable at all.
+# Never enabled for release/packaging builds.
+discovery-qa = []
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38.2"

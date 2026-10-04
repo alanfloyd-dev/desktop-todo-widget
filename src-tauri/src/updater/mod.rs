@@ -75,6 +75,16 @@ pub struct DiscoveryConfig {
     /// discards an accepted target, and is not a provider-layer failure, so
     /// the frozen Auto fallback does not react to it.
     pub scan_budget: Option<Duration>,
+    /// QA-only visibility seam (Phase 5E-A): when `true`, the enumeration's
+    /// publication-eligibility step admits provider-marked **prereleases**
+    /// so an E2E QA run can see a prerelease-marked RC candidate. It changes
+    /// *candidate visibility only* — every downstream gate (signature, key
+    /// id, version policy, package hash, ZIP validator, helper
+    /// re-verification) is untouched, and the production/default value is
+    /// `false`. The only writer that may set it to `true` is the
+    /// `discovery-qa`-gated `qa_config_from_env` (never compiled into
+    /// production/default builds); drafts stay filtered unconditionally.
+    pub qa_include_prerelease: bool,
 }
 
 impl Default for DiscoveryConfig {
@@ -89,6 +99,7 @@ impl Default for DiscoveryConfig {
             retry_after_cap: Duration::from_secs(5),
             max_redirects: 4,
             scan_budget: Some(Duration::from_secs(120)),
+            qa_include_prerelease: false,
         }
     }
 }

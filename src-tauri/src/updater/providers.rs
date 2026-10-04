@@ -235,7 +235,14 @@ pub fn enumerate_candidates(
             skipped_draft += 1;
             continue;
         }
-        if release.prerelease {
+        // Publication eligibility: a provider-marked prerelease is not
+        // publication-eligible for the stable channel — except through the
+        // QA-only visibility seam (`qa_include_prerelease`, see
+        // `qa_config_from_env`), which is the one sanctioned way an E2E QA
+        // run can see a prerelease-marked RC candidate. The flag changes
+        // visibility only; every cryptographic and package gate downstream
+        // is unchanged, and drafts stay filtered unconditionally.
+        if release.prerelease && !config.qa_include_prerelease {
             skipped_prerelease += 1;
             continue;
         }
@@ -253,6 +260,32 @@ pub fn enumerate_candidates(
         skipped_draft,
         skipped_prerelease,
     })
+}
+
+/// QA-only discovery visibility seam (Phase 5E-A, feature `discovery-qa`).
+///
+/// Reads `DTW_QA_INCLUDE_PRERELEASE` ("1"/"true") and, when set, hands back
+/// a config whose enumeration admits provider-marked prereleases so an E2E
+/// QA run can see a prerelease-marked RC candidate. This function is **not
+/// compiled into production/default builds** — without the feature no code
+/// path in the updater reads any QA environment variable, the compiled
+/// endpoints are untouched, and prerelease filtering behaves exactly as
+/// before. Visibility only: signature verification, trust-store membership,
+/// version eligibility, package hash/ZIP validation, and helper
+/// re-verification all run unchanged downstream. Endpoint overrides are
+/// deliberately NOT part of this seam: the real-provider E2E (a public
+/// Gitee prerelease at the compiled URL) needs no URL rewrite, and a
+/// rewrite would only widen the trust surface.
+#[cfg(feature = "discovery-qa")]
+pub fn qa_config_from_env(config: crate::updater::DiscoveryConfig) -> crate::updater::DiscoveryConfig {
+    let mut config = config;
+    config.qa_include_prerelease = std::env::var("DTW_QA_INCLUDE_PRERELEASE")
+        .map(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false);
+    config
 }
 
 fn metadata_urls(

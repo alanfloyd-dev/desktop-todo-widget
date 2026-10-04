@@ -171,6 +171,7 @@ fn test_config() -> DiscoveryConfig {
         retry_after_cap: Duration::ZERO,
         max_redirects: 4,
         scan_budget: None,
+        qa_include_prerelease: false,
     }
 }
 
@@ -3434,6 +3435,7 @@ fn live_gitee_asset_fetch_traverses_the_real_redirect_chain() {
         retry_after_cap: Duration::from_secs(5),
         max_redirects: 4,
         scan_budget: None,
+        qa_include_prerelease: false,
     };
     let client = discovery_client(&config, &combined_origin_allowlist(&endpoints))
         .expect("discovery client builds");
@@ -3497,3 +3499,185 @@ fn live_gitee_asset_fetch_traverses_the_real_redirect_chain() {
     );
     assert!(bytes.starts_with(b"{\"schemaVersion\":1"));
 }
+
+/// Phase 5E-A production inertness: the QA visibility flag defaults off
+/// everywhere, so the enumeration's prerelease filter behaves exactly as
+/// before in any build that has not opted into `discovery-qa`.
+#[test]
+fn qa_visibility_flag_defaults_off() {
+    assert!(!DiscoveryConfig::default().qa_include_prerelease);
+    assert!(!test_config().qa_include_prerelease);
+}
+
+// ---------------------------------------------------------------- Phase 5E-A
+// QA-only discovery visibility seam (feature `discovery-qa`).
+
+#[cfg(feature = "discovery-qa")]
+mod discovery_qa {
+    use super::*;
+    use crate::updater::providers::{qa_config_from_env, Enumeration};
+
+    fn enumerate_with(include: bool) -> Enumeration {
+        let addr = serve(|target, addr| {
+            if target.starts_with("/github/releases") {
+                let stable = release_with_assets(addr, 1, "stable", "1.2.0");
+                let rc = release_json(2, "v1.3.0", false, true, &[]);
+                return http_ok(format!("[{rc},{stable}]").as_bytes());
+            }
+            not_found()
+        });
+        let endpoints = test_endpoints(addr);
+        let client = discovery_client(
+            &test_config(),
+            &combined_origin_allowlist(&endpoints),
+        )
+        .unwrap();
+        let mut config = test_config();
+        config.qa_include_prerelease = include;
+        // The env seam must produce exactly the same flag the test set.
+        std::env::set_var("DTW_QA_INCLUDE_PRERELEASE", if include { "1" } else { "0" });
+        let config = qa_config_from_env(config);
+        std::env::remove_var("DTW_QA_INCLUDE_PRERELEASE");
+        enumerate_candidates(&client, &endpoints[0], &config, None).unwrap()
+    }
+
+    /// A: the stable release stays visible with the seam on.
+    /// B: the prerelease stays invisible with the seam off (default).
+    /// C: the prerelease becomes visible with the seam on.
+    #[test]
+    fn qa_seam_toggles_prerelease_visibility_without_touching_stable() {
+        let off = enumerate_with(false);
+        assert_eq!(off.candidates.len(), 1);
+        assert_eq!(off.candidates[0].tag, "v1.2.0");
+        assert_eq!(off.skipped_prerelease, 1, "prerelease filtered by default");
+
+        let on = enumerate_with(true);
+        assert_eq!(on.candidates.len(), 2, "seam admits the prerelease");
+        assert_eq!(on.skipped_prerelease, 0);
+        assert_eq!(on.candidates[0].tag, "v1.3.0");
+        assert_eq!(on.candidates[1].tag, "v1.2.0");
+    }
+
+    /// The env seam only flips the visibility flag; everything else in
+    /// the config is untouched.
+    #[test]
+    fn qa_env_seam_changes_nothing_but_the_visibility_flag() {
+        let config = test_config();
+        std::env::set_var("DTW_QA_INCLUDE_PRERELEASE", "true");
+        let config = qa_config_from_env(config);
+        std::env::remove_var("DTW_QA_INCLUDE_PRERELEASE");
+        assert!(config.qa_include_prerelease);
+        let baseline = test_config();
+        assert_eq!(config.max_candidates, baseline.max_candidates);
+        assert_eq!(config.provider_index_body_cap, baseline.provider_index_body_cap);
+        assert_eq!(config.max_redirects, baseline.max_redirects);
+        assert_eq!(config.scan_budget, baseline.scan_budget);
+        assert_eq!(config.connect_timeout, baseline.connect_timeout);
+    }
+}
+
+    /// LIVE RC probe (Phase 5E-A; #[ignore]d, run explicitly with
+    /// `cargo test -p alan-desktop --lib qa_live --features discovery-qa -- --ignored`
+    /// and DTW_QA_INCLUDE_PRERELEASE=1): drives the REAL production
+    /// discovery/verify/download chain against the real Gitee v1.2.0 RC
+    /// through the QA visibility seam. Read-only: no staging, no helper
+    /// invocation, no provider mutation.
+    #[cfg(feature = "discovery-qa")]
+    #[test]
+    #[ignore = "live-network probe: real gitee.com + DTW_QA_INCLUDE_PRERELEASE=1 + --features discovery-qa"]
+    fn qa_live_gitee_rc_discovery_production_verify_and_download() {
+        use crate::updater::providers::{production_endpoints, qa_config_from_env};
+
+        assert!(
+            std::env::var("DTW_QA_INCLUDE_PRERELEASE").map(|v| v == "1").unwrap_or(false),
+            "set DTW_QA_INCLUDE_PRERELEASE=1 to opt the probe into RC visibility"
+        );
+        let endpoints = production_endpoints();
+        let gitee = endpoints
+            .iter()
+            .find(|e| e.kind == ProviderKind::Gitee)
+            .expect("compiled production endpoints carry the Gitee provider");
+        let config = qa_config_from_env(DiscoveryConfig {
+            max_candidates: 10,
+            provider_index_body_cap: 1024 * 1024,
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(30),
+            max_retries: 2,
+            retry_backoff: Duration::from_secs(1),
+            retry_after_cap: Duration::from_secs(5),
+            max_redirects: 4,
+            scan_budget: None,
+            qa_include_prerelease: true,
+        });
+        assert!(config.qa_include_prerelease);
+        let client = discovery_client(&config, &combined_origin_allowlist(&endpoints))
+            .expect("discovery client builds");
+
+        // 1. REAL enumeration through the QA seam: the prerelease-marked
+        //    v1.2.0 RC becomes visible to the unchanged production adapter.
+        let enumeration =
+            enumerate_candidates(&client, gitee, &config, None)
+                .expect("real Gitee index enumerates");
+        let rc = enumeration
+            .candidates
+            .iter()
+            .find(|c| c.tag == "v1.2.0")
+            .unwrap_or_else(|| panic!("v1.2.0 RC not visible through the QA seam; got {:?}",
+                enumeration.candidates.iter().map(|c| c.tag.clone()).collect::<Vec<_>>()));
+        let metadata = rc.metadata.as_ref().expect("RC metadata usable");
+
+        // 2. REAL production verification: exact served bytes through the
+        //    compiled production trust store — no override, no test key.
+        let envelope = fetch_bounded(
+            &client,
+            &metadata.envelope,
+            desktop_todo_update_core::ENVELOPE_MAX_BYTES,
+            BodyKind::Envelope,
+            config.request_timeout,
+        )
+        .expect("envelope fetches through the production transport");
+        let manifest = fetch_bounded(
+            &client,
+            &metadata.manifest,
+            desktop_todo_update_core::MANIFEST_MAX_BYTES,
+            BodyKind::Manifest,
+            config.request_timeout,
+        )
+        .expect("manifest fetches through the production transport");
+        let target = desktop_todo_update_core::verify_and_parse(
+            &desktop_todo_update_core::production_trust_store(),
+            &envelope,
+            &manifest,
+        )
+        .expect("the RC verifies under the compiled production trust store");
+        assert_eq!(
+            target.manifest().version().to_string(),
+            "1.2.0",
+            "the discovered candidate is the v1.2.0 RC"
+        );
+
+        // 3. REAL package download through the same transport policy,
+        //    digest-checked against the signed manifest facts.
+        let asset = target.manifest().asset();
+        let (package_name, package_url) = metadata
+            .assets
+            .iter()
+            .find(|(name, _)| name == asset.filename())
+            .expect("provider lists the signed package filename");
+        assert_eq!(package_name, asset.filename());
+        // BodyKind::Manifest is a diagnostic label only; the fetch runs the
+        // same identity-encoding + bounded-body rules as every other body.
+        let package = fetch_bounded(
+            &client,
+            package_url,
+            asset.size() as usize,
+            BodyKind::Manifest,
+            config.request_timeout,
+        )
+        .expect("the RC package downloads through the production transport");
+        assert_eq!(
+            desktop_todo_update_core::sha256_hex(&package),
+            asset.sha256_hex(),
+            "downloaded package bytes must equal the signed package digest"
+        );
+    }
