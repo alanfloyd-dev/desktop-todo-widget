@@ -3597,6 +3597,36 @@ mod discovery_qa {
             .iter()
             .find(|e| e.kind == ProviderKind::Gitee)
             .expect("compiled production endpoints carry the Gitee provider");
+        // The expected RC tag is an env input so a replacement RC (new
+        // provider tag, same signed version) can drive the same probe
+        // without touching this file: DTW_QA_EXPECT_TAG, default v1.2.0.
+        let expected_tag = std::env::var("DTW_QA_EXPECT_TAG").unwrap_or_else(|_| "v1.2.0".into());
+        // Production-default visibility: with the QA seam off, the
+        // replacement RC must not be enumerated at all.
+        let prod_config = DiscoveryConfig {
+            max_candidates: 10,
+            provider_index_body_cap: 1024 * 1024,
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(30),
+            max_retries: 2,
+            retry_backoff: Duration::from_secs(1),
+            retry_after_cap: Duration::from_secs(5),
+            max_redirects: 4,
+            scan_budget: None,
+            qa_include_prerelease: false,
+        };
+        let prod_client = discovery_client(&prod_config, &combined_origin_allowlist(&endpoints))
+            .expect("production discovery client builds");
+        let prod_enumeration =
+            enumerate_candidates(&prod_client, gitee, &prod_config, None)
+                .expect("real Gitee index enumerates (production defaults)");
+        assert!(
+            !prod_enumeration
+                .candidates
+                .iter()
+                .any(|c| c.tag == expected_tag),
+            "replacement RC {expected_tag:?} must stay invisible to production-default discovery"
+        );
         let config = qa_config_from_env(DiscoveryConfig {
             max_candidates: 10,
             provider_index_body_cap: 1024 * 1024,
@@ -3614,15 +3644,19 @@ mod discovery_qa {
             .expect("discovery client builds");
 
         // 1. REAL enumeration through the QA seam: the prerelease-marked
-        //    v1.2.0 RC becomes visible to the unchanged production adapter.
+        //    RC becomes visible to the unchanged production adapter. Note
+        //    Gitee lists releases oldest-first, so while both same-version
+        //    RCs are QA-visible the first-accepted scan order favors the
+        //    older one — a temporary QA-phase-only condition that dissolves
+        //    once v1.2.0 ships stable (both become ineligible at ==).
         let enumeration =
             enumerate_candidates(&client, gitee, &config, None)
                 .expect("real Gitee index enumerates");
         let rc = enumeration
             .candidates
             .iter()
-            .find(|c| c.tag == "v1.2.0")
-            .unwrap_or_else(|| panic!("v1.2.0 RC not visible through the QA seam; got {:?}",
+            .find(|c| c.tag == expected_tag)
+            .unwrap_or_else(|| panic!("{expected_tag} RC not visible through the QA seam; got {:?}",
                 enumeration.candidates.iter().map(|c| c.tag.clone()).collect::<Vec<_>>()));
         let metadata = rc.metadata.as_ref().expect("RC metadata usable");
 
