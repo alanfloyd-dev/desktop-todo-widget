@@ -138,3 +138,64 @@ Upload **identical** `update-manifest.json`, `update-manifest.json.sig`, the ZIP
 ## Key rotation
 
 Protocol 1 rotation is the two-release bridge described in the frozen protocol doc ("Trust store and key rotation"): the bridge release signs with the old key and compiles a store carrying old + new. Operationally: provision the new public key **alongside** the old one in `PRODUCTION_KEYS`, publish the bridge, then sign subsequent releases with the new key and drop the old entry once no supported client needs it. No remote rotation, revocation server, or manifest-carried trust exists in protocol 1.
+
+
+## v1.2.0 stable release closure
+
+### Source provenance
+
+- Stable tag: `v1.2.0`
+- Source commit: `9bcc5e04d8420ab7293374c6dd53532bb0a45ddd`
+- Release strategy: exact promotion of the validated RC2 artifacts; no rebuild was performed for stable.
+
+### Runtime validation
+
+Phase 5E-B1d passed on a clean Windows VM baseline upgraded from v1.1.0 to v1.2.0.
+
+Validated:
+- legacy-process fail-closed behavior
+- managed installation bootstrap
+- receipt and registry state
+- runtime executable fingerprints
+- application startup
+- retained user data
+- clean exit and second launch
+- no recovery loop
+
+### Stable artifacts
+
+| Artifact | Size | SHA256 |
+| --- | ---: | --- |
+| `desktop-todo-widget-v1.2.0-windows-x64.zip` | 3095788 | `6411c3bb593aede90a8d46e2550237f35c0369bc69708c4893f6e9ec5d8f5623` |
+| `desktop-todo-widget-v1.2.0-windows-x64.zip.sha256` | 109 | `1295e1b8521d7c3694a4092a3551b499f7521db53afca628183f81e25eee04d5` |
+| `update-manifest.json` | 904 | `96ee8a5cd9a3bd0885bfd7c89d3761130a96e69814f537024e6cc9dae8ada313` |
+| `update-manifest.json.sig` | 219 | `6a30914e4f2716d9a890bee046983ea66dc4fb6abc8aaae4212f866035183611` |
+
+### Provider verification
+
+#### GitHub
+
+- Stable tag `v1.2.0` peels to `9bcc5e04d8420ab7293374c6dd53532bb0a45ddd`.
+- Stable release published.
+- Release is neither draft nor prerelease.
+- All four assets were downloaded again from the published release.
+- Downloaded sizes and SHA256 values exactly matched the frozen stable artifacts.
+
+#### Gitee
+
+- An obsolete pre-existing `v1.2.0` tag pointing to commit `72809e95dc5865925b63a6bc159ed5c58785c8d6` was removed.
+- The correct annotated stable tag was then pushed.
+- Stable tag `v1.2.0` now peels to `9bcc5e04d8420ab7293374c6dd53532bb0a45ddd`.
+- Stable release published as the latest release.
+- All four assets were downloaded again from the published release.
+- Downloaded sizes and SHA256 values exactly matched the frozen stable artifacts.
+
+#### GitLab
+
+GitLab is retained as a backup/mirror repository and is not part of the stable release distribution path. Users should use GitHub for releases and active development.
+
+### Result
+
+v1.2.0 stable release is closed.
+
+The validated RC2 artifact set was promoted unchanged to stable, both active release providers passed independent read-back verification, and the stable tag preserves exact source provenance.
