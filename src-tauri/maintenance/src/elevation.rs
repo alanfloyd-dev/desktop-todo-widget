@@ -13,14 +13,10 @@
 //! de-elevated relaunch.
 
 use crate::{Error, ErrorKind, Result};
-use windows::{
-    Win32::{
-        Foundation::{HANDLE, HLOCAL, LocalFree},
-        Security::{
-            GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
-        },
-        System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken},
-    },
+use windows::Win32::{
+    Foundation::{CloseHandle, HANDLE},
+    Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY},
+    System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken},
 };
 
 /// The decision, factored out so the rule is testable without a token: any
@@ -69,7 +65,13 @@ pub fn refuse_elevated_execution() -> Result<()> {
             }
             Ok(())
         })();
-        let _ = LocalFree(Some(HLOCAL(token.0.cast())));
+        // OpenProcessToken hands back a kernel handle: close it with
+        // CloseHandle. (LocalFree is for LocalAlloc memory; on a kernel
+        // handle it always fails with ERROR_INVALID_HANDLE — verified
+        // against a live token, whose value lies far below the process
+        // heap base — so the wrong allocator never corrupted anything,
+        // but it also never released the handle.)
+        let _ = CloseHandle(token);
         result
     }
 }
