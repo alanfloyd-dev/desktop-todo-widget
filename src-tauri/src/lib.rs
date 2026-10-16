@@ -35,15 +35,14 @@ mod task_day;
 mod tasks;
 // Phase 2 updater: provider discovery and bounded metadata fetch. The
 // verification/eligibility core is the shared `desktop-todo-update-core`
-// crate; this module only transports attacker-controlled bytes to it and
-// never writes durable state.
+// crate; this module only transports attacker-controlled bytes to it.
 //
 // Deliberately crate-private: the network capability is not part of the
 // product's public API. `#[allow(dead_code)]` remains scoped to the module
-// because the discovery half (provider enumeration, `discover`) still has
-// no production caller until the check-for-updates surface exists; the
-// staged-update install half (`install_ready_update`) is wired since
-// Phase 2D-B and no longer counts on the allow.
+// because parts of the engine (explicit per-provider sources, the QA
+// visibility seam) still have no production caller; the staged-update
+// install half (`install_ready_update`) is wired since Phase 2D-B and the
+// manual check half (`check_for_updates`/`download_update`) since v1.2.1-A.
 #[allow(dead_code)]
 mod updater;
 mod weather;
@@ -287,7 +286,9 @@ pub fn run() {
             window_mode::start_win_d_trace,
             maintenance_admission::maintenance_admission_state,
             maintenance_admission::start_uninstall,
-            updater::install::install_ready_update
+            updater::install::install_ready_update,
+            updater::check::check_for_updates,
+            updater::check::download_update
         ])
         .build(tauri::generate_context!())
     {

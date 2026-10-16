@@ -1451,6 +1451,98 @@ fn full_pipeline_trusted_target_to_staged_package() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// The manual check surface (v1.2.1-A) over the same mock provider: the
+/// read-only check reports the target's manifest version, and the download
+/// core persists and stages the session whose id the frozen install command
+/// consumes. No other value crosses to the frontend.
+#[test]
+fn manual_check_and_download_surface_stage_an_install_ready_session() {
+    let exe1 = exe_payload(1);
+    let exe2 = exe_payload(2);
+    let package = valid_package(&exe1, &exe2);
+    let manifest = pipeline_manifest("1.4.0", &package, &exe1, &exe2);
+    let manifest_bytes = manifest.clone().into_bytes();
+    let signature = sign(&signing_k1(), manifest.as_bytes());
+    let envelope = envelope_json(&signing_k1(), &signature).into_bytes();
+    let envelope_bytes_fixture = envelope.clone();
+
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/github/releases") {
+            let release = release_json(
+                1,
+                "v1.4.0",
+                false,
+                false,
+                &[
+                    (
+                        ENVELOPE_ASSET_NAME,
+                        &format!("http://{addr}/download/update-manifest.json.sig"),
+                    ),
+                    (
+                        MANIFEST_ASSET_NAME,
+                        &format!("http://{addr}/download/update-manifest.json"),
+                    ),
+                    (
+                        "desktop-todo-widget-v1.4.0-windows-x64.zip",
+                        &format!(
+                            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+                        ),
+                    ),
+                ],
+            );
+            return http_ok(format!("[{release}]").as_bytes());
+        }
+        if target == "/download/update-manifest.json.sig" {
+            return http_ok(&envelope_bytes_fixture);
+        }
+        if target == "/download/update-manifest.json" {
+            return http_ok(&manifest_bytes);
+        }
+        if target.ends_with(".zip") {
+            return http_ok(&package);
+        }
+        not_found()
+    });
+    let fixture = fixture(addr);
+
+    let status = crate::updater::check::check_with(
+        &fixture.config,
+        &fixture.endpoints,
+        &fixture.trust,
+        &fixture.installed,
+        &fixture.hop,
+    )
+    .expect("check classifies the accepted target");
+    assert_eq!(
+        status,
+        crate::updater::check::UpdateCheckStatus::UpdateAvailable {
+            version: "1.4.0".to_string()
+        }
+    );
+
+    let root = temp_root("check-surface");
+    let staged = crate::updater::check::download_with(
+        &root.join("updates"),
+        &fixture.config,
+        &fixture.endpoints,
+        &fixture.trust,
+        &fixture.installed,
+        &fixture.hop,
+    )
+    .expect("download persists and stages the session");
+    assert_eq!(staged.version, "1.4.0");
+    // The session id must resolve as a directory under the canonical
+    // updates root, exactly the input `install_ready_update` re-resolves.
+    let session_dir = root.join("updates").join("sessions").join(&staged.session_id);
+    assert!(
+        session_dir.join(crate::updater::acquisition::RECORD_FILE).exists(),
+        "staged record exists"
+    );
+    assert!(session_dir.join(crate::updater::acquisition::STAGED_DIR).exists(), "package staged");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Package locator must name the signed package file exactly; provider
 /// display metadata and frontend arguments play no part.
 #[test]

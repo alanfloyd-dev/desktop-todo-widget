@@ -3,8 +3,8 @@ import { computed } from "vue";
 import { useI18n } from "../i18n";
 import type { WeatherCondition, WeatherViewState } from "../types";
 
-const props = defineProps<{ weather: WeatherViewState }>();
-defineEmits<{ configure: [] }>();
+const props = defineProps<{ weather: WeatherViewState; weatherMessage: string }>();
+defineEmits<{ configure: []; refresh: [] }>();
 const { t } = useI18n();
 
 const conditionLabels: Record<WeatherCondition, string> = {
@@ -42,7 +42,33 @@ function ageLabel(seconds: number | null) {
 </script>
 
 <template>
-  <div class="weather-display" aria-live="polite">
+  <div class="weather-display" :class="{ 'has-refresh': weather.configured }" aria-live="polite">
+    <!--
+      The manual refresh affordance: an icon-only control that rides the exact
+      same single-flight refresh path as the Settings entry (`refresh_weather`
+      with `manual: true`). It exists only when a location is configured —
+      without a location there is nothing to refresh — and it is disabled for
+      the duration of the in-flight refresh, so the spinning icon and the
+      disabled semantics always agree.
+    -->
+    <button
+      v-if="weather.configured"
+      type="button"
+      class="weather-refresh"
+      :class="{ refreshing: weather.refreshing }"
+      :disabled="weather.refreshing"
+      :aria-label="t('weather.refreshAriaLabel')"
+      :title="t('weather.refreshAriaLabel')"
+      @click="$emit('refresh')"
+    >
+      <svg class="weather-refresh-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10" />
+          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+        </g>
+      </svg>
+    </button>
+
     <template v-if="!weather.configured">
       <p class="weather-empty">{{ t("weather.empty") }}</p>
       <button type="button" class="weather-configure" @click="$emit('configure')">
@@ -69,5 +95,12 @@ function ageLabel(seconds: number | null) {
       <p class="weather-empty">{{ t("weather.unavailable") }}</p>
       <p v-if="weather.snapshot" class="weather-age">{{ ageLabel(weather.cacheAgeSeconds) }}</p>
     </template>
+
+    <!--
+      The status of the last manual refresh, shared with the Settings weather
+      section (the same message source). Success is quiet, failure keeps the
+      previous snapshot on the card above this line.
+    -->
+    <p v-if="weatherMessage" class="weather-status" role="status">{{ weatherMessage }}</p>
   </div>
 </template>

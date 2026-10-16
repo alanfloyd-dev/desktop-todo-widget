@@ -14,6 +14,7 @@
 //! only, for later phases to persist and act on.
 
 pub(crate) mod acquisition;
+pub(crate) mod check;
 pub(crate) mod http_fetch;
 pub(crate) mod install;
 pub(crate) mod providers;

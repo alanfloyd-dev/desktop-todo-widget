@@ -15,11 +15,13 @@ const props = defineProps<{
   quickLinks: QuickLink[];
   nativeBridgeAvailable: boolean;
   weather: WeatherViewState;
+  weatherMessage: string;
 }>();
 defineEmits<{
   openQuickLink: [id: string];
   collapse: [];
   configureWeather: [];
+  refreshWeather: [];
   openReview: [];
   openSettings: [];
   error: [message: string];
@@ -71,7 +73,12 @@ const dateLabel = computed(() =>
       <p class="date-line" :data-tauri-drag-region="dragRegionEnabled ? '' : undefined">
         {{ dateLabel }}
       </p>
-      <WeatherDisplay :weather="weather" @configure="$emit('configureWeather')" />
+      <WeatherDisplay
+        :weather="weather"
+        :weather-message="weatherMessage"
+        @configure="$emit('configureWeather')"
+        @refresh="$emit('refreshWeather')"
+      />
     </header>
 
     <TodoPanel

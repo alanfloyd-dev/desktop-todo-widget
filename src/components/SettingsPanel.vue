@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import {
   APPEARANCE_MODES,
   DEFAULT_APPEARANCE,
@@ -9,6 +10,7 @@ import {
   sampleImageLuminance,
 } from "../appearance";
 import { languageOptionLabel, normalizeLanguage, useI18n, type Language } from "../i18n";
+import { createUpdateChecker, previewUpdateBridge } from "../updateCheck";
 import type {
   AppearanceProfiles,
   AppearanceSettings,
@@ -271,6 +273,68 @@ const admissionMode = ref<MaintenanceAdmissionState["mode"] | null>(null);
 const uninstallConfirming = ref(false);
 const uninstallStarting = ref(false);
 const uninstallError = ref("");
+
+/**
+ * True in the plain browser preview (Vite / any page without the Tauri
+ * runtime). This is the app's established native/preview boundary — the same
+ * check every bridge consumer in `App.vue` makes — not a QA switch: the
+ * Update section renders in the preview so its layout is developable, wired
+ * to the inert `previewUpdateBridge` so it can never reach the updater
+ * backend, while a native build keeps the managed-install rule below.
+ */
+const isPreview = !("__TAURI_INTERNALS__" in window);
+
+/**
+ * The manual update check state machine, created per panel session: state
+ * resets when Settings reopens, which is the honest scope for a check that
+ * talks to the providers right now.
+ *
+ * The section renders for managed installations — the same rule as the
+ * uninstall entry — because the backend's installed-version authority
+ * (receipt + PE + evidence) fails closed for unmanaged, legacy, and
+ * development copies, and the install transaction requires a managed
+ * admission. In the browser preview it renders with inert controls instead
+ * (see `isPreview`); every other native context keeps it absent.
+ */
+const updateChecker = createUpdateChecker(isPreview ? previewUpdateBridge : { invoke });
+const updatePhase = updateChecker.phase;
+const updateAvailableVersion = updateChecker.availableVersion;
+const updateErrorKey = updateChecker.errorKey;
+
+/**
+ * The installed product version, read from the app's package metadata —
+ * never hardcoded. The backend re-derives the authoritative installed
+ * source version (receipt + PE) for every check and install; this value is
+ * display-only. The preview never issues the doomed metadata call.
+ */
+const currentVersion = ref("");
+if (!isPreview) {
+  void Promise.resolve()
+    .then(() => getVersion())
+    .then((version) => {
+      currentVersion.value = version;
+    })
+    .catch(() => {
+      currentVersion.value = "";
+    });
+}
+
+const updateBusy = computed(
+  () => updatePhase.value === "checking" || updatePhase.value === "downloading",
+);
+
+/** In the preview the whole section is display-only: nothing can run. */
+const updateControlsDisabled = computed(() => updateBusy.value || isPreview);
+
+const updateCheckLabel = computed(() => {
+  if (updatePhase.value === "checking") return t("settings.update.checking");
+  return t("settings.update.check");
+});
+
+const updateInstallLabel = computed(() => {
+  if (updatePhase.value === "downloading") return t("settings.update.downloading");
+  return t("settings.update.install");
+});
 
 onMounted(async () => {
   if (!("__TAURI_INTERNALS__" in window)) return;
@@ -866,6 +930,68 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
         </label>
         <button type="button" class="reset-appearance" @click="resetAppearance">{{ t("settings.resetAppearance") }}</button>
       </section>
+
+      <!--
+        Managed installations only (same rule as the Application section):
+        the updater's installed-version authority fails closed for unmanaged,
+        legacy, and development copies, so the entry is absent rather than a
+        dead control. The browser preview is the one additional context where
+        the section renders — display-only, on the inert preview bridge — so
+        its layout stays developable without an installed app. The states
+        below are the check state machine's phases — a click is never a
+        silent no-op: checking shows in the button, the outcome shows in the
+        status line, and a failure shows as an error with the failed action
+        retryable.
+      -->
+      <template v-if="admissionMode === 'managed' || isPreview">
+        <div class="settings-section-heading settings-major-heading">
+          <strong>{{ t("settings.update.heading") }}</strong>
+        </div>
+        <section class="update-settings" :aria-label="t('settings.update.heading')">
+          <div class="settings-row">
+            <span>
+              <strong>{{ t("settings.update.currentVersion") }}</strong>
+              <small>{{ t("settings.update.currentVersionHint") }}</small>
+            </span>
+            <span class="update-version">{{ currentVersion || "—" }}</span>
+          </div>
+          <div class="settings-row">
+            <span>
+              <strong>{{ t("settings.update.check") }}</strong>
+              <small>{{ t("settings.update.checkHint") }}</small>
+            </span>
+            <button
+              type="button"
+              :disabled="updateControlsDisabled"
+              @click="updateChecker.check()"
+            >{{ updateCheckLabel }}</button>
+          </div>
+          <div class="update-status-row">
+            <!--
+              Preview copy is persistent, not click-triggered: a disabled
+              control that explains itself beats a dead one.
+            -->
+            <small v-if="isPreview" role="note">{{ t("settings.update.previewOnly") }}</small>
+            <small v-else-if="updatePhase === 'upToDate'" role="status">{{ t("settings.update.upToDate") }}</small>
+            <template v-else-if="updatePhase === 'available'">
+              <small role="status">{{ t("settings.update.available", { version: updateAvailableVersion ?? "" }) }}</small>
+              <button
+                type="button"
+                class="update-install"
+                :disabled="updateControlsDisabled"
+                @click="updateChecker.install()"
+              >{{ updateInstallLabel }}</button>
+              <small class="update-install-hint">{{ t("settings.update.installHint") }}</small>
+            </template>
+            <small v-else-if="updatePhase === 'downloading'" role="status">{{ t("settings.update.downloading") }}</small>
+            <small
+              v-else-if="updatePhase === 'error' && updateErrorKey"
+              class="settings-error"
+              role="alert"
+            >{{ t(updateErrorKey) }}</small>
+          </div>
+        </section>
+      </template>
 
       <!--
         Managed installations only: an unmanaged or development copy does not

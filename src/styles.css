@@ -263,6 +263,7 @@ button {
 }
 
 .weather-display {
+  position: relative;
   margin-top: 18px;
   color: var(--muted);
   font-size: 11px;
@@ -313,6 +314,67 @@ button {
 }
 
 .weather-age {
+  margin-top: 8px !important;
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+}
+
+/* Manual refresh: the card reserves a top-right slot so the icon never
+   overlaps the temperature line, in every mode and at every wrap point. */
+.weather-display.has-refresh {
+  padding-right: 30px;
+}
+
+.weather-refresh {
+  position: absolute;
+  top: -3px;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: var(--mineral);
+  background: transparent;
+  cursor: pointer;
+}
+
+.weather-refresh:hover,
+.weather-refresh:focus-visible {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.weather-refresh:focus-visible {
+  outline: 1px solid var(--mineral);
+  outline-offset: 1px;
+}
+
+.weather-refresh:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.weather-refresh-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.weather-refresh.refreshing .weather-refresh-icon {
+  animation: weather-refresh-spin 1s linear infinite;
+}
+
+@keyframes weather-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.weather-status {
   margin-top: 8px !important;
   color: var(--faint);
   font-size: 9px;
@@ -1300,6 +1362,39 @@ button.profile-identity {
   min-height: 54px;
   align-items: center;
   gap: 18px;
+}
+
+.update-version {
+  justify-self: end;
+  color: var(--ink);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.update-settings .settings-row button {
+  justify-self: end;
+}
+
+.update-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 10px 0 2px;
+}
+
+.update-status-row small {
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+}
+
+.update-status-row .settings-error {
+  color: var(--muted);
+}
+
+.update-install-hint {
+  flex-basis: 100%;
 }
 
 .settings-panel button:disabled {

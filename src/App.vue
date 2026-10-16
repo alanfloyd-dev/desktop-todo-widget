@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import ContextMenu from "./components/ContextMenu.vue";
@@ -17,6 +17,7 @@ import {
   sampleImageLuminance,
 } from "./appearance";
 import { createI18n, normalizeLanguage, provideI18n } from "./i18n";
+import { browserWeatherState, createWeatherController, type WeatherMessage } from "./weather";
 import type {
   AppearanceProfiles,
   AppearanceSettings,
@@ -28,7 +29,6 @@ import type {
   QuickLink,
   ResolvedContrast,
   TemperatureUnit,
-  WeatherViewState,
 } from "./types";
 
 const nativeBridgeAvailable = "__TAURI_INTERNALS__" in window;
@@ -37,14 +37,25 @@ const error = ref("");
 const settingsOpen = ref(false);
 const reviewOpen = ref(false);
 const weatherSettingsRequested = ref(false);
-const weather = ref<WeatherViewState>(browserWeatherState());
-/** Weather status as a translation key, so it re-renders on language change. */
-const weatherMessageKey = ref<{ key: string; params?: Record<string, string | number> } | null>(
-  null,
-);
+/**
+ * The single weather state owner (see `weather.ts`). The app resolves its
+ * message keys through this component's i18n instance, so a status re-renders
+ * on language change, and passes the translated text to both the weather card
+ * and the Settings weather section.
+ */
+const weatherController = createWeatherController({
+  available: nativeBridgeAvailable,
+  invoke,
+});
+const weather = weatherController.weather;
+const weatherMessageKey = weatherController.message as Ref<WeatherMessage | null>;
 const weatherMessage = computed(() =>
   weatherMessageKey.value ? t(weatherMessageKey.value.key, weatherMessageKey.value.params) : "",
 );
+const {
+  loadWeather,
+  refreshWeather,
+} = weatherController;
 const imageAsset = ref<AssetPayload>(emptyAsset());
 const wallpaperAsset = ref<AssetPayload>(emptyAsset());
 const avatarAsset = ref<AssetPayload>(emptyAsset());
@@ -169,39 +180,6 @@ function browserState(): ProductViewState {
   };
 }
 
-function browserWeatherState(): WeatherViewState {
-  if (!nativeBridgeAvailable) {
-    return {
-      configured: true,
-      snapshot: {
-        condition: "clear",
-        temperature: 28,
-        dailyHigh: 33,
-        dailyLow: 22,
-        precipitationProbability: 2,
-        fetchedAt: Math.floor(Date.now() / 1000),
-        locationKey: "browser-preview",
-        timezone: "Asia/Shanghai",
-        temperatureUnit: "celsius",
-      },
-      cacheStatus: "fresh",
-      cacheAgeSeconds: 0,
-      refreshRecommended: false,
-      refreshing: false,
-      lastRefresh: "browser-preview",
-    };
-  }
-  return {
-    configured: false,
-    snapshot: null,
-    cacheStatus: "missing",
-    cacheAgeSeconds: null,
-    refreshRecommended: false,
-    refreshing: false,
-    lastRefresh: "none",
-  };
-}
-
 async function loadState() {
   if (!nativeBridgeAvailable) return;
   try {
@@ -264,40 +242,6 @@ async function loadAppearanceRuntime() {
     representative,
     resolvedContrast.value,
   );
-}
-
-async function loadWeather() {
-  if (!nativeBridgeAvailable) return;
-  try {
-    weather.value = await invoke<WeatherViewState>("weather_state");
-  } catch {
-    // Weather is isolated from product startup; missing/corrupt cache must not
-    // prevent Todo or window state from rendering.
-    weather.value = browserWeatherState();
-  }
-}
-
-function weatherErrorLabel(reason: unknown) {
-  const kind = typeof reason === "object" && reason && "kind" in reason
-    ? String((reason as { kind: unknown }).kind)
-    : String(reason);
-  if (kind.includes("Cooldown")) return { key: "error.weatherRefreshCooldown" };
-  if (kind.includes("InProgress")) return { key: "error.weatherRefreshInProgress" };
-  if (kind.includes("Timeout")) return { key: "error.weatherRefreshTimeout" };
-  return { key: "error.weatherRefreshGeneric" };
-}
-
-async function refreshWeather(manual = false) {
-  if (!nativeBridgeAvailable || weather.value.refreshing) return;
-  weatherMessageKey.value = null;
-  weather.value.refreshing = true;
-  try {
-    weather.value = await invoke<WeatherViewState>("refresh_weather", { manual });
-    if (manual) weatherMessageKey.value = { key: "status.weatherUpdated" };
-  } catch (reason) {
-    if (manual) weatherMessageKey.value = weatherErrorLabel(reason);
-    await loadWeather();
-  }
 }
 
 function openWeatherSettings() {
@@ -416,7 +360,7 @@ async function saveSettings(patch: {
     // be loaded immediately after persistence, otherwise the UI stays empty
     // while the new identity refreshes.
     weather.value = {
-      ...browserWeatherState(),
+      ...browserWeatherState(nativeBridgeAvailable),
       configured: patch.weatherLatitude !== null && patch.weatherLongitude !== null,
       refreshRecommended: patch.weatherLatitude !== null && patch.weatherLongitude !== null,
     };
@@ -557,10 +501,12 @@ onBeforeUnmount(() => {
         :quick-links="state.settings.quickLinks"
         :native-bridge-available="nativeBridgeAvailable"
         :weather="weather"
+        :weather-message="weatherMessage"
         @open-quick-link="openQuickLink"
         @collapse="runAction('floating.collapse')"
         @open-settings="runAction('settings')"
         @configure-weather="openWeatherSettings"
+        @refresh-weather="refreshWeather(true)"
         @open-review="settingsOpen = false; reviewOpen = true"
         @error="error = $event"
       />

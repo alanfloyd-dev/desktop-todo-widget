@@ -31,6 +31,7 @@ export const en: Record<string, string> = {
   "error.weatherRefreshTimeout": "Weather request timed out. Cached data is unchanged.",
   "error.weatherRefreshGeneric": "Weather could not refresh. Cached data is unchanged.",
   "status.weatherUpdated": "Weather updated.",
+  "weather.refreshAriaLabel": "Refresh weather",
 
   // --- Context menu ---------------------------------------------------------
   // Mirrors the native tray/context menu wording in `locale.rs`; the two menus
@@ -245,6 +246,23 @@ export const en: Record<string, string> = {
   "settings.refreshNow": "Refresh now",
   "settings.refreshing": "Refreshing…",
 
+  "settings.update.heading": "UPDATES",
+  "settings.update.currentVersion": "Current version",
+  "settings.update.currentVersionHint": "The product version installed on this device",
+  "settings.update.check": "Check for updates",
+  "settings.update.checkHint": "Asks the release providers for a newer version",
+  "settings.update.checking": "Checking…",
+  "settings.update.upToDate": "desktop-todo-widget is up to date.",
+  "settings.update.available": "Version {version} is available.",
+  "settings.update.install": "Install update",
+  "settings.update.downloading": "Downloading and preparing…",
+  "settings.update.installHint": "The update is downloaded and verified, then the app restarts through the maintenance helper.",
+  "settings.update.previewOnly": "Only available in an installed app.",
+  "settings.update.error.checkFailed": "Could not check for updates. Try again later.",
+  "settings.update.error.installFailed": "The update could not be prepared. Try again.",
+  "settings.update.error.notManaged": "This installation cannot update from within the app.",
+  "settings.update.error.installationUnresolved": "The current installation could not be confirmed; updates are unavailable.",
+
   "settings.appearanceHeading": "APPEARANCE",
   "settings.appearanceMaterial": "Glass · Graphite Frost",
   "settings.appearanceFor": "Appearance for",
@@ -359,6 +377,7 @@ export const zhHans: Record<string, string> = {
   "error.weatherRefreshTimeout": "天气请求超时，缓存数据未变更。",
   "error.weatherRefreshGeneric": "天气刷新失败，缓存数据未变更。",
   "status.weatherUpdated": "天气已更新。",
+  "weather.refreshAriaLabel": "刷新天气",
 
   "menu.ariaLabel": "窗口菜单",
   "menu.windowMode": "窗口模式",
@@ -550,6 +569,23 @@ export const zhHans: Record<string, string> = {
   "settings.weatherAttributionHint": "CC BY 4.0 署名",
   "settings.refreshNow": "立即刷新",
   "settings.refreshing": "刷新中…",
+
+  "settings.update.heading": "更新",
+  "settings.update.currentVersion": "当前版本",
+  "settings.update.currentVersionHint": "本机安装的产品版本",
+  "settings.update.check": "检查更新",
+  "settings.update.checkHint": "向发布渠道查询新版本",
+  "settings.update.checking": "正在检查…",
+  "settings.update.upToDate": "已是最新版本。",
+  "settings.update.available": "发现新版本 {version}。",
+  "settings.update.install": "安装更新",
+  "settings.update.downloading": "正在下载并准备…",
+  "settings.update.installHint": "更新包会先下载并校验，然后通过维护工具重启应用完成安装。",
+  "settings.update.previewOnly": "仅已安装版本可用。",
+  "settings.update.error.checkFailed": "检查更新失败，请稍后重试。",
+  "settings.update.error.installFailed": "更新准备失败，请重试。",
+  "settings.update.error.notManaged": "当前安装不支持从应用内更新。",
+  "settings.update.error.installationUnresolved": "无法确认当前安装，更新不可用。",
 
   "settings.appearanceHeading": "外观",
   "settings.appearanceMaterial": "玻璃 · 石墨霜",
