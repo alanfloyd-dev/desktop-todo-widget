@@ -33,19 +33,19 @@
 
 ## 下载
 
-正式版本发布在 [GitHub Releases](https://github.com/alanfloyd-dev/desktop-todo-widget/releases)。
+正式版本发布在 [GitHub Releases](https://github.com/alanfloyd-dev/desktop-todo-widget/releases)，并在 [Gitee Releases](https://gitee.com/alanfloyd-dev/desktop-todo-widget/releases) 同步镜像完全相同的产物。GitLab 仓库仅为备份镜像——发布、issue 与活跃开发均在 GitHub 进行。
 
-**当前发布版本：v1.1.0** —— `desktop-todo-widget-v1.1.0-windows-x64.zip`。解压后运行：
+**当前发布版本：v1.2.0** —— `desktop-todo-widget-v1.2.0-windows-x64.zip`。解压后运行：
 
 `desktop-todo-widget.exe`
 
-v1.1.0 压缩包同时包含 `install.ps1` 与 `uninstall.ps1`，可选用于当前用户的安装与卸载（见[安装](#安装)）。
+压缩包同时包含 `install.ps1` 与 `uninstall.ps1`，可选用于当前用户的安装与卸载（见[安装](#安装)）。在既有 v1.1.x 副本上安装会将其收编为受管安装，并保留用户数据。
 
 便携使用方式仍然保留：解压 ZIP 后直接运行可执行文件即可，无需安装。
 
-**上一版本：v1.0.1** —— `desktop-todo-widget-v1.0.1-windows-x64.zip`。
+**上一版本：v1.1.0** —— `desktop-todo-widget-v1.1.0-windows-x64.zip`。
 
-v1.1.0 的变更见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+v1.2.0 的变更见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
 ### Windows 兼容性
 
@@ -249,7 +249,7 @@ pwsh -File scripts/verify-install-scripts.ps1     # 在一次性沙箱中验证�
 - **Desktop 材质** — Desktop 始终使用半透明 Graphite 回退外观。它以子窗口形式托管在 Windows 桌面窗口层级之下，而窗口背景效果需要顶层 HWND 语义。
 - **Windows 特定实现** — 产品依赖 Windows/WebView2/Tauri 的特定行为，随着这些平台演进可能需要进行兼容性更新。
 - **Desktop 宿主未公开文档化** — `Progman`、`WorkerW` 和 `SHELLDLL_DefView` 的拓扑结构可能随 Windows 更新和 Explorer 重启而变化。
-- **范围** — 已验证 Windows 11，没有更新程序，也没有打包的 MSI/EXE 安装包（安装方式为[安装](#安装)中的按用户脚本），没有同步，也没有英文和简体中文之外的其他本地化。
+- **范围** — 已验证 Windows 11，没有打包的 MSI/EXE 安装包（安装方式为[安装](#安装)中的按用户脚本或 release 负载内的受管安装器），应用内更新界面尚未提供（v1.2.0 已内置签名更新链，更新 UI 属于规划项），没有同步，也没有英文和简体中文之外的其他本地化。
 
 ## Roadmap
 
@@ -258,7 +258,7 @@ pwsh -File scripts/verify-install-scripts.ps1     # 在一次性沙箱中验证�
 - 报表：在现有任务历史之上提供更丰富的事实性回顾界面。
 - 组件化：让前端与 Rust 的边界更小、更清晰。
 - 设置组织：更审慎地对当前设置界面进行分组。
-- 打包与更新机制：在现有的按用户安装/卸载脚本之上，补充签名、打包安装程序与更新机制。
+- 更新界面：在 v1.2.0 已交付的签名更新链之上，补充应用内的检查更新 / 下载 / 安装重启界面。
 
 已推迟的工作记录在 [FUTURE.md](FUTURE.md) 中。除[安装](#安装)中描述的安装与卸载脚本外，本节内容目前都尚未实现。
 

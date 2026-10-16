@@ -54,6 +54,8 @@ Desktop is therefore a supported mode with a guarded implementation rather than 
 
 Known limitations and deferred regression work include multi-monitor hot-plug, Explorer restart, lock/sleep/resume, fullscreen applications, DPI changes across displays, and broader Windows-build coverage.
 
+**Compatibility note (v1.2.0 QA, NON-BLOCKING):** in VMware Windows environments, Desktop-mode transparency may not present correctly — adjusting background transparency can visibly change only the darkness of the material. Normal and Floating modes are unaffected. The observation is cosmetic and environment-dependent: not a crash, not an updater/lifecycle issue, not a data-integrity issue, and not a release blocker. Also recorded in the [release closure](release-signing.md#9-known-non-blocking-compatibility-notes).
+
 ## References and provenance
 
 The implementation uses Microsoft Win32/WebView2 documentation and an in-project adapter. The following projects were reviewed as architecture references; no source was copied wholesale:

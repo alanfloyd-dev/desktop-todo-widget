@@ -1,5 +1,7 @@
 # RC-0 — Avatar Orb reachability and Sidebar resize
 
+> HISTORICAL QA RECORD — v1.2.0 release-candidate preflight (RC-0), retained as evidence. The matching QA tooling lives in `scripts/rc0-qa/`; the release outcome is recorded in [release-signing.md](release-signing.md).
+
 Release-candidate preflight for two release-facing UX regressions reported after the
 Phase 7C.3b dual-backend work landed.
 
