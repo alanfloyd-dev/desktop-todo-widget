@@ -24,7 +24,7 @@ fixtures), and `base64`. The canonical version comparator is the Phase 1.5
 crate — there is no second parser.
 
 The production trust store (`src/compiled.rs::production_trust_store`) is
-intentionally empty until the publisher provisions real v1.2 public keys at
-the release-signing provisioning gate. Test keys exist only under `tests/`
-and must never be compiled into a production store or used to sign a
-release.
+provisioned with the real production public key (Phase 5A release-signing
+ceremony; the private seed exists only outside the repository). Test keys
+exist only under `tests/` and must never be compiled into a production
+store or used to sign a release.
