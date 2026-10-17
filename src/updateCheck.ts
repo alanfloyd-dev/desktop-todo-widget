@@ -48,16 +48,67 @@ export interface StagedUpdate {
 }
 
 /**
- * Inert bridge for the plain browser preview (Vite / no Tauri runtime).
+ * Inert bridge for every non-managed surface (plain browser preview, Vite
+ * dev server, `tauri dev`).
  *
- * It rejects every command without ever touching `@tauri-apps`, so a preview
- * surface can render and style the Update section while remaining structurally
+ * It rejects every command without ever touching `@tauri-apps`, so a visible
+ * Update section can be styled and developed while remaining structurally
  * unable to reach the updater backend. The stable `not-installed` marker maps
  * to the installed-only copy in `updateErrorLabel`.
  */
 export const previewUpdateBridge: UpdateBridge = {
   invoke: () => Promise.reject(new Error("not-installed")),
 };
+
+/**
+ * The launch-admission mode as the Update section sees it. `null` before the
+ * backend state has arrived (or in a context that never reports one).
+ */
+export type UpdateAdmissionMode = "managed" | "unmanaged" | "development" | null;
+
+/** The three runtime contexts the Update section distinguishes. */
+export interface UpdateSurfaceContext {
+  /** No Tauri runtime: the plain browser preview. */
+  isPreview: boolean;
+  /** Vite dev server (`import.meta.env.DEV`) — true for `tauri dev` too. */
+  isDevRuntime: boolean;
+  /** Launch admission from the backend. */
+  admissionMode: UpdateAdmissionMode;
+}
+
+/** The Update section's visibility and backend reachability. */
+export interface UpdateSurface {
+  /** The section renders at all. */
+  visible: boolean;
+  /**
+   * The updater backend may actually be reached. True only for a managed
+   * **production** install — the single context where the controls are
+   * enabled and the real bridge is wired. Preview and dev runtimes render
+   * the section display-only, whatever the admission says, so a development
+   * process can never drive the updater.
+   */
+  backendLive: boolean;
+}
+
+/**
+ * The single visibility/enablement rule for the Update section.
+ *
+ * - Managed production install — visible, live.
+ * - Browser preview / dev runtime — visible but inert (disabled controls,
+ *   installed-only hint, inert bridge): development must never reach the
+ *   updater backend, and a dev copy's receipt authority would fail closed
+ *   anyway.
+ * - Production native, unmanaged / development / unknown — hidden, matching
+ *   the managed-only rule of the other install-dependent entries.
+ */
+export function updateSurface(context: UpdateSurfaceContext): UpdateSurface {
+  const backendLive =
+    context.admissionMode === "managed" && !context.isPreview && !context.isDevRuntime;
+  return {
+    visible: context.isPreview || context.isDevRuntime || context.admissionMode === "managed",
+    backendLive,
+  };
+}
 
 /**
  * Maps a backend refusal to localized copy. The backend speaks a small,

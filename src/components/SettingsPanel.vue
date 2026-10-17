@@ -10,7 +10,7 @@ import {
   sampleImageLuminance,
 } from "../appearance";
 import { languageOptionLabel, normalizeLanguage, useI18n, type Language } from "../i18n";
-import { createUpdateChecker, previewUpdateBridge } from "../updateCheck";
+import { createUpdateChecker, previewUpdateBridge, updateSurface } from "../updateCheck";
 import type {
   AppearanceProfiles,
   AppearanceSettings,
@@ -275,28 +275,46 @@ const uninstallStarting = ref(false);
 const uninstallError = ref("");
 
 /**
- * True in the plain browser preview (Vite / any page without the Tauri
- * runtime). This is the app's established native/preview boundary — the same
- * check every bridge consumer in `App.vue` makes — not a QA switch: the
- * Update section renders in the preview so its layout is developable, wired
- * to the inert `previewUpdateBridge` so it can never reach the updater
- * backend, while a native build keeps the managed-install rule below.
+ * The plain browser preview: no Tauri runtime at all. This is the app's
+ * established native/preview boundary — the same check every bridge consumer
+ * in `App.vue` makes.
  */
 const isPreview = !("__TAURI_INTERNALS__" in window);
+/**
+ * Vite dev server (`pnpm tauri dev` included — it drives the same dev
+ * server). A Tauri dev webview has `__TAURI_INTERNALS__` but is still a
+ * development process, so it must never reach the updater backend; DEV is
+ * the Vite-compiled boundary between dev and `tauri build` output.
+ */
+const isDevRuntime = import.meta.env.DEV;
+
+/**
+ * The Update section's environment rule (see `updateSurface`): visible for a
+ * managed production install, the browser preview, and `tauri dev`; live
+ * (real bridge, enabled controls) only for the managed production install.
+ * Preview and dev render it display-only on the inert bridge — the same rule
+ * as the uninstall entry for production, extended by an inert development
+ * view so the layout stays developable.
+ */
+const surface = computed(() =>
+  updateSurface({ isPreview, isDevRuntime, admissionMode: admissionMode.value }),
+);
+const updateSectionVisible = computed(() => surface.value.visible);
+const updateBackendLive = computed(() => surface.value.backendLive);
 
 /**
  * The manual update check state machine, created per panel session: state
  * resets when Settings reopens, which is the honest scope for a check that
  * talks to the providers right now.
  *
- * The section renders for managed installations — the same rule as the
- * uninstall entry — because the backend's installed-version authority
- * (receipt + PE + evidence) fails closed for unmanaged, legacy, and
- * development copies, and the install transaction requires a managed
- * admission. In the browser preview it renders with inert controls instead
- * (see `isPreview`); every other native context keeps it absent.
+ * The real `invoke` is wired only outside preview and dev runtimes — every
+ * other context gets the inert bridge, so no code path here can reach
+ * `check_for_updates`/`download_update`/`install_ready_update` from a
+ * development process.
  */
-const updateChecker = createUpdateChecker(isPreview ? previewUpdateBridge : { invoke });
+const updateChecker = createUpdateChecker(
+  isPreview || isDevRuntime ? previewUpdateBridge : { invoke },
+);
 const updatePhase = updateChecker.phase;
 const updateAvailableVersion = updateChecker.availableVersion;
 const updateErrorKey = updateChecker.errorKey;
@@ -305,7 +323,8 @@ const updateErrorKey = updateChecker.errorKey;
  * The installed product version, read from the app's package metadata —
  * never hardcoded. The backend re-derives the authoritative installed
  * source version (receipt + PE) for every check and install; this value is
- * display-only. The preview never issues the doomed metadata call.
+ * display-only. The browser preview never issues the doomed metadata call
+ * (a Tauri dev webview can and shows its dev version).
  */
 const currentVersion = ref("");
 if (!isPreview) {
@@ -323,8 +342,8 @@ const updateBusy = computed(
   () => updatePhase.value === "checking" || updatePhase.value === "downloading",
 );
 
-/** In the preview the whole section is display-only: nothing can run. */
-const updateControlsDisabled = computed(() => updateBusy.value || isPreview);
+/** Outside a managed production install the whole section is display-only. */
+const updateControlsDisabled = computed(() => updateBusy.value || !updateBackendLive.value);
 
 const updateCheckLabel = computed(() => {
   if (updatePhase.value === "checking") return t("settings.update.checking");
@@ -932,18 +951,18 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
       </section>
 
       <!--
-        Managed installations only (same rule as the Application section):
-        the updater's installed-version authority fails closed for unmanaged,
-        legacy, and development copies, so the entry is absent rather than a
-        dead control. The browser preview is the one additional context where
-        the section renders — display-only, on the inert preview bridge — so
-        its layout stays developable without an installed app. The states
-        below are the check state machine's phases — a click is never a
-        silent no-op: checking shows in the button, the outcome shows in the
-        status line, and a failure shows as an error with the failed action
-        retryable.
+        Environment rule (see `updateSurface` in updateCheck.ts): rendered
+        for a managed production install, the browser preview, and `tauri
+        dev`; live only for the managed production install — the same rule
+        as the Application section, extended by an inert development view.
+        Outside it the controls are disabled, the installed-only hint shows,
+        and the inert bridge makes every updater command unreachable. The
+        states below are the check state machine's phases — a click is never
+        a silent no-op: checking shows in the button, the outcome shows in
+        the status line, and a failure shows as an error with the failed
+        action retryable.
       -->
-      <template v-if="admissionMode === 'managed' || isPreview">
+      <template v-if="updateSectionVisible">
         <div class="settings-section-heading settings-major-heading">
           <strong>{{ t("settings.update.heading") }}</strong>
         </div>
@@ -968,10 +987,11 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
           </div>
           <div class="update-status-row">
             <!--
-              Preview copy is persistent, not click-triggered: a disabled
-              control that explains itself beats a dead one.
+              Outside a managed production install the explanation is
+              persistent, not click-triggered: a disabled control that
+              explains itself beats a dead one.
             -->
-            <small v-if="isPreview" role="note">{{ t("settings.update.previewOnly") }}</small>
+            <small v-if="!updateBackendLive" role="note">{{ t("settings.update.previewOnly") }}</small>
             <small v-else-if="updatePhase === 'upToDate'" role="status">{{ t("settings.update.upToDate") }}</small>
             <template v-else-if="updatePhase === 'available'">
               <small role="status">{{ t("settings.update.available", { version: updateAvailableVersion ?? "" }) }}</small>

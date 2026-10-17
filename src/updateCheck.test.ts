@@ -2,10 +2,11 @@ import { describe, expect, it, vi, type Mock } from "vitest";
 import {
   createUpdateChecker,
   previewUpdateBridge,
+  updateSurface,
   type UpdateBridge,
 } from "./updateCheck";
 // Vite's `?raw` import: the panel source as a string, for the structural
-// visibility contract below (no Node fs types needed).
+// wiring contract below (no Node fs types needed).
 import panelSource from "./components/SettingsPanel.vue?raw";
 
 /**
@@ -199,7 +200,46 @@ describe("manual update check state machine", () => {
     expect(checker.errorKey.value).toBe("settings.update.error.notManaged");
   });
 
-  describe("browser preview visibility", () => {
+  describe("update surface environments", () => {
+    it("browser preview: visible, inert, never live", () => {
+      expect(
+        updateSurface({ isPreview: true, isDevRuntime: true, admissionMode: null }),
+      ).toEqual({ visible: true, backendLive: false });
+    });
+
+    it("tauri dev (DEV=true, Tauri runtime): visible but inert whatever the admission", () => {
+      // A dev process is classified "development" — and even if a managed
+      // receipt were somehow present, a dev runtime never drives the updater.
+      expect(
+        updateSurface({ isPreview: false, isDevRuntime: true, admissionMode: "development" }),
+      ).toEqual({ visible: true, backendLive: false });
+      expect(
+        updateSurface({ isPreview: false, isDevRuntime: true, admissionMode: "managed" }),
+      ).toEqual({ visible: true, backendLive: false });
+      expect(
+        updateSurface({ isPreview: false, isDevRuntime: true, admissionMode: null }),
+      ).toEqual({ visible: true, backendLive: false });
+    });
+
+    it("managed production install: visible and live", () => {
+      expect(
+        updateSurface({ isPreview: false, isDevRuntime: false, admissionMode: "managed" }),
+      ).toEqual({ visible: true, backendLive: true });
+    });
+
+    it("production native, unmanaged or development: hidden", () => {
+      expect(
+        updateSurface({ isPreview: false, isDevRuntime: false, admissionMode: "unmanaged" }),
+      ).toEqual({ visible: false, backendLive: false });
+      expect(
+        updateSurface({ isPreview: false, isDevRuntime: false, admissionMode: "development" }),
+      ).toEqual({ visible: false, backendLive: false });
+      // Admission not yet arrived (or failed): hidden, never half-enabled.
+      expect(
+        updateSurface({ isPreview: false, isDevRuntime: false, admissionMode: null }),
+      ).toEqual({ visible: false, backendLive: false });
+    });
+
     it("the preview bridge refuses every command with the installed-only copy", async () => {
       // `previewUpdateBridge` holds no reference to the Tauri runtime, so
       // this check never reaches the updater backend by construction.
@@ -209,18 +249,18 @@ describe("manual update check state machine", () => {
       expect(checker.errorKey.value).toBe("settings.update.previewOnly");
     });
 
-    it("the panel renders the section in the preview, wired to the inert bridge", () => {
+    it("the panel wires the surface rule, the inert bridge for dev, and disabled controls", () => {
       // Source-pinned contract (the repo's established pattern for
-      // harness-bound surfaces): the visibility gate, the bridge selection,
-      // and the disabled controls are structural facts about the panel.
+      // harness-bound surfaces): the panel renders the section from the
+      // shared surface rule, selects the inert bridge for every
+      // preview-or-dev runtime, and disables the controls outside a live
+      // backend.
+      expect(panelSource).toContain('v-if="updateSectionVisible"');
       expect(panelSource).toContain(
-        'v-if="admissionMode === \'managed\' || isPreview"',
-      );
-      expect(panelSource).toContain(
-        "createUpdateChecker(isPreview ? previewUpdateBridge : { invoke })",
+        "createUpdateChecker(\n  isPreview || isDevRuntime ? previewUpdateBridge : { invoke },\n)",
       );
       expect(panelSource).toContain(':disabled="updateControlsDisabled"');
-      expect(panelSource).toContain('v-if="isPreview" role="note"');
+      expect(panelSource).toContain('v-if="!updateBackendLive" role="note"');
     });
 
     it("the preview bridge marker never collides with the backend vocabulary", () => {
