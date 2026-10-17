@@ -1,3 +1,32 @@
+# desktop-todo-widget v1.2.1
+
+Usability and updater-surface release: the first release with an in-app "Check for updates" entry, built on the signed update chain that shipped in v1.2.0.
+
+## Highlights
+
+- **Check for updates, in the app.** Settings gains an "Updates" section: it shows the installed version, checks the release providers for a newer version, and — when one exists — offers to download and install it. The download is verified against the signed manifest and staged through the same maintenance helper and transaction machinery v1.2.0 introduced; the app restarts through the helper to apply the update. The live controls exist only on a managed production install; in development builds and the browser preview the section stays visible but inert (disabled controls, never reaching the update backend).
+- **Weather refresh.** The weather card on the main surface has a small refresh button in its top-right corner that re-fetches the current conditions immediately. A failed refresh keeps the previous data on the card.
+- **Security maintenance.** Frontend dependencies were updated to resolve known vulnerabilities; no behavior change is intended from them.
+- **Nothing else changes visually.** Rendering, modes, and features are otherwise unchanged.
+
+## Updating to v1.2.1
+
+v1.2.0 shipped the update engine but no in-app check/download surface, so an installed v1.2.0 cannot update itself to v1.2.1: download the ZIP from GitHub or Gitee, verify the published `.sha256` if you wish, and run `install.ps1` — the same manual trusted install used for v1.2.0. Your managed installation, tasks, and settings are preserved; a v1.1.x copy is adopted the same way. From v1.2.1 on, future same-series updates can be checked and installed from inside the app.
+
+## Compatibility
+
+- Windows 11 is currently validated. Windows 10 compatibility is not yet formally validated.
+- WebView2 Runtime is required.
+- Known environment note (non-blocking, unchanged from v1.2.0): in VMware Windows environments, Desktop-mode transparency may adjust only the material's darkness; Normal and Floating modes are unaffected.
+
+## Data and privacy
+
+- Everything stays local: no account, no sync, and no intentional upload. Weather is the only remote call, and only for a location you configure.
+- Install, update, and uninstall need no administrator privileges and do not modify machine-wide settings.
+- Uninstalling preserves your data unless you explicitly ask for it to be removed.
+
+---
+
 # desktop-todo-widget v1.2.0
 
 The self-maintenance release: a signed update chain, a native maintenance helper, and a managed per-user install — with your data kept local and intact.
