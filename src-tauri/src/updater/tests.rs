@@ -3692,7 +3692,13 @@ mod discovery_qa {
         // The expected RC tag is an env input so a replacement RC (new
         // provider tag, same signed version) can drive the same probe
         // without touching this file: DTW_QA_EXPECT_TAG, default v1.2.0.
+        // The signed target version is parameterized the same way
+        // (DTW_QA_EXPECT_VERSION, default 1.2.0) because the tag names the
+        // release while the manifest's targetVersion is what the verifier
+        // asserts.
         let expected_tag = std::env::var("DTW_QA_EXPECT_TAG").unwrap_or_else(|_| "v1.2.0".into());
+        let expected_version =
+            std::env::var("DTW_QA_EXPECT_VERSION").unwrap_or_else(|_| "1.2.0".into());
         // Production-default visibility: with the QA seam off, the
         // replacement RC must not be enumerated at all.
         let prod_config = DiscoveryConfig {
@@ -3778,8 +3784,8 @@ mod discovery_qa {
         .expect("the RC verifies under the compiled production trust store");
         assert_eq!(
             target.manifest().version().to_string(),
-            "1.2.0",
-            "the discovered candidate is the v1.2.0 RC"
+            expected_version,
+            "the discovered candidate is the expected RC version"
         );
 
         // 3. REAL package download through the same transport policy,
