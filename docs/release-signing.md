@@ -215,7 +215,7 @@ Backup mirror only — not an active release provider, not an updater source, an
 
 v1.1.0 predates the updater entirely: it has no updater UI and no discovery entry. "Discover and upgrade online from v1.1.0 to v1.2.0" is therefore **not** a valid production updater smoke test, and none was claimed. The v1.1 → v1.2 path is the manual trusted bootstrap / legacy adoption validated in section 5.
 
-The first real production self-update smoke — an installed v1.2.0 discovering, downloading, staging, and committing a successor release through the in-app updater — becomes possible only when v1.2.1 / v1.3.0 (or a future RC) exists. That is the planned first exercise of the shipped update chain on a live successor and is not a v1.2.0 blocker. Relatedly, the in-app updater frontend surface (check-for-updates / download / install-restart UX) is not part of v1.2.0; the `discovery-qa` prerelease seam is test infrastructure, not user-facing functionality.
+v1.2.0 is the first stable managed-lifecycle/updater-engine release, but it does not expose an in-app check/download surface: the in-app updater frontend (check-for-updates / download / install-restart UX) is not part of v1.2.0, and the `discovery-qa` prerelease seam is test infrastructure, not user-facing functionality. An installed v1.2.0 therefore has nothing to trigger a self-update with — the v1.2.0 -> v1.2.1 transition still requires a manual installer/bootstrap, exactly like the v1.1 -> v1.2 step above. The in-app updater frontend is implemented on main (commits `eef3916`, `4074cb7`) and first ships in v1.2.1. The first real production in-app self-update smoke — an installed v1.2.1 discovering, downloading, staging, and committing a successor release (a later patch or bridge release) through that surface — becomes possible only once such a successor exists. That is the planned first exercise of the shipped update chain on a live successor and is not a v1.2.0 blocker.
 
 ### 9. Known non-blocking compatibility notes
 
@@ -228,7 +228,7 @@ Release-blocking work is fully closed; the remaining items are repository hygien
 - `.rc0-evidence/` archived/cleaned; `.rc0-taskbar-target/`, `inquiry/`, and `release/` deleted.
 - `scripts/rc0-qa/` retained as QA tooling only (v1.2.0 RC0/RC1 QA scripts — not a production runtime or build dependency; see its README).
 - The failed first RC's remote assets remain published and immutable by policy; the October 2026 rehearsal releases likewise remain retained per the rehearsal endpoint policy above (the pipeline implements no delete API; cleanup is manual).
-- Future work (not release debt): the in-app updater UX, real-machine rollback/crash-recovery QA from a restored clean baseline, the first production self-update smoke from an installed v1.2.0, and cargo-deny adoption.
+- Future work (not release debt): real-machine rollback/crash-recovery QA from a restored clean baseline, the first production in-app self-update smoke — from an installed v1.2.1 (the first release exposing the in-app check/download surface, implemented on main in `eef3916`) to a later patch or bridge release — and cargo-deny adoption.
 
 ### Result
 
