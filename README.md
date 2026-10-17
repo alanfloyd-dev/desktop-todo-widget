@@ -35,7 +35,7 @@ It focuses on lightweight task management, tray-first interaction, customizable 
 
 Releases are published on [GitHub Releases](https://github.com/alanfloyd-dev/desktop-todo-widget/releases) and mirrored on [Gitee Releases](https://gitee.com/alanfloyd-dev/desktop-todo-widget/releases) with identical artifacts. The GitLab repository is a backup mirror only — releases, issues, and active development are handled on GitHub.
 
-**Current release: v1.2.0** — `desktop-todo-widget-v1.2.0-windows-x64.zip`. Extract it and run:
+**Current release: v1.2.1** — `desktop-todo-widget-v1.2.1-windows-x64.zip`. Extract it and run:
 
 `desktop-todo-widget.exe`
 
@@ -43,9 +43,9 @@ The archive also includes `install.ps1` and `uninstall.ps1` for optional per-use
 
 The portable workflow remains supported: extracting the ZIP and running the executable requires no installation.
 
-**Previous release: v1.1.0** — `desktop-todo-widget-v1.1.0-windows-x64.zip`.
+**Previous release: v1.2.0** — `desktop-todo-widget-v1.2.0-windows-x64.zip`.
 
-See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the v1.2.0 changes.
+See [RELEASE_NOTES.md](RELEASE_NOTES.md) for the v1.2.1 changes.
 
 ### Windows compatibility
 
@@ -248,7 +248,7 @@ Release builds are linked as a Windows GUI-subsystem application (`#![cfg_attr(n
 - **Desktop material** — Desktop always uses the translucent Graphite fallback. It is hosted as a child of the Windows desktop hierarchy while window backdrop effects need top-level HWND semantics.
 - **Windows-specific implementation** — the product depends on Windows/WebView2/Tauri-specific behavior and may need compatibility updates as those platforms evolve.
 - **Desktop host is undocumented** — `Progman`, `WorkerW`, and `SHELLDLL_DefView` topology can change across Windows updates and Explorer restarts.
-- **Scope** — Windows 11 validated, no bundled MSI/EXE package (installation is the per-user script in [Install](#install) or the managed installer in the release payload), no in-app updater interface yet (the signed update chain ships in v1.2.0; the update UI is planned), no sync, and no localization beyond English and Simplified Chinese.
+- **Scope** — Windows 11 validated, no bundled MSI/EXE package (installation is the per-user script in [Install](#install) or the managed installer in the release payload), no sync, and no localization beyond English and Simplified Chinese.
 
 ## Roadmap
 
@@ -257,7 +257,7 @@ Planned after v1 stabilization:
 - Reports: broader factual review surfaces on the existing task history.
 - Componentization: smaller, clearer frontend and Rust boundaries.
 - Settings organization: group the current settings surface more deliberately.
-- Updater UX: an in-app check-for-updates / download / install-restart surface on top of the signed update chain shipped in v1.2.0.
+- Release-source preference: choosing Auto/GitHub/Gitee for the in-app updater introduced in v1.2.1.
 
 Deferred work is tracked in [FUTURE.md](FUTURE.md). Apart from the install and uninstall scripts described in [Install](#install), nothing in this section is implemented yet.
 
