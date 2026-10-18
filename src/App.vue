@@ -18,6 +18,7 @@ import {
 } from "./appearance";
 import { createI18n, normalizeLanguage, provideI18n } from "./i18n";
 import { browserWeatherState, createWeatherController, type WeatherMessage } from "./modules/weather/controller";
+import { openQuickLink as openQuickLinkCommand, type ShortcutsBridge } from "./modules/shortcuts/bridge";
 import type {
   AppearanceProfiles,
   AppearanceSettings,
@@ -316,6 +317,9 @@ async function runAction(action: string) {
   }
 }
 
+/** The shell's shortcuts bridge; the `open_quick_link` command lives in the module. */
+const shortcutsBridge: ShortcutsBridge = { invoke };
+
 async function openQuickLink(id: string) {
   const link = state.value.settings.quickLinks.find((candidate) => candidate.id === id);
   if (!link) return;
@@ -326,7 +330,7 @@ async function openQuickLink(id: string) {
     return;
   }
   try {
-    await invoke("open_quick_link", { id });
+    await openQuickLinkCommand(shortcutsBridge, id);
   } catch (reason) {
     error.value = String(reason);
   }

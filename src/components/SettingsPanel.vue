@@ -10,6 +10,7 @@ import {
   sampleImageLuminance,
 } from "../appearance";
 import { languageOptionLabel, normalizeLanguage, useI18n, type Language } from "../i18n";
+import { moveLink, newLinkId, quickLinkUrlErrorKey } from "../modules/shortcuts/links";
 import { createUpdateChecker, previewUpdateBridge, updateSurface } from "../updateCheck";
 import type {
   AppearanceProfiles,
@@ -159,42 +160,6 @@ const draftName = ref("");
 const draftUrl = ref("");
 const quickLinkError = ref("");
 
-/**
- * Stable id for a new link.
- *
- * `crypto.randomUUID` is available in the WebView2 runtime and in every browser
- * the preview supports; the fallback keeps a non-secure preview origin working
- * without pulling an id library in for one call site.
- */
-function newLinkId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `link-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-/**
- * Client-side URL check, mirroring the Rust validator.
- *
- * The backend is still the authority — it re-validates the patch and returns an
- * error the panel surfaces — but catching it here keeps the message next to the
- * field instead of a round trip away.
- */
-function quickLinkUrlError(url: string): string | null {
-  const trimmed = url.trim();
-  if (!trimmed) return t("quickLinks.error.urlRequired");
-  let parsed: URL;
-  try {
-    parsed = new URL(trimmed);
-  } catch {
-    return t("quickLinks.error.invalidUrl");
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    return t("quickLinks.error.invalidUrl");
-  }
-  return null;
-}
-
 function resetEditor() {
   editingLinkId.value = null;
   draftName.value = "";
@@ -221,9 +186,9 @@ function commitEditor() {
     quickLinkError.value = t("quickLinks.error.nameRequired");
     return;
   }
-  const urlError = quickLinkUrlError(url);
-  if (urlError) {
-    quickLinkError.value = urlError;
+  const urlErrorKey = quickLinkUrlErrorKey(url);
+  if (urlErrorKey) {
+    quickLinkError.value = t(urlErrorKey);
     return;
   }
   if (editingLinkId.value) {
@@ -241,20 +206,6 @@ function commitEditor() {
 function deleteLink(id: string) {
   quickLinks.value = quickLinks.value.filter((link) => link.id !== id);
   if (editingLinkId.value === id) resetEditor();
-}
-
-/**
- * Moves a link one row up or down.
- *
- * In-place swap rather than a splice-and-insert: the identity of every row is its
- * `id`, so the simplest correct move is the one that only changes positions.
- */
-function moveLink(id: string, delta: -1 | 1) {
-  const index = quickLinks.value.findIndex((link) => link.id === id);
-  const target = index + delta;
-  if (index < 0 || target < 0 || target >= quickLinks.value.length) return;
-  const list = quickLinks.value;
-  [list[index], list[target]] = [list[target], list[index]];
 }
 
 const developerOpen = ref(false);
@@ -698,14 +649,14 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
                 :disabled="index === 0"
                 :title="t('quickLinks.moveUp')"
                 :aria-label="t('quickLinks.moveUpAriaLabel', { name: link.name })"
-                @click="moveLink(link.id, -1)"
+                @click="moveLink(quickLinks, link.id, -1)"
               >↑</button>
               <button
                 type="button"
                 :disabled="index === quickLinks.length - 1"
                 :title="t('quickLinks.moveDown')"
                 :aria-label="t('quickLinks.moveDownAriaLabel', { name: link.name })"
-                @click="moveLink(link.id, 1)"
+                @click="moveLink(quickLinks, link.id, 1)"
               >↓</button>
               <button
                 type="button"
