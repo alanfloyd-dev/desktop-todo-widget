@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { useI18n } from "../i18n";
-import { qaTrace } from "../qa-trace";
+import { useI18n } from "../../i18n";
+import { qaTrace } from "../../qa-trace";
 
 type TaskStatus = "pending" | "completed" | "cancelled" | "carried";
 
