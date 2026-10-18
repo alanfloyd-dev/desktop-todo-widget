@@ -462,7 +462,7 @@ mod tests {
     /// accessible name the glyph cannot express.
     #[test]
     fn new_task_form_has_one_submit_control_and_it_is_the_glyph() {
-        let source = include_str!("../../src/components/TodoPanel.vue");
+        let source = include_str!("../../src/modules/todo/TodoPanel.vue");
         let form_start = source.find("class=\"task-add\"").expect("task-add form");
         let form = &source[form_start..];
         let form_end = form.find("</form>").expect("task-add form end");
