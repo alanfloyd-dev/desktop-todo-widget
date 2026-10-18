@@ -165,6 +165,15 @@ export const en: Record<string, string> = {
   "review.carriedForward": "Carried forward",
   "review.loading": "Loading review…",
 
+  // --- Modules ---------------------------------------------------------------
+  // Labels for the product modules a user can turn on or off (the registry in
+  // `src/modules/registry.ts`); consumed by the settings surface, not by the
+  // dashboard sections themselves.
+  "modules.todo": "Todo",
+  "modules.weather": "Weather",
+  "modules.shortcuts": "Quick links",
+  "modules.review": "Review",
+
   // --- Settings -------------------------------------------------------------
   "settings.title": "SETTINGS",
   "settings.close": "Close",
@@ -490,6 +499,11 @@ export const zhHans: Record<string, string> = {
   "review.noTasksPlanned": "没有计划任务",
   "review.carriedForward": "由上一任务日顺延",
   "review.loading": "正在加载回顾…",
+
+  "modules.todo": "待办事项",
+  "modules.weather": "天气",
+  "modules.shortcuts": "快捷链接",
+  "modules.review": "回顾",
 
   "settings.title": "设置",
   "settings.close": "关闭",
