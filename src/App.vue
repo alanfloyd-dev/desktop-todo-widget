@@ -6,7 +6,7 @@ import ContextMenu from "./components/ContextMenu.vue";
 import AppearanceBackground from "./components/AppearanceBackground.vue";
 import FloatingOrb from "./components/FloatingOrb.vue";
 import ProductContent from "./components/ProductContent.vue";
-import ReviewPanel from "./components/ReviewPanel.vue";
+import ReviewPanel from "./modules/review/ReviewPanel.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import {
   activeAppearance,

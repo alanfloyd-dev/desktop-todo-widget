@@ -1,17 +1,22 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { useI18n } from "../i18n";
+import { useI18n } from "../../i18n";
 import type {
   ReviewCounts,
   ReviewPeriod,
   ReviewReport,
   ReviewTask,
-} from "../types";
+} from "../../types";
+import { fetchReviewReport, type ReviewBridge } from "./bridge";
+import { bounds, isoDate, shiftDate, utcDate } from "./review-dates";
 
 const props = defineProps<{ nativeBridgeAvailable: boolean }>();
 const emit = defineEmits<{ close: []; error: [message: string] }>();
 const { t, intlLocale } = useI18n();
+
+/** The panel's single backend touch point; command names live in `bridge.ts`. */
+const reviewBridge: ReviewBridge = { invoke };
 
 const period = ref<ReviewPeriod>("daily");
 const anchorDate = ref<string | null>(null);
@@ -37,15 +42,6 @@ const activeDays = computed(() => report.value?.days.filter((day) => day.counts.
 const canMoveForward = computed(
   () => !!report.value && report.value.periodEnd < report.value.currentTaskDay,
 );
-
-function utcDate(value: string) {
-  const [year, month, day] = value.split("-").map(Number);
-  return new Date(Date.UTC(year, month - 1, day));
-}
-
-function isoDate(value: Date) {
-  return value.toISOString().slice(0, 10);
-}
 
 function longDate(value: string) {
   return new Intl.DateTimeFormat(intlLocale.value, {
@@ -109,31 +105,6 @@ function browserTaskDay() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
-function shiftDate(value: string, selectedPeriod: ReviewPeriod, amount: number) {
-  const date = utcDate(value);
-  if (selectedPeriod === "daily") date.setUTCDate(date.getUTCDate() + amount);
-  if (selectedPeriod === "weekly") date.setUTCDate(date.getUTCDate() + amount * 7);
-  if (selectedPeriod === "monthly") date.setUTCMonth(date.getUTCMonth() + amount);
-  return isoDate(date);
-}
-
-function bounds(selectedPeriod: ReviewPeriod, anchor: string) {
-  const selected = utcDate(anchor);
-  if (selectedPeriod === "daily") return { start: anchor, end: anchor };
-  if (selectedPeriod === "weekly") {
-    const mondayOffset = (selected.getUTCDay() + 6) % 7;
-    selected.setUTCDate(selected.getUTCDate() - mondayOffset);
-    const start = isoDate(selected);
-    selected.setUTCDate(selected.getUTCDate() + 6);
-    return { start, end: isoDate(selected) };
-  }
-  selected.setUTCDate(1);
-  const start = isoDate(selected);
-  selected.setUTCMonth(selected.getUTCMonth() + 1);
-  selected.setUTCDate(0);
-  return { start, end: isoDate(selected) };
-}
-
 function browserReport(selectedPeriod: ReviewPeriod, requestedAnchor: string | null): ReviewReport {
   const currentTaskDay = browserTaskDay();
   const anchor = requestedAnchor ?? currentTaskDay;
@@ -174,10 +145,7 @@ async function load() {
   loading.value = true;
   try {
     report.value = props.nativeBridgeAvailable
-      ? await invoke<ReviewReport>("review_report", {
-          period: period.value,
-          anchorDate: anchorDate.value,
-        })
+      ? await fetchReviewReport(reviewBridge, period.value, anchorDate.value)
       : browserReport(period.value, anchorDate.value);
     anchorDate.value = report.value.anchorDate;
   } catch (reason) {
