@@ -1,5 +1,5 @@
 import { ref, type Ref } from "vue";
-import type { WeatherViewState } from "./types";
+import type { WeatherViewState } from "../../types";
 
 /**
  * The bridge the weather controller runs through.

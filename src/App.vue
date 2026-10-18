@@ -17,7 +17,7 @@ import {
   sampleImageLuminance,
 } from "./appearance";
 import { createI18n, normalizeLanguage, provideI18n } from "./i18n";
-import { browserWeatherState, createWeatherController, type WeatherMessage } from "./weather";
+import { browserWeatherState, createWeatherController, type WeatherMessage } from "./modules/weather/controller";
 import type {
   AppearanceProfiles,
   AppearanceSettings,
@@ -38,7 +38,7 @@ const settingsOpen = ref(false);
 const reviewOpen = ref(false);
 const weatherSettingsRequested = ref(false);
 /**
- * The single weather state owner (see `weather.ts`). The app resolves its
+ * The single weather state owner (see `modules/weather/controller.ts`). The app resolves its
  * message keys through this component's i18n instance, so a status re-renders
  * on language change, and passes the translated text to both the weather card
  * and the Settings weather section.

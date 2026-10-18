@@ -4,7 +4,7 @@ import { profileInitials } from "../appearance";
 import { useI18n } from "../i18n";
 import type { ProductWindowMode, QuickLink, WeatherViewState } from "../types";
 import TodoPanel from "./TodoPanel.vue";
-import WeatherDisplay from "./WeatherDisplay.vue";
+import WeatherDisplay from "../modules/weather/WeatherDisplay.vue";
 
 const props = defineProps<{
   mode: ProductWindowMode;

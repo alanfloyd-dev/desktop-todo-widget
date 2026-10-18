@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, type Mock } from "vitest";
-import { browserWeatherState, createWeatherController, type WeatherBridge } from "./weather";
-import type { WeatherViewState } from "./types";
+import { browserWeatherState, createWeatherController, type WeatherBridge } from "./controller";
+import type { WeatherViewState } from "../../types";
 
 /**
  * The bridge's `invoke` is runtime-generic (any result type); a test double
