@@ -50,6 +50,13 @@ pub struct SettingsPatch {
     /// to keep a second implementation of the same ordering rules on the Rust
     /// side for no benefit at this size.
     quick_links: Option<Vec<settings::QuickLink>>,
+    /// The complete module visibility preferences, replaced as one coherent
+    /// object. Absent = no change; present = explicit replacement, with the
+    /// unknown nested ids a client cannot express preserved from the stored
+    /// document (see `ModuleVisibility::replaced_by`). Known members are
+    /// type-checked during this struct's deserialization, so an invalid value
+    /// fails the command before anything is mutated.
+    module_visibility: Option<settings::ModuleVisibility>,
     /// Persisted UI language preference. Applied immediately on the frontend.
     language: Option<crate::locale::Language>,
 }
@@ -156,6 +163,9 @@ pub fn update_product_settings(
         if let Some(value) = patch.quick_links {
             settings.quick_links = value;
         }
+        if let Some(value) = patch.module_visibility {
+            settings.module_visibility = settings.module_visibility.clone().replaced_by(value);
+        }
     })?;
     appearance::cleanup_replaced_assets(
         &state,
@@ -221,7 +231,32 @@ fn validate_quick_links(links: &[settings::QuickLink]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_quick_links;
+    use super::{validate_quick_links, SettingsPatch};
+
+    /// The visibility patch member is optional (absent = no change) and its
+    /// known members are type-checked during deserialization — the command's
+    /// only validation gate, and it runs before anything is mutated.
+    #[test]
+    fn module_visibility_patch_is_optional_and_type_checked() {
+        let patch: SettingsPatch = serde_json::from_value(serde_json::json!({})).expect("empty");
+        assert!(patch.module_visibility.is_none());
+
+        let patch: SettingsPatch = serde_json::from_value(serde_json::json!({
+            "moduleVisibility": { "todo": false }
+        }))
+        .expect("visibility patch");
+        let visibility = patch.module_visibility.expect("present");
+        assert!(!visibility.todo);
+        assert!(visibility.weather && visibility.shortcuts && visibility.review);
+
+        assert!(
+            serde_json::from_value::<SettingsPatch>(serde_json::json!({
+                "moduleVisibility": { "todo": "yes" }
+            }))
+            .is_err(),
+            "a non-boolean known member must fail, not default"
+        );
+    }
 
     #[test]
     fn quick_links_reject_only_unusable_rows() {

@@ -73,6 +73,66 @@ pub fn validate_quick_link_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Per-module visibility preferences: the one persisted module on/off switch.
+///
+/// The four known members mirror `ModuleId` in `src/modules/registry.ts`; both
+/// sides default every module to **enabled**, so a document from before this
+/// field existed (and a nested object that names only some modules) resolves to
+/// exactly the pre-module-visibility surface. Unknown members are ids written
+/// by a future version; the flattened map round-trips them verbatim — the same
+/// Phase 2A contract `QuickLink::extra` implements one level deeper — so a
+/// rollback can never silently delete a newer module's preference.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModuleVisibility {
+    #[serde(default = "default_module_enabled")]
+    pub todo: bool,
+    #[serde(default = "default_module_enabled")]
+    pub weather: bool,
+    #[serde(default = "default_module_enabled")]
+    pub shortcuts: bool,
+    #[serde(default = "default_module_enabled")]
+    pub review: bool,
+    /// Unknown module ids written by a future version of this object.
+    /// Round-tripped verbatim; never consulted by this build's logic.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+fn default_module_enabled() -> bool {
+    true
+}
+
+impl Default for ModuleVisibility {
+    fn default() -> Self {
+        Self {
+            todo: true,
+            weather: true,
+            shortcuts: true,
+            review: true,
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+impl ModuleVisibility {
+    /// The next stored visibility when a settings patch replaces this one.
+    ///
+    /// The patch speaks for a client that can only name the four known members,
+    /// so its known values always win — replacement is the patch semantic, not
+    /// a member-wise merge — but unknown ids the sender *cannot express* are
+    /// carried over from the stored object instead of being silently dropped by
+    /// an ordinary settings save. Keys the patch itself carries (a future
+    /// client naming a newer module) take precedence over stored values.
+    pub fn replaced_by(self, patch: ModuleVisibility) -> Self {
+        let mut merged = patch;
+        for (id, value) in self.extra {
+            merged.extra.entry(id).or_insert(value);
+        }
+        merged
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductWindowMode {
@@ -257,6 +317,13 @@ pub struct ProductSettings {
     /// An empty list is valid and means the product section is hidden.
     #[serde(default)]
     pub quick_links: Vec<QuickLink>,
+    /// Per-module visibility preferences (which dashboard sections and
+    /// overlays the user keeps). Additive member of this evolvable document:
+    /// missing key resolves to all enabled, which is byte-for-byte the
+    /// pre-module-visibility behavior. See [`ModuleVisibility`] for the
+    /// nested unknown-id contract.
+    #[serde(default)]
+    pub module_visibility: ModuleVisibility,
     /// Deserialize-only bridge for the single footer homepage.
     ///
     /// Documents written before Quick Links stored one label/URL pair. Both still
@@ -339,6 +406,10 @@ impl Default for ProductSettings {
             // no pre-seeded links. `default_configuration_has_no_personal_runtime_dependency`
             // asserts this.
             quick_links: Vec::new(),
+            // Every module enabled: the product surface a user first sees is the
+            // complete one, and an upgraded document without this member resolves
+            // through this default unchanged.
+            module_visibility: ModuleVisibility::default(),
             homepage_label: DEFAULT_QUICK_LINK_NAME.into(),
             homepage_url: String::new(),
             extra: BTreeMap::new(),
@@ -1893,6 +1964,248 @@ mod tests {
         assert!(stored.get("homepageUrl").is_none());
         assert!(stored.get("homepageLabel").is_none());
         assert_eq!(stored["futureFeature"], future_feature());
+    }
+
+    // --- Module visibility (v1.3.0-B2) ---------------------------------------
+
+    /// Fresh default: every module enabled, and the serialized document
+    /// carries the fully resolved object.
+    #[test]
+    fn module_visibility_defaults_to_all_enabled() {
+        let state = AppState::load(Database::in_memory().expect("database")).expect("state");
+        let visibility = state.snapshot().expect("snapshot").module_visibility;
+        assert_eq!(
+            visibility,
+            super::ModuleVisibility {
+                todo: true,
+                weather: true,
+                shortcuts: true,
+                review: true,
+                extra: Default::default(),
+            }
+        );
+        let stored = stored_document(&state.database);
+        assert_eq!(
+            stored["moduleVisibility"],
+            serde_json::json!({ "todo": true, "weather": true, "shortcuts": true, "review": true })
+        );
+    }
+
+    /// A v1.2.1 document has no `moduleVisibility` member; it resolves to the
+    /// all-enabled default, which is byte-for-byte the pre-module-visibility
+    /// surface, and the member is materialized by the load-time rewrite just
+    /// like any other defaulted field.
+    #[test]
+    fn legacy_document_without_module_visibility_resolves_all_enabled() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting("product_settings", r#"{"mode":"sidebar"}"#)
+            .expect("legacy document");
+        let state = AppState::load(database).expect("load");
+        let visibility = state.snapshot().expect("snapshot").module_visibility;
+        assert!(visibility.todo && visibility.weather && visibility.shortcuts && visibility.review);
+        assert!(visibility.extra.is_empty());
+        let stored = stored_document(&state.database);
+        assert_eq!(stored["moduleVisibility"]["todo"], serde_json::json!(true));
+        // The rest of the legacy document is untouched.
+        assert_eq!(stored["mode"], "sidebar");
+    }
+
+    /// A nested object that names only some modules defaults the omitted
+    /// members to enabled. The outer struct's `#[serde(default)]` does not
+    /// reach inside a present-but-partial object — the field-level member
+    /// defaults are what make this resolve correctly.
+    #[test]
+    fn partial_nested_module_visibility_defaults_omitted_members() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting("product_settings", r#"{"moduleVisibility":{"todo":false}}"#)
+            .expect("partial visibility document");
+        let state = AppState::load(database).expect("load");
+        let visibility = state.snapshot().expect("snapshot").module_visibility;
+        assert!(!visibility.todo);
+        assert!(visibility.weather && visibility.shortcuts && visibility.review);
+    }
+
+    /// An explicit `false` is a persisted choice: it survives the load-time
+    /// rewrite and re-parsing the stored bytes reproduces it.
+    #[test]
+    fn explicit_false_round_trips_through_the_stored_document() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"moduleVisibility":{"weather":false,"shortcuts":false}}"#,
+            )
+            .expect("visibility document");
+        let state = AppState::load(database).expect("load");
+        let stored = stored_document(&state.database);
+        assert_eq!(stored["moduleVisibility"]["weather"], serde_json::json!(false));
+        assert_eq!(stored["moduleVisibility"]["shortcuts"], serde_json::json!(false));
+        assert_eq!(stored["moduleVisibility"]["todo"], serde_json::json!(true));
+        let raw = state
+            .database
+            .setting("product_settings")
+            .expect("read")
+            .expect("value");
+        let reparsed: super::ProductSettings =
+            serde_json::from_str(&raw).expect("stored document parses");
+        assert!(!reparsed.module_visibility.weather);
+        assert!(!reparsed.module_visibility.shortcuts);
+    }
+
+    /// With no future ids present, the serialized object carries exactly the
+    /// four known keys.
+    #[test]
+    fn module_visibility_serialization_keeps_exactly_the_known_keys() {
+        let document: serde_json::Value =
+            serde_json::to_value(super::ProductSettings::default()).expect("serialize settings");
+        let mut keys: Vec<String> = document["moduleVisibility"]
+            .as_object()
+            .expect("visibility object")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        assert_eq!(keys, vec!["review", "shortcuts", "todo", "weather"]);
+    }
+
+    /// Unknown nested module ids written by a future version survive the
+    /// load → normalize → persist cycle verbatim, next to the known choices.
+    #[test]
+    fn unknown_nested_module_ids_round_trip() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"moduleVisibility":{"todo":false,"newsFeed":{"enabled":true,"deck":"headlines"}}}"#,
+            )
+            .expect("future module document");
+        let state = AppState::load(database).expect("load");
+        let visibility = state.snapshot().expect("snapshot").module_visibility;
+        assert!(!visibility.todo);
+        assert_eq!(
+            visibility.extra.get("newsFeed"),
+            Some(&serde_json::json!({ "enabled": true, "deck": "headlines" }))
+        );
+        let stored = stored_document(&state.database);
+        assert_eq!(
+            stored["moduleVisibility"]["newsFeed"],
+            serde_json::json!({ "enabled": true, "deck": "headlines" })
+        );
+    }
+
+    /// The new member coexists with the outer unknown-key contract: a
+    /// document carrying both keeps both.
+    #[test]
+    fn unknown_outer_keys_survive_alongside_module_visibility() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"moduleVisibility":{"review":false},"futureFeature":{"enabled":true,"threshold":17}}"#,
+            )
+            .expect("mixed document");
+        let state = AppState::load(database).expect("load");
+        let snapshot = state.snapshot().expect("snapshot");
+        assert!(!snapshot.module_visibility.review);
+        assert_eq!(snapshot.extra.get("futureFeature"), Some(&future_feature()));
+        let stored = stored_document(&state.database);
+        assert_eq!(stored["moduleVisibility"]["review"], serde_json::json!(false));
+        assert_eq!(stored["futureFeature"], future_feature());
+    }
+
+    /// Patch replacement semantics: the patch's known choices win, unknown
+    /// ids the sender cannot express survive an ordinary save, and ids the
+    /// patch itself carries take precedence over stored values.
+    #[test]
+    fn patch_replacement_preserves_unknown_nested_ids() {
+        let stored = super::ModuleVisibility {
+            todo: false,
+            extra: [("newsFeed".to_string(), serde_json::json!({ "enabled": true }))]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let merged = stored.replaced_by(super::ModuleVisibility::default());
+        assert!(merged.todo);
+        assert_eq!(
+            merged.extra.get("newsFeed"),
+            Some(&serde_json::json!({ "enabled": true }))
+        );
+
+        let future_patch = super::ModuleVisibility {
+            extra: [("newsFeed".to_string(), serde_json::json!({ "enabled": false }))]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let merged = super::ModuleVisibility::default().replaced_by(future_patch);
+        assert_eq!(
+            merged.extra.get("newsFeed"),
+            Some(&serde_json::json!({ "enabled": false }))
+        );
+    }
+
+    /// A known member holding a non-boolean value is a protocol error at
+    /// both the document and the patch layer — never a silent default.
+    #[test]
+    fn invalid_known_module_value_is_an_error_not_a_default() {
+        assert!(serde_json::from_str::<super::ModuleVisibility>(r#"{"todo":"yes"}"#).is_err());
+        assert!(
+            serde_json::from_str::<super::ProductSettings>(r#"{"moduleVisibility":{"review":null}}"#)
+                .is_err()
+        );
+    }
+
+    /// Downgrade model: a runtime without the `moduleVisibility` field (the
+    /// v1.2.1 surface: known members plus the flatten-everything-else
+    /// contract) keeps the whole member verbatim in its unknown map, and
+    /// re-upgrading restores the typed choices from those same bytes.
+    #[test]
+    fn module_visibility_survives_a_downgrade_round_trip_via_outer_extra() {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Deserialize, Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct V121SettingsModel {
+            mode: ProductWindowMode,
+            quick_links: Vec<QuickLink>,
+            #[serde(flatten, default)]
+            extra: std::collections::BTreeMap<String, serde_json::Value>,
+        }
+
+        let current = super::ProductSettings {
+            module_visibility: super::ModuleVisibility {
+                todo: false,
+                extra: [("newsFeed".to_string(), serde_json::json!(true))]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let document = serde_json::to_string(&current).expect("serialize current");
+
+        let downgraded: V121SettingsModel =
+            serde_json::from_str(&document).expect("old runtime parses new document");
+        let carried = downgraded
+            .extra
+            .get("moduleVisibility")
+            .expect("member preserved by the old runtime")
+            .clone();
+        assert_eq!(carried["todo"], serde_json::json!(false));
+        assert_eq!(carried["newsFeed"], serde_json::json!(true));
+
+        let reupgraded: super::ProductSettings = serde_json::from_str(
+            &serde_json::to_string(&downgraded).expect("old runtime serializes"),
+        )
+        .expect("new runtime parses old serialization");
+        assert!(!reupgraded.module_visibility.todo);
+        assert_eq!(
+            reupgraded.module_visibility.extra.get("newsFeed"),
+            Some(&serde_json::json!(true))
+        );
     }
 
     /// A: persist-failure atomicity. A deterministic SQLite write failure —

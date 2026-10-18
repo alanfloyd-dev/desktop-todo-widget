@@ -1,3 +1,14 @@
+/**
+ * Per-module visibility preferences, as persisted in the settings document.
+ *
+ * The type lives with the module registry, which owns the closed module id
+ * set; this file only mirrors the Rust `ProductSettings` shape. The backend
+ * always returns the object fully resolved: a document (or nested object)
+ * missing members reads as all enabled, which is the pre-module-visibility
+ * behavior.
+ */
+import type { ModuleVisibility } from "./modules/registry";
+
 export type ProductWindowMode = "sidebar" | "floating" | "desktop";
 export type SidebarSide = "left" | "right";
 export type TemperatureUnit = "celsius" | "fahrenheit";
@@ -144,6 +155,8 @@ export interface ProductSettings {
    * never the identity. Names and URLs are user data and are never localized.
    */
   quickLinks: QuickLink[];
+  /** Which modules the user keeps; missing stored members arrive as enabled. */
+  moduleVisibility: ModuleVisibility;
 }
 
 export interface QuickLink {

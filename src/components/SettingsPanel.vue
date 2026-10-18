@@ -11,6 +11,7 @@ import {
 } from "../appearance";
 import { languageOptionLabel, normalizeLanguage, useI18n, type Language } from "../i18n";
 import { moveLink, newLinkId, quickLinkUrlErrorKey } from "../modules/shortcuts/links";
+import type { ModuleVisibility } from "../modules/registry";
 import { createUpdateChecker, previewUpdateBridge, updateSurface } from "../updateCheck";
 import type {
   AppearanceProfiles,
@@ -55,6 +56,7 @@ const emit = defineEmits<{
     displayName: string;
     avatarAssetId: string | null;
     quickLinks: QuickLink[];
+    moduleVisibility: ModuleVisibility;
   }];
 }>();
 
@@ -387,6 +389,11 @@ function save() {
     displayName: displayName.value,
     avatarAssetId: avatarAssetId.value,
     quickLinks: quickLinks.value.map((link) => ({ ...link })),
+    // No module editor exists yet (B3), so there is no draft: the stored
+    // visibility rides through unchanged, which keeps an ordinary Save
+    // idempotent for the known members while the backend preserves unknown
+    // future ids the payload cannot express.
+    moduleVisibility: props.settings.moduleVisibility,
   });
 }
 
