@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import { profileInitials } from "../appearance";
 import { useI18n } from "../i18n";
-import type { ProductWindowMode, QuickLink, WeatherViewState } from "../types";
+import type { ModuleVisibility, ProductWindowMode, QuickLink, WeatherViewState } from "../types";
 import TodoPanel from "../modules/todo/TodoPanel.vue";
 import WeatherDisplay from "../modules/weather/WeatherDisplay.vue";
 
@@ -13,6 +13,8 @@ const props = defineProps<{
   avatarUrl: string;
   avatarAvailable: boolean;
   quickLinks: QuickLink[];
+  /** Effective per-module visibility, resolved by the app from the settings document. */
+  moduleVisibility: ModuleVisibility;
   nativeBridgeAvailable: boolean;
   weather: WeatherViewState;
   weatherMessage: string;
@@ -73,7 +75,14 @@ const dateLabel = computed(() =>
       <p class="date-line" :data-tauri-drag-region="dragRegionEnabled ? '' : undefined">
         {{ dateLabel }}
       </p>
+      <!--
+        The weather card is the one hideable part of the header: the date line
+        and the drag region above it are structural shell and always remain.
+        Hiding the card never stops the app-owned weather controller — the
+        Settings weather section reads the same state.
+      -->
       <WeatherDisplay
+        v-if="moduleVisibility.weather"
         :weather="weather"
         :weather-message="weatherMessage"
         @configure="$emit('configureWeather')"
@@ -81,20 +90,28 @@ const dateLabel = computed(() =>
       />
     </header>
 
+    <!--
+      A disabled todo module unmounts its panel: the component owns only
+      ephemeral UI state (it removes its own drag listeners on unmount), while
+      every task lives in SQLite behind commands that stay invokable. A later
+      re-enable mounts the panel fresh, which re-queries the current task day.
+    -->
     <TodoPanel
+      v-if="moduleVisibility.todo"
       :native-bridge-available="nativeBridgeAvailable"
+      :show-review-entry="moduleVisibility.review"
       @open-review="$emit('openReview')"
       @error="$emit('error', $event)"
     />
 
     <!--
       Quick Links is a product section, not a footer affordance: it sits in the
-      same section rhythm as the todo panel above it. With no links configured the
-      whole section is absent rather than rendering an empty block, which is why
-      the heading lives inside the `v-if`.
+      same section rhythm as the todo panel above it. The whole section is
+      absent when the module is disabled, or when no links are configured —
+      which is why the heading lives inside the `v-if`.
     -->
     <section
-      v-if="quickLinks.length"
+      v-if="moduleVisibility.shortcuts && quickLinks.length"
       class="quick-links"
       :aria-label="t('quickLinks.heading')"
     >

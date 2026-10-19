@@ -33,7 +33,14 @@ interface TodayState {
   monthSummary: { month: string; completed: number; carried: number };
 }
 
-const props = defineProps<{ nativeBridgeAvailable: boolean }>();
+const props = withDefaults(
+  defineProps<{
+    nativeBridgeAvailable: boolean;
+    /** Whether the Review overlay entry is offered in this panel's heading. */
+    showReviewEntry?: boolean;
+  }>(),
+  { showReviewEntry: true },
+);
 const emit = defineEmits<{ error: [message: string]; openReview: [] }>();
 const { t, intlLocale } = useI18n();
 
@@ -453,7 +460,12 @@ onBeforeUnmount(() => {
       <h1 id="today-title">{{ t("today.title") }}</h1>
       <div class="section-heading-actions">
         <span>{{ taskDayLabel }}</span>
-        <button type="button" class="review-entry" @click="emit('openReview')">
+        <button
+          v-if="showReviewEntry"
+          type="button"
+          class="review-entry"
+          @click="emit('openReview')"
+        >
           {{ t("today.reviewEntry") }}
         </button>
       </div>

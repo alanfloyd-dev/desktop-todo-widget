@@ -19,7 +19,7 @@ import {
 import { createI18n, normalizeLanguage, provideI18n } from "./i18n";
 import { browserWeatherState, createWeatherController, type WeatherMessage } from "./modules/weather/controller";
 import { openQuickLink as openQuickLinkCommand, type ShortcutsBridge } from "./modules/shortcuts/bridge";
-import { DEFAULT_MODULE_VISIBILITY, type ModuleVisibility } from "./modules/registry";
+import { isModuleEnabled, resolveModuleVisibility, type ModuleVisibility } from "./modules/registry";
 import type {
   AppearanceProfiles,
   AppearanceSettings,
@@ -111,6 +111,25 @@ const floatingCollapsed = computed(
     state.value.settings.mode === "floating" &&
     state.value.settings.floatingPresentation === "collapsed",
 );
+/**
+ * The effective module visibility, resolved through the registry's policy at
+ * the state boundary. The backend already returns the object fully resolved
+ * (missing members arrive as enabled), so this is defensive: it keeps the
+ * all-enabled default in exactly one place and normalizes any hand-shaped or
+ * legacy state without mutating the stored settings document.
+ */
+const moduleVisibility = computed(() =>
+  resolveModuleVisibility(state.value.settings.moduleVisibility),
+);
+// A module preference that disables Review takes effect immediately, also on
+// an overlay that is already open: the preference governs whether the overlay
+// may remain open, not just whether its entry is offered.
+watch(
+  () => isModuleEnabled(moduleVisibility.value, "review"),
+  (reviewEnabled) => {
+    if (!reviewEnabled) reviewOpen.value = false;
+  },
+);
 
 function emptyAsset(assetId: string | null = null): AssetPayload {
   return { assetId, available: false, dataUrl: null };
@@ -128,6 +147,12 @@ function browserState(): ProductViewState {
     ? background as AppearanceSettings["backgroundType"]
     : "glass";
   const lightSolid = preview.get("palette") === "light";
+  const hiddenModules = new Set(
+    (preview.get("modules") ?? "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean),
+  );
   // The browser preview has no persisted profiles, so every mode starts from the
   // same draft; `resolve_appearance_contrast` and the profile selector are still
   // exercised because the draft is stored per mode.
@@ -173,7 +198,17 @@ function browserState(): ProductViewState {
       displayName: "User",
       avatarAssetId: null,
       quickLinks: [],
-      moduleVisibility: DEFAULT_MODULE_VISIBILITY,
+      // Preview-only QA seam for module visibility: `?modules=` lists the
+      // module ids to hide (`?modules=todo,review`), so the rendering matrix
+      // is inspectable in the plain browser. The native build never reads it —
+      // `loadState()` replaces this draft with the backend state — and the
+      // values resolve through the same registry policy the product uses.
+      moduleVisibility: resolveModuleVisibility({
+        todo: !hiddenModules.has("todo"),
+        weather: !hiddenModules.has("weather"),
+        shortcuts: !hiddenModules.has("shortcuts"),
+        review: !hiddenModules.has("review"),
+      }),
     },
     desktopExperimental: true,
     databasePath: "browser preview · app-data/alan-desktop.sqlite3",
@@ -252,6 +287,17 @@ function openWeatherSettings() {
   weatherSettingsRequested.value = true;
   settingsOpen.value = true;
   menu.value.open = false;
+}
+
+/**
+ * The one Review overlay entry (the Todo heading button, re-emitted through
+ * `ProductContent`). Guarded here so a disabled Review preference closes
+ * every existing path to the overlay, not just the button it hides.
+ */
+function openReview() {
+  if (!isModuleEnabled(moduleVisibility.value, "review")) return;
+  settingsOpen.value = false;
+  reviewOpen.value = true;
 }
 
 function openContextMenu(event: MouseEvent) {
@@ -506,6 +552,7 @@ onBeforeUnmount(() => {
         :avatar-url="avatarAsset.dataUrl || ''"
         :avatar-available="avatarAsset.available"
         :quick-links="state.settings.quickLinks"
+        :module-visibility="moduleVisibility"
         :native-bridge-available="nativeBridgeAvailable"
         :weather="weather"
         :weather-message="weatherMessage"
@@ -514,7 +561,7 @@ onBeforeUnmount(() => {
         @open-settings="runAction('settings')"
         @configure-weather="openWeatherSettings"
         @refresh-weather="refreshWeather(true)"
-        @open-review="settingsOpen = false; reviewOpen = true"
+        @open-review="openReview"
         @error="error = $event"
       />
 

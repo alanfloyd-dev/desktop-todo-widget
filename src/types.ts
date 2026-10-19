@@ -9,6 +9,8 @@
  */
 import type { ModuleVisibility } from "./modules/registry";
 
+export type { ModuleVisibility };
+
 export type ProductWindowMode = "sidebar" | "floating" | "desktop";
 export type SidebarSide = "left" | "right";
 export type TemperatureUnit = "celsius" | "fahrenheit";
