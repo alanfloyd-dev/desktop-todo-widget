@@ -202,6 +202,10 @@ export const en: Record<string, string> = {
   "settings.language.effective": "Currently using {language}",
   "settings.language.restartHint": "Native menus and tray tooltips update after a restart.",
 
+  "settings.modulesHeading": "MODULES",
+  "settings.modulesDescription": "Choose which modules appear on the desktop",
+  "settings.modulesReset": "↻ Reset modules",
+
   "settings.profileHeading": "PROFILE",
   "settings.displayName": "Display name",
   "settings.displayNameHint": "Footer profile",
@@ -531,6 +535,10 @@ export const zhHans: Record<string, string> = {
   "settings.language.option.zhHans": "简体中文",
   "settings.language.effective": "当前使用 {language}",
   "settings.language.restartHint": "原生菜单与托盘提示会在重启后更新。",
+
+  "settings.modulesHeading": "模块",
+  "settings.modulesDescription": "选择显示在桌面上的模块",
+  "settings.modulesReset": "↻ 恢复默认模块",
 
   "settings.profileHeading": "个人资料",
   "settings.displayName": "显示名称",

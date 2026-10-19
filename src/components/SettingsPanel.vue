@@ -11,7 +11,13 @@ import {
 } from "../appearance";
 import { languageOptionLabel, normalizeLanguage, useI18n, type Language } from "../i18n";
 import { moveLink, newLinkId, quickLinkUrlErrorKey } from "../modules/shortcuts/links";
-import type { ModuleVisibility } from "../modules/registry";
+import {
+  DEFAULT_MODULE_VISIBILITY,
+  MODULE_REGISTRY,
+  resolveModuleVisibility,
+  type ModuleId,
+  type ModuleVisibility,
+} from "../modules/registry";
 import { createUpdateChecker, previewUpdateBridge, updateSurface } from "../updateCheck";
 import type {
   AppearanceProfiles,
@@ -210,6 +216,30 @@ function deleteLink(id: string) {
   if (editingLinkId.value === id) resetEditor();
 }
 
+/**
+ * Module visibility draft.
+ *
+ * Initialized from the authoritative settings exactly like every other draft
+ * on this panel: toggles and the reset below change this copy only, Save
+ * emits it, and closing without Save discards it. The registry is the single
+ * source of the ids and labels; the resolved shape guarantees exactly the
+ * four known keys even if the stored document arrived in an unexpected form.
+ */
+const moduleVisibilityDraft = ref<ModuleVisibility>(
+  resolveModuleVisibility(props.settings.moduleVisibility),
+);
+
+function toggleModule(id: ModuleId) {
+  moduleVisibilityDraft.value = {
+    ...moduleVisibilityDraft.value,
+    [id]: !moduleVisibilityDraft.value[id],
+  };
+}
+
+function resetModules() {
+  moduleVisibilityDraft.value = { ...DEFAULT_MODULE_VISIBILITY };
+}
+
 const developerOpen = ref(false);
 
 /**
@@ -389,11 +419,10 @@ function save() {
     displayName: displayName.value,
     avatarAssetId: avatarAssetId.value,
     quickLinks: quickLinks.value.map((link) => ({ ...link })),
-    // No module editor exists yet (B3), so there is no draft: the stored
-    // visibility rides through unchanged, which keeps an ordinary Save
-    // idempotent for the known members while the backend preserves unknown
-    // future ids the payload cannot express.
-    moduleVisibility: props.settings.moduleVisibility,
+    // The draft, not the stored value: this is the one place module
+    // preferences change. The backend preserves unknown future ids the
+    // payload cannot express (B2's replace semantics).
+    moduleVisibility: { ...moduleVisibilityDraft.value },
   });
 }
 
@@ -609,6 +638,46 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
             {{ languageOptionLabel(option, t) }}
           </button>
         </div>
+      </div>
+
+      <div class="settings-section-heading settings-major-heading">
+        <strong>{{ t("settings.modulesHeading") }}</strong>
+      </div>
+      <!--
+        The module switches are pressed-toggle buttons, the panel's established
+        multi-state control (same group styling and aria-pressed semantics as
+        the language picker): pressed = the module is enabled. They edit the
+        draft only — the dashboard updates on Save, and closing without Save
+        discards them. Ids and labels come from the module registry.
+      -->
+      <div class="settings-row">
+        <span>
+          <strong>{{ t("settings.modulesDescription") }}</strong>
+        </span>
+        <div
+          class="appearance-options"
+          role="group"
+          :aria-label="t('settings.modulesHeading')"
+        >
+          <button
+            v-for="module in MODULE_REGISTRY"
+            :key="module.id"
+            type="button"
+            :class="{ active: moduleVisibilityDraft[module.id] }"
+            :aria-pressed="moduleVisibilityDraft[module.id]"
+            @click="toggleModule(module.id)"
+          >
+            {{ t(module.labelKey) }}
+          </button>
+        </div>
+      </div>
+      <div class="settings-row">
+        <span>
+          <strong>{{ t("settings.modulesReset") }}</strong>
+        </span>
+        <button type="button" @click="resetModules">
+          {{ t("settings.modulesReset") }}
+        </button>
       </div>
 
       <div class="settings-section-heading settings-major-heading"><strong>{{ t("settings.profileHeading") }}</strong></div>
