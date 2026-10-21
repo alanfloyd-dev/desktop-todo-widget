@@ -188,6 +188,19 @@ button {
   flex-direction: column;
 }
 
+/*
+ * The structural dashboard container (C3a): one stable single-column grid
+ * whose items are the module slots C3b's layout engine will order and span.
+ * It renders its children exactly like the former plain flow — one column,
+ * no gap, `minmax(0, 1fr)` so wide content can never force min-content
+ * overflow — and carries no visual styling of its own. The observation
+ * header and the footer are shell and stay outside it.
+ */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .floating-orb {
   display: grid;
   position: absolute;

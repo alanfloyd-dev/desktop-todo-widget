@@ -91,40 +91,57 @@ const dateLabel = computed(() =>
     </header>
 
     <!--
-      A disabled todo module unmounts its panel: the component owns only
-      ephemeral UI state (it removes its own drag listeners on unmount), while
-      every task lives in SQLite behind commands that stay invokable. A later
-      re-enable mounts the panel fresh, which re-queries the current task day.
+      The structural dashboard container (C3a). One single-column grid whose
+      items are the module slots C3b's layout engine will order and span; it
+      renders its children exactly like the former plain flow — one column,
+      no gap, no min-content overflow (`minmax(0, 1fr)`) — and carries no
+      visual styling of its own. The observation header (date line, window
+      drag region, and — until C3b's dedicated extraction — the weather card)
+      and the footer are shell and stay outside it. Slots are removed
+      entirely when their module is hidden, so a disabled module never
+      reserves space.
     -->
-    <TodoPanel
-      v-if="moduleVisibility.todo"
-      :native-bridge-available="nativeBridgeAvailable"
-      :show-review-entry="moduleVisibility.review"
-      @open-review="$emit('openReview')"
-      @error="$emit('error', $event)"
-    />
+    <div class="dashboard-grid">
+      <div v-if="moduleVisibility.todo" class="dashboard-slot">
+        <!--
+          A disabled todo module unmounts its panel: the component owns only
+          ephemeral UI state (it removes its own drag listeners on unmount),
+          while every task lives in SQLite behind commands that stay
+          invokable. A later re-enable mounts the panel fresh, which
+          re-queries the current task day. The wrapper makes the two-root
+          panel one coherent grid item for C3b's ordering.
+        -->
+        <TodoPanel
+          :native-bridge-available="nativeBridgeAvailable"
+          :show-review-entry="moduleVisibility.review"
+          @open-review="$emit('openReview')"
+          @error="$emit('error', $event)"
+        />
+      </div>
 
-    <!--
-      Quick Links is a product section, not a footer affordance: it sits in the
-      same section rhythm as the todo panel above it. The whole section is
-      absent when the module is disabled, or when no links are configured —
-      which is why the heading lives inside the `v-if`.
-    -->
-    <section
-      v-if="moduleVisibility.shortcuts && quickLinks.length"
-      class="quick-links"
-      :aria-label="t('quickLinks.heading')"
-    >
-      <p class="section-heading">{{ t("quickLinks.heading") }}</p>
-      <ul>
-        <li v-for="link in quickLinks" :key="link.id">
-          <button type="button" :title="link.url" @click="$emit('openQuickLink', link.id)">
-            <span class="quick-link-name">{{ link.name }}</span>
-            <span class="quick-link-arrow" aria-hidden="true">↗</span>
-          </button>
-        </li>
-      </ul>
-    </section>
+      <!--
+        Quick Links is a product section, not a footer affordance: it sits in
+        the same section rhythm as the todo panel above it. The whole slot is
+        absent when the module is disabled, or when no links are configured —
+        which is why the heading lives inside the `v-if` conditions.
+      -->
+      <div
+        v-if="moduleVisibility.shortcuts && quickLinks.length"
+        class="dashboard-slot"
+      >
+        <section class="quick-links" :aria-label="t('quickLinks.heading')">
+          <p class="section-heading">{{ t("quickLinks.heading") }}</p>
+          <ul>
+            <li v-for="link in quickLinks" :key="link.id">
+              <button type="button" :title="link.url" @click="$emit('openQuickLink', link.id)">
+                <span class="quick-link-name">{{ link.name }}</span>
+                <span class="quick-link-arrow" aria-hidden="true">↗</span>
+              </button>
+            </li>
+          </ul>
+        </section>
+      </div>
+    </div>
 
     <!--
       The profile identity is user content, not a product fixture. With neither a
