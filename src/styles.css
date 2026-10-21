@@ -201,6 +201,23 @@ button {
   grid-template-columns: minmax(0, 1fr);
 }
 
+/*
+ * The weather slot owns what the observation header used to supply around
+ * the card: the 18px gap comes from `.weather-display` itself, and the slot
+ * adds the side inset, the breathing space below the card, and the header
+ * separator the card used to sit on. The min-heights reproduce each mode's
+ * pre-extraction header slack (mode header min-height minus the date-line
+ * block); when the card grows taller the slot grows with it, exactly as the
+ * old header did. Weather hidden: the slot is absent and the header takes
+ * its `header-closed` form instead — the two never render together.
+ */
+.weather-slot {
+  min-height: 128px;
+  padding: 0 2px 34px;
+  border-bottom: 1px solid var(--line);
+  user-select: none;
+}
+
 .floating-orb {
   display: grid;
   position: absolute;
@@ -234,11 +251,23 @@ button {
   outline-offset: -3px;
 }
 
+/*
+ * The observation header is shell: the date line and the window drag region.
+ * Since C3b-1 the weather card lives in the first dashboard slot, so the
+ * open header carries no separator of its own. When Weather is hidden the
+ * `header-closed` form restores the pre-extraction geometry verbatim — the
+ * breathing space and the border that used to close the header — so the
+ * weather-disabled surface keeps its baseline look.
+ */
 .observation-header {
-  min-height: 150px;
-  padding: 2px 2px 34px;
-  border-bottom: 1px solid var(--line);
+  padding: 2px 2px 0;
   user-select: none;
+}
+
+.observation-header.header-closed {
+  min-height: 150px;
+  padding-bottom: 34px;
+  border-bottom: 1px solid var(--line);
 }
 
 .observation-header.drag-enabled {
@@ -876,8 +905,13 @@ button.profile-identity {
   padding: 30px 24px 24px;
 }
 
-.mode-sidebar .observation-header {
+.mode-sidebar .observation-header.header-closed {
   min-height: 170px;
+  padding-bottom: 30px;
+}
+
+.mode-sidebar .weather-slot {
+  min-height: 145px;
   padding-bottom: 30px;
 }
 
@@ -932,8 +966,12 @@ button.profile-identity {
   padding: 42px 48px 34px;
 }
 
-.mode-desktop .observation-header {
+.mode-desktop .observation-header.header-closed {
   min-height: 132px;
+}
+
+.mode-desktop .weather-slot {
+  min-height: 110px;
 }
 
 .mode-desktop .product-section {

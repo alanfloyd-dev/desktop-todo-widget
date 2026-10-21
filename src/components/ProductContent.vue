@@ -67,7 +67,7 @@ const dateLabel = computed(() =>
   <div class="product-content" :data-mode="mode">
     <header
       class="observation-header"
-      :class="{ 'drag-enabled': dragRegionEnabled }"
+      :class="{ 'drag-enabled': dragRegionEnabled, 'header-closed': !moduleVisibility.weather }"
       :data-tauri-drag-region="dragRegionEnabled ? '' : undefined"
     >
       <!-- Tauri drag-region matching is target-based rather than inherited,
@@ -75,33 +75,36 @@ const dateLabel = computed(() =>
       <p class="date-line" :data-tauri-drag-region="dragRegionEnabled ? '' : undefined">
         {{ dateLabel }}
       </p>
-      <!--
-        The weather card is the one hideable part of the header: the date line
-        and the drag region above it are structural shell and always remain.
-        Hiding the card never stops the app-owned weather controller — the
-        Settings weather section reads the same state.
-      -->
-      <WeatherDisplay
-        v-if="moduleVisibility.weather"
-        :weather="weather"
-        :weather-message="weatherMessage"
-        @configure="$emit('configureWeather')"
-        @refresh="$emit('refreshWeather')"
-      />
     </header>
 
     <!--
-      The structural dashboard container (C3a). One single-column grid whose
-      items are the module slots C3b's layout engine will order and span; it
-      renders its children exactly like the former plain flow — one column,
-      no gap, no min-content overflow (`minmax(0, 1fr)`) — and carries no
-      visual styling of its own. The observation header (date line, window
-      drag region, and — until C3b's dedicated extraction — the weather card)
-      and the footer are shell and stay outside it. Slots are removed
-      entirely when their module is hidden, so a disabled module never
-      reserves space.
+      The structural dashboard container (C3b-1). One single-column grid whose
+      items are the three module slots C3b's layout engine will order and
+      span; it renders its children exactly like the former plain flow — one
+      column, no gap, no min-content overflow (`minmax(0, 1fr)`) — and carries
+      no visual styling of its own. The observation header (date line and
+      window drag region) and the footer are shell and stay outside it. Slots
+      are removed entirely when their module is hidden, so a disabled module
+      never reserves space; with Weather hidden the header takes its
+      `header-closed` form so the date section keeps its separator.
     -->
     <div class="dashboard-grid">
+      <!--
+        The weather card, extracted from the header in C3b-1. The slot owns
+        the card's module spacing and the header separator (the border the
+        observation header used to carry below the weather); hiding the card
+        never stops the app-owned weather controller — the Settings weather
+        section reads the same state.
+      -->
+      <div v-if="moduleVisibility.weather" class="dashboard-slot weather-slot">
+        <WeatherDisplay
+          :weather="weather"
+          :weather-message="weatherMessage"
+          @configure="$emit('configureWeather')"
+          @refresh="$emit('refreshWeather')"
+        />
+      </div>
+
       <div v-if="moduleVisibility.todo" class="dashboard-slot">
         <!--
           A disabled todo module unmounts its panel: the component owns only
