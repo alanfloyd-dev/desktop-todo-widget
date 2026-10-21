@@ -18,6 +18,7 @@ import {
   type ModuleId,
   type ModuleVisibility,
 } from "../modules/registry";
+import type { ModuleLayout } from "../modules/layout";
 import { createUpdateChecker, previewUpdateBridge, updateSurface } from "../updateCheck";
 import type {
   AppearanceProfiles,
@@ -63,6 +64,7 @@ const emit = defineEmits<{
     avatarAssetId: string | null;
     quickLinks: QuickLink[];
     moduleVisibility: ModuleVisibility;
+    moduleLayout: ModuleLayout;
   }];
 }>();
 
@@ -423,6 +425,12 @@ function save() {
     // preferences change. The backend preserves unknown future ids the
     // payload cannot express (B2's replace semantics).
     moduleVisibility: { ...moduleVisibilityDraft.value },
+    // No layout editor exists yet (a later C slice), so the stored layout
+    // document rides through verbatim — never the C1-resolved view. The
+    // backend preserves unknown entries and fields the payload cannot
+    // express, and refuses a v1 patch over a future-format document, so an
+    // ordinary Save can never normalize or reset a stored layout.
+    moduleLayout: props.settings.moduleLayout,
   });
 }
 

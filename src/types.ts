@@ -8,8 +8,9 @@
  * behavior.
  */
 import type { ModuleVisibility } from "./modules/registry";
+import type { ModuleLayout } from "./modules/layout";
 
-export type { ModuleVisibility };
+export type { ModuleVisibility, ModuleLayout };
 
 export type ProductWindowMode = "sidebar" | "floating" | "desktop";
 export type SidebarSide = "left" | "right";
@@ -159,6 +160,13 @@ export interface ProductSettings {
   quickLinks: QuickLink[];
   /** Which modules the user keeps; missing stored members arrive as enabled. */
   moduleVisibility: ModuleVisibility;
+  /**
+   * The persisted dashboard layout document. The backend always returns a
+   * version-1 document (a document without the member arrives as the default
+   * layout); the effective render order is resolved by `resolveModuleLayout`,
+   * never read from here directly.
+   */
+  moduleLayout: ModuleLayout;
 }
 
 export interface QuickLink {

@@ -133,6 +133,219 @@ impl ModuleVisibility {
     }
 }
 
+/// One entry of the persisted dashboard layout document.
+///
+/// Storage, not semantics: `id` is a free string because a future version may
+/// register dashboard modules this build has never heard of, and such entries
+/// must survive this build's saves verbatim. `order` is a raw JSON number —
+/// not `f64` — so an integer round-trips as an integer. Per-entry unknown
+/// fields (a future entry shape) are captured by the flattened map. What the
+/// fields *mean* is decided by the frontend resolver (`src/modules/layout.ts`),
+/// never here: this build implements no rendering-order algorithm.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutEntry {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order: Option<serde_json::Number>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub col_span: Option<u8>,
+    /// Unknown members of this entry written by a future version.
+    /// Round-tripped verbatim; never consulted by this build's logic.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl LayoutEntry {
+    /// A known-shape entry with no future-version extras; the normal way this
+    /// build constructs one. Only a deserialized document can populate `extra`.
+    fn new(id: &str, order: u32, col_span: u8) -> Self {
+        Self {
+            id: id.to_string(),
+            order: Some(serde_json::Number::from(order)),
+            col_span: Some(col_span),
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+/// A version-1 dashboard layout document.
+///
+/// The only layout shape this build can read structurally. Unknown top-level
+/// members are round-tripped through the flattened map — the same Phase 2A
+/// contract the settings document itself implements, one level deeper.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModuleLayoutV1 {
+    /// Always `1` in this variant; the enum wrapper guarantees it on parse.
+    pub version: u8,
+    #[serde(default)]
+    pub entries: Vec<LayoutEntry>,
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl Default for ModuleLayoutV1 {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            entries: vec![
+                LayoutEntry::new("weather", 0, 1),
+                LayoutEntry::new("todo", 1, 1),
+                LayoutEntry::new("shortcuts", 2, 1),
+            ],
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+/// The persisted dashboard layout: a version-1 document this build can merge,
+/// or an opaque document written by a future version.
+///
+/// The distinction is the C2 compatibility contract. A document is parsed as
+/// [`ModuleLayout::V1`] only when it *provably* is one — an object whose
+/// `version` is exactly 1. Anything else (a missing version, a version 2 with
+/// an arbitrary shape, a non-object) becomes [`ModuleLayout::Opaque`] and is
+/// preserved byte-faithfully: an ordinary settings save never rewrites it into
+/// this build's shape, and a v1-shaped layout patch refuses to overwrite it
+/// (see [`ModuleLayout::merged_with`]). A document that claims version 1 but
+/// carries malformed entries is corruption, not a future format, and fails
+/// deserialization explicitly — consistent with the fail-closed settings
+/// document contract.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ModuleLayout {
+    V1(ModuleLayoutV1),
+    Opaque(serde_json::Value),
+}
+
+/// Whether a raw JSON value provably declares the version-1 layout shape.
+fn is_layout_v1_document(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .and_then(|object| object.get("version"))
+        .and_then(serde_json::Value::as_u64)
+        == Some(1)
+}
+
+impl<'de> Deserialize<'de> for ModuleLayout {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if is_layout_v1_document(&value) {
+            let document = ModuleLayoutV1::deserialize(value)
+                .map_err(serde::de::Error::custom)?;
+            Ok(ModuleLayout::V1(document))
+        } else {
+            Ok(ModuleLayout::Opaque(value))
+        }
+    }
+}
+
+impl Serialize for ModuleLayout {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            ModuleLayout::V1(document) => document.serialize(serializer),
+            ModuleLayout::Opaque(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl Default for ModuleLayout {
+    fn default() -> Self {
+        ModuleLayout::V1(ModuleLayoutV1::default())
+    }
+}
+
+impl ModuleLayout {
+    /// The next stored layout when a settings patch carries one.
+    ///
+    /// A v1 patch against a v1 document merges entry by entry: the patch's
+    /// choices win for the ids it names (first occurrence winning, per-entry
+    /// unknown fields carried over from the stored entry, patch extras taking
+    /// precedence), and entries the sender cannot express — future modules —
+    /// are preserved verbatim, in stored order, after the merged entries. An
+    /// opaque document is never structurally merged: the patch must itself be
+    /// the same opaque document (the frontend pass-through), which replaces it
+    /// verbatim; a v1 patch over a future document would silently downgrade
+    /// it and is refused instead of guessed at.
+    ///
+    /// The returned error leaves the caller's stored state untouched: the
+    /// command computes the merge from its pre-update snapshot, before any
+    /// mutation or persistence.
+    pub fn merged_with(&self, patch: ModuleLayout) -> Result<ModuleLayout, String> {
+        match (self, patch) {
+            (ModuleLayout::V1(stored), ModuleLayout::V1(patch)) => {
+                Ok(ModuleLayout::V1(merge_layout_v1(stored, patch)))
+            }
+            (ModuleLayout::Opaque(_stored), ModuleLayout::Opaque(patch)) => {
+                Ok(ModuleLayout::Opaque(patch))
+            }
+            (ModuleLayout::Opaque(stored), ModuleLayout::V1(_)) => Err(format!(
+                "stored module layout uses a newer format ({}) and must not be overwritten by a version-1 patch",
+                stored
+                    .get("version")
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "no version".to_string())
+            )),
+            (ModuleLayout::V1(_), ModuleLayout::Opaque(_)) => Err(
+                "an opaque module layout patch cannot overwrite a version-1 layout".to_string(),
+            ),
+        }
+    }
+}
+
+/// The v1 entry-array merge: patched ids first (first occurrence winning, per-
+/// entry unknowns carried over), then every stored entry the patch did not
+/// name, verbatim, in stored order.
+fn merge_layout_v1(stored: &ModuleLayoutV1, patch: ModuleLayoutV1) -> ModuleLayoutV1 {
+    let mut merged_extra = stored.extra.clone();
+    for (key, value) in patch.extra {
+        merged_extra.insert(key, value);
+    }
+
+    let mut patch_ids: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut merged_entries: Vec<LayoutEntry> = Vec::new();
+    for patch_entry in patch.entries {
+        if !patch_ids.insert(patch_entry.id.clone()) {
+            continue;
+        }
+        let carried = match stored.entries.iter().find(|stored| stored.id == patch_entry.id) {
+            Some(stored_entry) => {
+                // The patch overwrites the known members; unknown members the
+                // stored entry carries survive, with patch-carried keys winning.
+                let mut extra = stored_entry.extra.clone();
+                for (key, value) in &patch_entry.extra {
+                    extra.insert(key.clone(), value.clone());
+                }
+                LayoutEntry {
+                    id: patch_entry.id,
+                    order: patch_entry.order,
+                    col_span: patch_entry.col_span,
+                    extra,
+                }
+            }
+            None => patch_entry,
+        };
+        merged_entries.push(carried);
+    }
+    for stored_entry in &stored.entries {
+        if !patch_ids.contains(&stored_entry.id) {
+            merged_entries.push(stored_entry.clone());
+        }
+    }
+
+    ModuleLayoutV1 {
+        version: 1,
+        entries: merged_entries,
+        extra: merged_extra,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProductWindowMode {
@@ -324,6 +537,14 @@ pub struct ProductSettings {
     /// nested unknown-id contract.
     #[serde(default)]
     pub module_visibility: ModuleVisibility,
+    /// Per-module dashboard layout (order and column preference), the additive
+    /// companion to `module_visibility`. Additive member of this evolvable
+    /// document: missing key resolves to the default layout, which is the
+    /// pre-module-layout surface. Version-gated — a future-format document is
+    /// preserved opaquely and never rewritten into this build's shape; see
+    /// [`ModuleLayout`].
+    #[serde(default)]
+    pub module_layout: ModuleLayout,
     /// Deserialize-only bridge for the single footer homepage.
     ///
     /// Documents written before Quick Links stored one label/URL pair. Both still
@@ -410,6 +631,12 @@ impl Default for ProductSettings {
             // complete one, and an upgraded document without this member resolves
             // through this default unchanged.
             module_visibility: ModuleVisibility::default(),
+            // The default dashboard layout: the same three modules in the
+            // presentation order `DASHBOARD_MODULE_IDS` owns in
+            // `src/modules/layout.ts` (a source-pinned test keeps the two from
+            // drifting). An upgraded document without this member resolves
+            // through this default unchanged.
+            module_layout: ModuleLayout::default(),
             homepage_label: DEFAULT_QUICK_LINK_NAME.into(),
             homepage_url: String::new(),
             extra: BTreeMap::new(),
@@ -660,7 +887,10 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppState, FloatingPresentation, ProductWindowMode, QuickLink, SidebarSide};
+    use super::{
+        AppState, FloatingPresentation, LayoutEntry, ModuleLayout, ModuleLayoutV1,
+        ProductSettings, ProductWindowMode, QuickLink, SidebarSide,
+    };
     use crate::appearance::{AppearanceSettings, BackgroundType};
     use crate::database::Database;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2206,6 +2436,460 @@ mod tests {
             reupgraded.module_visibility.extra.get("newsFeed"),
             Some(&serde_json::json!(true))
         );
+    }
+
+    // --- Module layout (v1.3.0-C2) -------------------------------------------
+
+    /// Fresh default: the default presentation order — the same sequence
+    /// `DASHBOARD_MODULE_IDS` owns in `src/modules/layout.ts` — on one column,
+    /// serialized as the additive `moduleLayout` member.
+    #[test]
+    fn module_layout_defaults_to_the_presentation_order() {
+        let state = AppState::load(Database::in_memory().expect("database")).expect("state");
+        let layout = state.snapshot().expect("snapshot").module_layout;
+        let ModuleLayout::V1(document) = &layout else {
+            panic!("a fresh default must be a version-1 document");
+        };
+        let ids: Vec<&str> = document.entries.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(ids, ["weather", "todo", "shortcuts"]);
+        assert_eq!(
+            document
+                .entries
+                .iter()
+                .map(|entry| entry.col_span)
+                .collect::<Vec<_>>(),
+            [Some(1), Some(1), Some(1)]
+        );
+        let stored = stored_document(&state.database);
+        assert_eq!(
+            stored["moduleLayout"],
+            serde_json::json!({
+                "version": 1,
+                "entries": [
+                    { "id": "weather", "order": 0, "colSpan": 1 },
+                    { "id": "todo", "order": 1, "colSpan": 1 },
+                    { "id": "shortcuts", "order": 2, "colSpan": 1 },
+                ],
+            })
+        );
+    }
+
+    /// The Rust default entries and the frontend projection must not drift:
+    /// this build cannot execute TypeScript, so — as with the other source
+    /// pins — the test reads the frontend source and asserts the projected
+    /// dashboard order matches the Rust default.
+    #[test]
+    fn module_layout_default_order_matches_the_frontend_projection() {
+        let source = include_str!("../../src/modules/layout.ts");
+        let marker = "DASHBOARD_MODULE_IDS = [";
+        let start = source.find(marker).expect("frontend dashboard projection");
+        let end = start + source[start..].find(']').expect("projection end");
+        let projection = &source[start..end];
+        let mut cursor = 0;
+        for expected in ["weather", "todo", "shortcuts"] {
+            let needle = format!("\"{expected}\"");
+            let found = projection[cursor..].find(&needle).expect(expected);
+            cursor += found + needle.len();
+        }
+        // The projection lists nothing beyond the three Rust default ids.
+        assert!(
+            !projection[cursor..].contains('"'),
+            "unexpected extra id in the frontend projection: {}",
+            &projection[cursor..]
+        );
+    }
+
+    /// A v1.2.1 document has no `moduleLayout` member; it resolves to the
+    /// default layout and the member is materialized by the load-time rewrite
+    /// just like any other defaulted field.
+    #[test]
+    fn legacy_document_without_module_layout_resolves_the_default() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting("product_settings", r#"{"mode":"sidebar"}"#)
+            .expect("legacy document");
+        let state = AppState::load(database).expect("load");
+        let ModuleLayout::V1(document) = &state.snapshot().expect("snapshot").module_layout else {
+            panic!("a defaulted layout must be a version-1 document");
+        };
+        assert_eq!(document.entries.len(), 3);
+        let stored = stored_document(&state.database);
+        assert_eq!(stored["moduleLayout"]["version"], serde_json::json!(1));
+        assert_eq!(stored["moduleLayout"]["entries"].as_array().expect("entries").len(), 3);
+        assert_eq!(stored["mode"], "sidebar");
+    }
+
+    /// A valid version-1 document with custom choices survives the
+    /// load → normalize → persist cycle value for value.
+    #[test]
+    fn module_layout_round_trips_through_the_stored_document() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"moduleLayout":{"version":1,"entries":[
+                    {"id":"shortcuts","order":0,"colSpan":2},
+                    {"id":"weather","order":1},
+                    {"id":"todo","order":4,"colSpan":1,"futureField":{"deep":true}}
+                ]}}"#,
+            )
+            .expect("layout document");
+        let state = AppState::load(database).expect("load");
+        let stored = stored_document(&state.database);
+        assert_eq!(
+            stored["moduleLayout"]["entries"],
+            serde_json::json!([
+                { "id": "shortcuts", "order": 0, "colSpan": 2 },
+                { "id": "weather", "order": 1 },
+                { "id": "todo", "order": 4, "colSpan": 1, "futureField": { "deep": true } },
+            ])
+        );
+    }
+
+    /// The persistence layer preserves a partial layout exactly as stored:
+    /// completing missing known modules is the frontend resolver's job (C1),
+    /// never a reason to rewrite the stored document.
+    #[test]
+    fn partial_module_layout_is_preserved_not_completed() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"moduleLayout":{"version":1,"entries":[{"id":"shortcuts","order":0,"colSpan":1}]}}"#,
+            )
+            .expect("partial layout");
+        let state = AppState::load(database).expect("load");
+        let stored = stored_document(&state.database);
+        let entries = stored["moduleLayout"]["entries"].as_array().expect("entries");
+        assert_eq!(entries.len(), 1, "the stored document must stay partial");
+    }
+
+    /// An empty entries list is a valid v1 document (every module resolves to
+    /// its default at render time) and is preserved as stored.
+    #[test]
+    fn empty_module_layout_entries_are_preserved() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"moduleLayout":{"version":1,"entries":[]}}"#,
+            )
+            .expect("empty layout");
+        let state = AppState::load(database).expect("load");
+        assert!(matches!(
+            state.snapshot().expect("snapshot").module_layout,
+            ModuleLayout::V1(ModuleLayoutV1 { ref entries, .. }) if entries.is_empty()
+        ));
+    }
+
+    /// Unknown layout-level properties survive next to the known members.
+    #[test]
+    fn unknown_layout_level_properties_round_trip() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"moduleLayout":{"version":1,"entries":[{"id":"todo","order":0,"colSpan":1}],"futureField":{"mode":"something-new"}}}"#,
+            )
+            .expect("layout with unknown member");
+        let state = AppState::load(database).expect("load");
+        let ModuleLayout::V1(document) = &state.snapshot().expect("snapshot").module_layout else {
+            panic!("expected a version-1 document");
+        };
+        assert_eq!(
+            document.extra.get("futureField"),
+            Some(&serde_json::json!({ "mode": "something-new" }))
+        );
+        let stored = stored_document(&state.database);
+        assert_eq!(
+            stored["moduleLayout"]["futureField"],
+            serde_json::json!({ "mode": "something-new" })
+        );
+    }
+
+    /// Unknown future-module entries survive the load → persist cycle
+    /// verbatim — including their own unknown fields — and multiple unknown
+    /// entries keep their stored order.
+    #[test]
+    fn unknown_future_module_entries_round_trip() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"moduleLayout":{"version":1,"entries":[
+                    {"id":"github","order":3,"colSpan":1,"source":"https://example.com/repo"},
+                    {"id":"newsFeed","order":4}
+                ]}}"#,
+            )
+            .expect("future-module layout");
+        let state = AppState::load(database).expect("load");
+        let stored = stored_document(&state.database);
+        let entries = stored["moduleLayout"]["entries"].as_array().expect("entries");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["id"], "github");
+        assert_eq!(entries[0]["source"], "https://example.com/repo");
+        assert_eq!(entries[1]["id"], "newsFeed");
+    }
+
+    /// Duplicate known ids are malformed data this build never writes. The
+    /// persistence layer preserves them as stored (no load-time rewrite); the
+    /// v1 merge collapses them only when a patch names that id.
+    #[test]
+    fn duplicate_known_ids_survive_storage_and_collapse_on_named_merge() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"moduleLayout":{"version":1,"entries":[
+                    {"id":"todo","order":5,"colSpan":1},
+                    {"id":"todo","order":9,"colSpan":2}
+                ]}}"#,
+            )
+            .expect("duplicate layout");
+        let state = AppState::load(database).expect("load");
+        assert_eq!(
+            stored_document(&state.database)["moduleLayout"]["entries"]
+                .as_array()
+                .expect("entries")
+                .len(),
+            2,
+            "storage preserves the stored duplicates verbatim"
+        );
+
+        let ModuleLayout::V1(stored) = state.snapshot().expect("snapshot").module_layout else {
+            panic!("expected a version-1 document");
+        };
+        let patch = ModuleLayoutV1 {
+            entries: vec![LayoutEntry::new("weather", 0, 1), LayoutEntry::new("todo", 1, 1)],
+            ..ModuleLayoutV1::default()
+        };
+        let ModuleLayout::V1(merged) = ModuleLayout::V1(stored)
+            .merged_with(ModuleLayout::V1(patch))
+            .expect("merge")
+        else {
+            panic!("v1 merge must yield a version-1 document");
+        };
+        let todos: Vec<_> = merged.entries.iter().filter(|entry| entry.id == "todo").collect();
+        assert_eq!(todos.len(), 1, "a patch naming the id collapses the duplicates");
+        assert_eq!(todos[0].order, Some(serde_json::Number::from(1)));
+    }
+
+    /// Duplicate unknown ids carry no semantics this build may interpret, so
+    /// both rows are preserved verbatim through a merge.
+    #[test]
+    fn duplicate_unknown_ids_are_preserved_verbatim() {
+        let stored = ModuleLayoutV1 {
+            entries: vec![
+                LayoutEntry::new("todo", 0, 1),
+                LayoutEntry::new("github", 3, 1),
+                LayoutEntry::new("github", 4, 2),
+            ],
+            ..ModuleLayoutV1::default()
+        };
+        let patch = ModuleLayoutV1 {
+            entries: vec![LayoutEntry::new("todo", 2, 1)],
+            ..ModuleLayoutV1::default()
+        };
+        let ModuleLayout::V1(merged) = ModuleLayout::V1(stored)
+            .merged_with(ModuleLayout::V1(patch))
+            .expect("merge")
+        else {
+            panic!("v1 merge must yield a version-1 document");
+        };
+        let githubs: Vec<_> = merged
+            .entries
+            .iter()
+            .filter(|entry| entry.id == "github")
+            .collect();
+        assert_eq!(githubs.len(), 2, "unknown duplicates are data, not a choice");
+    }
+
+    /// A document claiming version 1 but carrying malformed entries is
+    /// corruption, not a future format: it fails explicitly instead of
+    /// silently defaulting.
+    #[test]
+    fn malformed_v1_entries_fail_explicitly() {
+        let parsed = serde_json::from_str::<ProductSettings>(
+            r#"{"moduleLayout":{"version":1,"entries":[42]}}"#,
+        );
+        assert!(parsed.is_err(), "malformed v1 entries must fail, not default");
+    }
+
+    /// Documents that are not provably version 1 — a version 2, a missing
+    /// version, a non-object — are opaque future data: they load, they are
+    /// never structurally interpreted, and the stored bytes survive the
+    /// load → persist cycle exactly.
+    #[test]
+    fn non_v1_layout_documents_are_preserved_opaquely() {
+        for raw in [
+            r#"{"moduleLayout":{"version":2,"entries":[],"futureField":{"mode":"new"}}}"#,
+            r#"{"moduleLayout":{"entries":[{"bucket":"a"}]}}"#,
+            r#"{"moduleLayout":42}"#,
+            r#"{"moduleLayout":"compact-v3"}"#,
+        ] {
+            let database = Database::in_memory().expect("database");
+            database
+                .set_setting("product_settings", raw)
+                .expect("future layout document");
+            let state = AppState::load(database).expect("load must not fail on future layouts");
+            assert!(matches!(
+                state.snapshot().expect("snapshot").module_layout,
+                ModuleLayout::Opaque(_)
+            ));
+            let stored = stored_document(&state.database)["moduleLayout"].clone();
+            let original: serde_json::Value = serde_json::from_str::<serde_json::Value>(raw).expect("parse raw")["moduleLayout"]
+                .clone();
+            assert_eq!(stored, original, "opaque layout must survive verbatim: {raw}");
+        }
+    }
+
+    /// An ordinary settings update — one that carries no layout patch — must
+    /// leave an opaque future-version layout untouched in memory and on disk.
+    #[test]
+    fn unrelated_settings_save_preserves_an_opaque_layout() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"moduleLayout":{"version":2,"entries":[],"futureField":{"mode":"new"}}}"#,
+            )
+            .expect("future layout");
+        let state = AppState::load(database).expect("load");
+        state
+            .update(|settings| {
+                settings.day_rollover = "05:00".into();
+            })
+            .expect("unrelated update");
+        let stored = stored_document(&state.database);
+        assert_eq!(stored["dayRollover"], "05:00");
+        assert_eq!(
+            stored["moduleLayout"],
+            serde_json::json!({ "version": 2, "entries": [], "futureField": { "mode": "new" } })
+        );
+    }
+
+    /// The v1 merge: patched known entries take their new choices while
+    /// carrying their stored unknown fields, unknown future modules survive
+    /// verbatim after the merged entries, and duplicate patch ids resolve
+    /// first-wins.
+    #[test]
+    fn layout_patch_merge_preserves_unknowns_and_reorders_knowns() {
+        let stored = ModuleLayoutV1 {
+            entries: vec![
+                LayoutEntry {
+                    id: "weather".into(),
+                    order: Some(serde_json::Number::from(0)),
+                    col_span: Some(1),
+                    extra: [("futureCardField".to_string(), serde_json::json!("kept"))]
+                        .into_iter()
+                        .collect(),
+                },
+                LayoutEntry::new("todo", 1, 1),
+                LayoutEntry::new("shortcuts", 2, 1),
+                LayoutEntry::new("github", 3, 2),
+            ],
+            ..ModuleLayoutV1::default()
+        };
+        let patch = ModuleLayoutV1 {
+            entries: vec![
+                LayoutEntry::new("todo", 0, 2),
+                LayoutEntry::new("weather", 1, 1),
+                LayoutEntry::new("shortcuts", 2, 1),
+                LayoutEntry::new("todo", 9, 1),
+            ],
+            ..ModuleLayoutV1::default()
+        };
+        let ModuleLayout::V1(merged) = ModuleLayout::V1(stored)
+            .merged_with(ModuleLayout::V1(patch))
+            .expect("merge")
+        else {
+            panic!("v1 merge must yield a version-1 document");
+        };
+        let ids: Vec<&str> = merged.entries.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(ids, ["todo", "weather", "shortcuts", "github"]);
+        assert_eq!(merged.entries[0].col_span, Some(2));
+        assert_eq!(
+            merged.entries[1].extra.get("futureCardField"),
+            Some(&serde_json::json!("kept")),
+            "per-entry unknown fields survive the merge"
+        );
+        assert_eq!(merged.entries[3], LayoutEntry::new("github", 3, 2));
+    }
+
+    /// Version conflicts are refused explicitly — a v1 patch must never
+    /// silently downgrade a future document, and opaque data must never
+    /// overwrite a v1 layout.
+    #[test]
+    fn layout_version_conflicts_are_refused() {
+        let v1 = ModuleLayout::default();
+        let opaque_v2 = ModuleLayout::Opaque(serde_json::json!({
+            "version": 2,
+            "entries": [],
+            "futureField": { "mode": "new" }
+        }));
+        let patch = ModuleLayout::V1(ModuleLayoutV1 {
+            entries: vec![LayoutEntry::new("todo", 0, 1)],
+            ..ModuleLayoutV1::default()
+        });
+
+        let error = opaque_v2.merged_with(patch.clone()).expect_err("v1 over future");
+        assert!(error.contains("newer format"));
+        let error = v1.merged_with(opaque_v2.clone()).expect_err("opaque over v1");
+        assert!(error.contains("opaque"));
+
+        // The pass-through path: the same opaque document replaces itself.
+        let replaced = opaque_v2.merged_with(opaque_v2.clone()).expect("pass-through");
+        assert_eq!(replaced, opaque_v2);
+    }
+
+    /// Downgrade model: a runtime without the `moduleLayout` field (the
+    /// v1.2.1 surface) keeps the whole member verbatim in its unknown map,
+    /// and re-upgrading restores the typed document — including a stored
+    /// future-module entry — from those same bytes.
+    #[test]
+    fn module_layout_survives_a_downgrade_round_trip_via_outer_extra() {
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Deserialize, Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct V121SettingsModel {
+            mode: ProductWindowMode,
+            quick_links: Vec<QuickLink>,
+            #[serde(flatten, default)]
+            extra: std::collections::BTreeMap<String, serde_json::Value>,
+        }
+
+        let current = ProductSettings {
+            module_layout: ModuleLayout::V1(ModuleLayoutV1 {
+                entries: vec![
+                    LayoutEntry::new("todo", 0, 2),
+                    LayoutEntry::new("github", 3, 1),
+                ],
+                ..ModuleLayoutV1::default()
+            }),
+            ..Default::default()
+        };
+        let document = serde_json::to_string(&current).expect("serialize current");
+
+        let downgraded: V121SettingsModel =
+            serde_json::from_str(&document).expect("old runtime parses new document");
+        let carried = downgraded
+            .extra
+            .get("moduleLayout")
+            .expect("member preserved by the old runtime")
+            .clone();
+        assert_eq!(carried["entries"][0]["id"], "todo");
+        assert_eq!(carried["entries"][1]["id"], "github");
+
+        let reupgraded: ProductSettings = serde_json::from_str(
+            &serde_json::to_string(&downgraded).expect("old runtime serializes"),
+        )
+        .expect("new runtime parses old serialization");
+        let ModuleLayout::V1(document) = reupgraded.module_layout else {
+            panic!("the carried bytes are a valid version-1 document");
+        };
+        assert_eq!(document.entries.len(), 2);
+        assert_eq!(document.entries[1].id, "github");
     }
 
     /// A: persist-failure atomicity. A deterministic SQLite write failure —

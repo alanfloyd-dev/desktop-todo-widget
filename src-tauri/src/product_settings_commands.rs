@@ -57,6 +57,14 @@ pub struct SettingsPatch {
     /// type-checked during this struct's deserialization, so an invalid value
     /// fails the command before anything is mutated.
     module_visibility: Option<settings::ModuleVisibility>,
+    /// The dashboard layout document, version-gated. Absent = no change; a
+    /// version-1 patch merges entry by entry (unknown future-module entries
+    /// preserved, per-entry unknown fields preserved); an opaque document —
+    /// only ever produced by the frontend pass-through of a stored
+    /// future-format layout — replaces verbatim. A version conflict between
+    /// patch and stored document fails the command before anything mutates
+    /// (see `ModuleLayout::merged_with`).
+    module_layout: Option<settings::ModuleLayout>,
     /// Persisted UI language preference. Applied immediately on the frontend.
     language: Option<crate::locale::Language>,
 }
@@ -110,7 +118,16 @@ pub fn update_product_settings(
         task_day::parse_rollover(rollover)?;
     }
     validate_weather_patch(&patch)?;
+    if let Some(layout) = &patch.module_layout {
+        validate_module_layout_patch(layout)?;
+    }
     let before = state.snapshot()?;
+    // Computed from the pre-update snapshot so a version conflict (or any
+    // merge refusal) fails the command before the update transaction begins.
+    let merged_layout = match &patch.module_layout {
+        Some(layout) => Some(before.module_layout.merged_with(layout.clone())?),
+        None => None,
+    };
     let settings = state.update(|settings| {
         if let Some(value) = patch.day_rollover {
             settings.day_rollover = value;
@@ -166,6 +183,9 @@ pub fn update_product_settings(
         if let Some(value) = patch.module_visibility {
             settings.module_visibility = settings.module_visibility.clone().replaced_by(value);
         }
+        if let Some(value) = merged_layout {
+            settings.module_layout = value;
+        }
     })?;
     appearance::cleanup_replaced_assets(
         &state,
@@ -186,8 +206,45 @@ pub fn update_product_settings(
     Ok(ProductViewState::new(&state, effective_settings))
 }
 
-fn validate_weather_patch(patch: &SettingsPatch) -> Result<(), String> {
-    if let Some(latitude) = patch.weather_latitude {
+/// Rejects a layout patch this build must not store.
+///
+/// An opaque patch is the frontend pass-through of a stored future-format
+/// layout document and carries no semantics to validate. A version-1 patch is
+/// the product surface: entries must name themselves, spans must be 1 or 2,
+/// and the list is bounded — `serde_json::Number` already excludes non-finite
+/// orders, so nothing else needs rejecting here. Structural merge semantics
+/// (unknown-entry preservation, version conflicts) live in
+/// `ModuleLayout::merged_with`, which runs against the stored document after
+/// this check.
+fn validate_module_layout_patch(layout: &settings::ModuleLayout) -> Result<(), String> {
+    const MAX_LAYOUT_ENTRIES: usize = 1000;
+    match layout {
+        settings::ModuleLayout::Opaque(_) => Ok(()),
+        settings::ModuleLayout::V1(document) => {
+            if document.entries.len() > MAX_LAYOUT_ENTRIES {
+                return Err(format!(
+                    "module layout carries more than {MAX_LAYOUT_ENTRIES} entries"
+                ));
+            }
+            for entry in &document.entries {
+                if entry.id.trim().is_empty() {
+                    return Err("module layout entry is missing its id".into());
+                }
+                if let Some(col_span) = entry.col_span {
+                    if col_span != 1 && col_span != 2 {
+                        return Err(format!(
+                            "module layout entry {} carries an unsupported column span",
+                            entry.id
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_weather_patch(patch: &SettingsPatch) -> Result<(), String> {    if let Some(latitude) = patch.weather_latitude {
         if !latitude.is_finite() || !(-90.0..=90.0).contains(&latitude) {
             return Err("weather location latitude is invalid".into());
         }
@@ -231,7 +288,8 @@ fn validate_quick_links(links: &[settings::QuickLink]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_quick_links, SettingsPatch};
+    use super::{validate_module_layout_patch, validate_quick_links, SettingsPatch};
+    use crate::settings::ModuleLayout;
 
     /// The visibility patch member is optional (absent = no change) and its
     /// known members are type-checked during deserialization — the command's
@@ -256,6 +314,64 @@ mod tests {
             .is_err(),
             "a non-boolean known member must fail, not default"
         );
+    }
+
+    /// The layout patch member is optional, round-trips both document kinds —
+    /// version-1 documents structurally, future-format documents opaquely —
+    /// and its version-1 entries are validated before any merge runs.
+    #[test]
+    fn module_layout_patch_is_optional_version_gated_and_validated() {
+        let patch: SettingsPatch = serde_json::from_value(serde_json::json!({})).expect("empty");
+        assert!(patch.module_layout.is_none());
+
+        let patch: SettingsPatch = serde_json::from_value(serde_json::json!({
+            "moduleLayout": {
+                "version": 1,
+                "entries": [
+                    { "id": "todo", "order": 0, "colSpan": 2 },
+                    { "id": "weather", "order": 1, "colSpan": 1 }
+                ]
+            }
+        }))
+        .expect("v1 layout patch");
+        let ModuleLayout::V1(document) = patch.module_layout.expect("present") else {
+            panic!("a version-1 patch parses structurally");
+        };
+        assert_eq!(document.entries.len(), 2);
+
+        // The pass-through of a stored future-format document arrives opaque,
+        // not as an error: preservation must not depend on the shape.
+        let patch: SettingsPatch = serde_json::from_value(serde_json::json!({
+            "moduleLayout": { "version": 2, "entries": [], "futureField": { "mode": "new" } }
+        }))
+        .expect("opaque layout patch");
+        assert!(matches!(patch.module_layout, Some(ModuleLayout::Opaque(_))));
+        assert!(validate_module_layout_patch(patch.module_layout.as_ref().unwrap()).is_ok());
+
+        // A v1 patch naming no module, an invalid span, and an oversized list
+        // are all rejected explicitly before anything mutates.
+        let bad = serde_json::json!({
+            "moduleLayout": { "version": 1, "entries": [ { "id": "  ", "order": 0, "colSpan": 1 } ] }
+        });
+        let parsed: SettingsPatch = serde_json::from_value(bad).expect("parses");
+        assert!(validate_module_layout_patch(parsed.module_layout.as_ref().unwrap()).is_err());
+
+        let bad = serde_json::json!({
+            "moduleLayout": { "version": 1, "entries": [ { "id": "todo", "order": 0, "colSpan": 3 } ] }
+        });
+        let parsed: SettingsPatch = serde_json::from_value(bad).expect("parses");
+        assert!(validate_module_layout_patch(parsed.module_layout.as_ref().unwrap()).is_err());
+
+        let oversized: Vec<_> = (0..1001)
+            .map(|index| {
+                serde_json::json!({ "id": format!("m{index}"), "order": index, "colSpan": 1 })
+            })
+            .collect();
+        let parsed: SettingsPatch = serde_json::from_value(serde_json::json!({
+            "moduleLayout": { "version": 1, "entries": oversized }
+        }))
+        .expect("parses");
+        assert!(validate_module_layout_patch(parsed.module_layout.as_ref().unwrap()).is_err());
     }
 
     #[test]

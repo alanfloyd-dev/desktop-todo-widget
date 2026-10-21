@@ -20,6 +20,7 @@ import { createI18n, normalizeLanguage, provideI18n } from "./i18n";
 import { browserWeatherState, createWeatherController, type WeatherMessage } from "./modules/weather/controller";
 import { openQuickLink as openQuickLinkCommand, type ShortcutsBridge } from "./modules/shortcuts/bridge";
 import { isModuleEnabled, resolveModuleVisibility, type ModuleVisibility } from "./modules/registry";
+import { DEFAULT_MODULE_LAYOUT, type ModuleLayout } from "./modules/layout";
 import type {
   AppearanceProfiles,
   AppearanceSettings,
@@ -209,6 +210,7 @@ function browserState(): ProductViewState {
         shortcuts: !hiddenModules.has("shortcuts"),
         review: !hiddenModules.has("review"),
       }),
+      moduleLayout: DEFAULT_MODULE_LAYOUT,
     },
     desktopExperimental: true,
     databasePath: "browser preview · app-data/alan-desktop.sqlite3",
@@ -400,6 +402,7 @@ async function saveSettings(patch: {
   avatarAssetId: string | null;
   quickLinks: QuickLink[];
   moduleVisibility: ModuleVisibility;
+  moduleLayout: ModuleLayout;
 }) {
   const active = state.value.settings;
   const weatherIdentityChanged =
