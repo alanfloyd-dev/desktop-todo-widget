@@ -159,6 +159,21 @@ export function resolveDashboardLayout<K extends string>(
 }
 
 /**
+ * Whether a resolved layout actually requests a second column.
+ *
+ * This is the rendering activation policy (C3b-2): the dashboard stays
+ * single-column until a stored entry carries `colSpan: 2`, so the all-ones
+ * default layout keeps today's full-width presentation on every window width
+ * no matter how wide the container is. A span request widens the canvas for
+ * every entry — a `colSpan: 1` module then occupies one of the two columns —
+ * and collapses back to one column wherever two columns do not fit, without
+ * touching the persisted preferences.
+ */
+export function hasColumnSpan(layout: ModuleLayout): boolean {
+  return layout.entries.some((entry) => entry.colSpan === 2);
+}
+
+/**
  * Resolves the effective render layout from optional stored preferences.
  *
  * Semantics: missing/null/malformed input or an unsupported version resolves

@@ -20,7 +20,7 @@ import { createI18n, normalizeLanguage, provideI18n } from "./i18n";
 import { browserWeatherState, createWeatherController, type WeatherMessage } from "./modules/weather/controller";
 import { openQuickLink as openQuickLinkCommand, type ShortcutsBridge } from "./modules/shortcuts/bridge";
 import { isModuleEnabled, resolveModuleVisibility, type ModuleVisibility } from "./modules/registry";
-import { DEFAULT_MODULE_LAYOUT, type ModuleLayout } from "./modules/layout";
+import { DEFAULT_MODULE_LAYOUT, resolveModuleLayout, type ModuleLayout } from "./modules/layout";
 import type {
   AppearanceProfiles,
   AppearanceSettings,
@@ -122,6 +122,14 @@ const floatingCollapsed = computed(
 const moduleVisibility = computed(() =>
   resolveModuleVisibility(state.value.settings.moduleVisibility),
 );
+/**
+ * The effective dashboard layout, resolved through the registry's policy at
+ * the state boundary — the same defensive pattern as module visibility. The
+ * backend may legitimately hold an opaque future-format document; resolving
+ * here renders the safe default for it while the stored document itself is
+ * never rewritten and rides through saves verbatim.
+ */
+const moduleLayout = computed(() => resolveModuleLayout(state.value.settings.moduleLayout));
 // A module preference that disables Review takes effect immediately, also on
 // an overlay that is already open: the preference governs whether the overlay
 // may remain open, not just whether its entry is offered.
@@ -154,6 +162,72 @@ function browserState(): ProductViewState {
       .map((id) => id.trim())
       .filter(Boolean),
   );
+  // Preview-only QA seam for custom layouts: a fixed table of known variants
+  // (`?layout=spanned`, `?layout=todo-first`, …) stored RAW into the draft so
+  // the app-boundary resolver runs the exact path it runs in production. The
+  // native build never reads it — `loadState()` replaces this draft — and no
+  // variant is user-reachable from real Settings behavior.
+  const previewLayoutName = preview.get("layout") ?? "";
+  const previewLayouts: Record<string, unknown> = {
+    "todo-first": {
+      version: 1,
+      entries: [
+        { id: "todo", order: 0, colSpan: 1 },
+        { id: "weather", order: 1, colSpan: 1 },
+        { id: "shortcuts", order: 2, colSpan: 1 },
+      ],
+    },
+    "shortcuts-first": {
+      version: 1,
+      entries: [
+        { id: "shortcuts", order: 0, colSpan: 1 },
+        { id: "weather", order: 1, colSpan: 1 },
+        { id: "todo", order: 2, colSpan: 1 },
+      ],
+    },
+    "weather-last": {
+      version: 1,
+      entries: [
+        { id: "todo", order: 0, colSpan: 1 },
+        { id: "shortcuts", order: 1, colSpan: 1 },
+        { id: "weather", order: 2, colSpan: 1 },
+      ],
+    },
+    spanned: {
+      version: 1,
+      entries: [
+        { id: "weather", order: 0, colSpan: 2 },
+        { id: "todo", order: 1, colSpan: 1 },
+        { id: "shortcuts", order: 2, colSpan: 1 },
+      ],
+    },
+    mixed: {
+      version: 1,
+      entries: [
+        { id: "todo", order: 0, colSpan: 2 },
+        { id: "weather", order: 1, colSpan: 1 },
+        { id: "shortcuts", order: 2, colSpan: 1 },
+      ],
+    },
+    "version-2": { version: 2, entries: [], futureField: { mode: "something-new" } },
+    "unknown-entry": {
+      version: 1,
+      entries: [
+        { id: "github", order: 0, colSpan: 1 },
+        { id: "todo", order: 1, colSpan: 1 },
+      ],
+    },
+    duplicate: {
+      version: 1,
+      entries: [
+        { id: "todo", order: 0, colSpan: 2 },
+        { id: "todo", order: 1, colSpan: 1 },
+        { id: "weather", order: 2, colSpan: 1 },
+      ],
+    },
+  };
+  const previewLayout =
+    previewLayoutName in previewLayouts ? previewLayouts[previewLayoutName] : undefined;
   // The browser preview has no persisted profiles, so every mode starts from the
   // same draft; `resolve_appearance_contrast` and the profile selector are still
   // exercised because the draft is stored per mode.
@@ -210,7 +284,9 @@ function browserState(): ProductViewState {
         shortcuts: !hiddenModules.has("shortcuts"),
         review: !hiddenModules.has("review"),
       }),
-      moduleLayout: DEFAULT_MODULE_LAYOUT,
+      // The raw variant document — not a pre-resolved one — so the boundary
+      // resolver below runs the exact path production runs.
+      moduleLayout: (previewLayout ?? DEFAULT_MODULE_LAYOUT) as ModuleLayout,
     },
     desktopExperimental: true,
     databasePath: "browser preview · app-data/alan-desktop.sqlite3",
@@ -556,6 +632,7 @@ onBeforeUnmount(() => {
         :avatar-available="avatarAsset.available"
         :quick-links="state.settings.quickLinks"
         :module-visibility="moduleVisibility"
+        :module-layout="moduleLayout"
         :native-bridge-available="nativeBridgeAvailable"
         :weather="weather"
         :weather-message="weatherMessage"

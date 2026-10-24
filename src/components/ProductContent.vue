@@ -2,7 +2,14 @@
 import { computed } from "vue";
 import { profileInitials } from "../appearance";
 import { useI18n } from "../i18n";
-import type { ModuleVisibility, ProductWindowMode, QuickLink, WeatherViewState } from "../types";
+import { hasColumnSpan } from "../modules/layout";
+import type {
+  ModuleLayout,
+  ModuleVisibility,
+  ProductWindowMode,
+  QuickLink,
+  WeatherViewState,
+} from "../types";
 import TodoPanel from "../modules/todo/TodoPanel.vue";
 import WeatherDisplay from "../modules/weather/WeatherDisplay.vue";
 
@@ -15,6 +22,11 @@ const props = defineProps<{
   quickLinks: QuickLink[];
   /** Effective per-module visibility, resolved by the app from the settings document. */
   moduleVisibility: ModuleVisibility;
+  /**
+   * Effective dashboard layout, resolved by the app from the persisted
+   * document; the slot order below is its entry order.
+   */
+  moduleLayout: ModuleLayout;
   nativeBridgeAvailable: boolean;
   weather: WeatherViewState;
   weatherMessage: string;
@@ -30,6 +42,14 @@ defineEmits<{
 }>();
 
 const { t, intlLocale } = useI18n();
+
+/**
+ * The two-column activation policy: the grid gains a second column only when
+ * the effective layout actually requests one. The all-ones default layout —
+ * and any order-only customization — renders single-column at every width,
+ * which is what keeps today's full-width presentation the default.
+ */
+const spannedLayout = computed(() => hasColumnSpan(props.moduleLayout));
 
 const dragRegionEnabled = computed(
   () => (props.mode === "floating" || props.mode === "desktop") && !props.locked,
@@ -78,72 +98,89 @@ const dateLabel = computed(() =>
     </header>
 
     <!--
-      The structural dashboard container (C3b-1). One single-column grid whose
-      items are the three module slots C3b's layout engine will order and
-      span; it renders its children exactly like the former plain flow — one
-      column, no gap, no min-content overflow (`minmax(0, 1fr)`) — and carries
-      no visual styling of its own. The observation header (date line and
-      window drag region) and the footer are shell and stay outside it. Slots
-      are removed entirely when their module is hidden, so a disabled module
-      never reserves space; with Weather hidden the header takes its
-      `header-closed` form so the date section keeps its separator.
+      The structural dashboard container (C3b-2). The slots render in the
+      order of the effective layout — resolved once in App from the persisted
+      document through the C1 policy — keyed by module id so a reorder MOVES
+      mounted components instead of remounting them (TodoPanel keeps its
+      ephemeral draft and drag state; no listener is duplicated and no
+      backend write is triggered). Visibility stays independent of layout:
+      each slot additionally requires its module to be enabled, and hidden
+      modules render nothing. The grid is single-column unless the effective
+      layout actually requests a second column (`hasColumnSpan`), so the
+      all-ones default keeps today's full-width presentation at any width.
+      The header and footer are shell and stay outside.
     -->
-    <div class="dashboard-grid">
-      <!--
-        The weather card, extracted from the header in C3b-1. The slot owns
-        the card's module spacing and the header separator (the border the
-        observation header used to carry below the weather); hiding the card
-        never stops the app-owned weather controller — the Settings weather
-        section reads the same state.
-      -->
-      <div v-if="moduleVisibility.weather" class="dashboard-slot weather-slot">
-        <WeatherDisplay
-          :weather="weather"
-          :weather-message="weatherMessage"
-          @configure="$emit('configureWeather')"
-          @refresh="$emit('refreshWeather')"
-        />
-      </div>
-
-      <div v-if="moduleVisibility.todo" class="dashboard-slot">
+    <div class="dashboard-grid" :class="{ 'dashboard-grid--spanned': spannedLayout }">
+      <template v-for="entry in moduleLayout.entries" :key="entry.id">
         <!--
-          A disabled todo module unmounts its panel: the component owns only
-          ephemeral UI state (it removes its own drag listeners on unmount),
-          while every task lives in SQLite behind commands that stay
-          invokable. A later re-enable mounts the panel fresh, which
-          re-queries the current task day. The wrapper makes the two-root
-          panel one coherent grid item for C3b's ordering.
+          The weather card, extracted from the header in C3b-1. The slot owns
+          the card's module spacing and the header separator (the border the
+          observation header used to carry below the weather); hiding the
+          card never stops the app-owned weather controller — the Settings
+          weather section reads the same state.
         -->
-        <TodoPanel
-          :native-bridge-available="nativeBridgeAvailable"
-          :show-review-entry="moduleVisibility.review"
-          @open-review="$emit('openReview')"
-          @error="$emit('error', $event)"
-        />
-      </div>
+        <div
+          v-if="entry.id === 'weather' && moduleVisibility.weather"
+          class="dashboard-slot weather-slot"
+          :class="{ 'dashboard-slot--span-2': spannedLayout && entry.colSpan === 2 }"
+        >
+          <WeatherDisplay
+            :weather="weather"
+            :weather-message="weatherMessage"
+            @configure="$emit('configureWeather')"
+            @refresh="$emit('refreshWeather')"
+          />
+        </div>
 
-      <!--
-        Quick Links is a product section, not a footer affordance: it sits in
-        the same section rhythm as the todo panel above it. The whole slot is
-        absent when the module is disabled, or when no links are configured —
-        which is why the heading lives inside the `v-if` conditions.
-      -->
-      <div
-        v-if="moduleVisibility.shortcuts && quickLinks.length"
-        class="dashboard-slot"
-      >
-        <section class="quick-links" :aria-label="t('quickLinks.heading')">
-          <p class="section-heading">{{ t("quickLinks.heading") }}</p>
-          <ul>
-            <li v-for="link in quickLinks" :key="link.id">
-              <button type="button" :title="link.url" @click="$emit('openQuickLink', link.id)">
-                <span class="quick-link-name">{{ link.name }}</span>
-                <span class="quick-link-arrow" aria-hidden="true">↗</span>
-              </button>
-            </li>
-          </ul>
-        </section>
-      </div>
+        <div
+          v-if="entry.id === 'todo' && moduleVisibility.todo"
+          class="dashboard-slot"
+          :class="{ 'dashboard-slot--span-2': spannedLayout && entry.colSpan === 2 }"
+        >
+          <!--
+            A disabled todo module unmounts its panel: the component owns only
+            ephemeral UI state (it removes its own drag listeners on unmount),
+            while every task lives in SQLite behind commands that stay
+            invokable. A later re-enable mounts the panel fresh, which
+            re-queries the current task day. The wrapper makes the two-root
+            panel one coherent grid item.
+          -->
+          <TodoPanel
+            :native-bridge-available="nativeBridgeAvailable"
+            :show-review-entry="moduleVisibility.review"
+            @open-review="$emit('openReview')"
+            @error="$emit('error', $event)"
+          />
+        </div>
+
+        <!--
+          Quick Links is a product section, not a footer affordance: it sits
+          in the same section rhythm as the todo panel. The whole slot is
+          absent when the module is disabled, or when no links are configured
+          — which is why the heading lives inside the `v-if` conditions.
+        -->
+        <div
+          v-if="entry.id === 'shortcuts' && moduleVisibility.shortcuts && quickLinks.length"
+          class="dashboard-slot"
+          :class="{ 'dashboard-slot--span-2': spannedLayout && entry.colSpan === 2 }"
+        >
+          <section class="quick-links" :aria-label="t('quickLinks.heading')">
+            <p class="section-heading">{{ t("quickLinks.heading") }}</p>
+            <ul>
+              <li v-for="link in quickLinks" :key="link.id">
+                <button
+                  type="button"
+                  :title="link.url"
+                  @click="$emit('openQuickLink', link.id)"
+                >
+                  <span class="quick-link-name">{{ link.name }}</span>
+                  <span class="quick-link-arrow" aria-hidden="true">↗</span>
+                </button>
+              </li>
+            </ul>
+          </section>
+        </div>
+      </template>
     </div>
 
     <!--

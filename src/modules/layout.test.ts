@@ -3,6 +3,7 @@ import { MODULE_REGISTRY, type ModuleId } from "./registry";
 import {
   DASHBOARD_MODULE_IDS,
   DEFAULT_MODULE_LAYOUT,
+  hasColumnSpan,
   resolveDashboardLayout,
   resolveModuleLayout,
   type LayoutEntry,
@@ -184,6 +185,40 @@ describe("resolveModuleLayout", () => {
     const mutated: LayoutEntry = first.entries[0];
     mutated.order = 99;
     expect(resolveModuleLayout().entries[0].order).toBe(0);
+  });
+});
+
+describe("hasColumnSpan", () => {
+  it("keeps the all-ones default layout single-column on any container width", () => {
+    expect(hasColumnSpan(DEFAULT_MODULE_LAYOUT)).toBe(false);
+    expect(
+      hasColumnSpan(
+        resolveModuleLayout(storedLayout([
+          ["todo", 0, 1],
+          ["weather", 1, 1],
+        ])),
+      ),
+    ).toBe(false);
+  });
+
+  it("activates two columns only when an entry requests a span of two", () => {
+    expect(
+      hasColumnSpan(
+        resolveModuleLayout(storedLayout([
+          ["weather", 0, 2],
+          ["todo", 1, 1],
+        ])),
+      ),
+    ).toBe(true);
+    // A stored span that C1 normalized away (e.g. colSpan 3 → 1) does not activate.
+    expect(
+      hasColumnSpan(
+        resolveModuleLayout(storedLayout([
+          ["weather", 0, 3],
+          ["todo", 1, 1],
+        ])),
+      ),
+    ).toBe(false);
   });
 });
 

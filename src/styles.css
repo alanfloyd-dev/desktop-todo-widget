@@ -202,6 +202,35 @@ button {
 }
 
 /*
+ * Two-column activation (C3b-2): the stored layout requesting a span widens
+ * the canvas for every slot — `colSpan: 1` entries take one logical column,
+ * `colSpan: 2` entries take both. The class is bound only when the effective
+ * layout carries a span of two (`hasColumnSpan`), so the default layout
+ * never leaves single-column.
+ *
+ * Everything span-related lives INSIDE the media query: below 776px no slot
+ * carries any `grid-column` declaration at all, so a span-2 entry renders on
+ * the single full-width track — an implicit second column is structurally
+ * impossible, and the persisted preferences are untouched by the collapse.
+ * The breakpoint is a window media query at 776px: the two two-column-
+ * capable modes translate it into card space through their own padding —
+ * Floating content ≥ 696px (cards ≥ 334px), Desktop content ≥ 680px (cards
+ * ≥ 326px) — keeping both above the 320px minimum useful card width, while
+ * Sidebar windows (≤ 560px) can never reach it. Row rhythm stays with the
+ * sections' own padding, so no row gap.
+ */
+@media (min-width: 776px) {
+  .dashboard-grid--spanned {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 28px;
+  }
+
+  .dashboard-grid--spanned .dashboard-slot--span-2 {
+    grid-column: span 2;
+  }
+}
+
+/*
  * The weather slot owns what the observation header used to supply around
  * the card: the 18px gap comes from `.weather-display` itself, and the slot
  * adds the side inset, the breathing space below the card, and the header
