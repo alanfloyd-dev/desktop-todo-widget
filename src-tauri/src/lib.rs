@@ -61,14 +61,206 @@ use window_mode::NativeWindowState;
 /// admission use, and the same platform location Tauri uses for the configured
 /// bundle identifier. `setup` asserts the two agree so a future identifier or
 /// platform change cannot silently point the early read at the wrong file.
+///
+/// Debug/test builds additionally honor an explicit `DTW_QA_DATA_DIR`
+/// override (see [`select_data_root`]); the branch is compiled out of release
+/// builds entirely, so no environment variable can redirect production data.
+///
+/// The return is a hard failure, not `None`, when an explicit QA override
+/// cannot be honored: `None` means "this platform has no known root" and
+/// `setup` tolerates it by falling back to Tauri's answer, which is the real
+/// user profile — exactly what a QA session must never do.
 #[cfg(target_os = "windows")]
 fn app_data_dir() -> Option<std::path::PathBuf> {
-    desktop_todo_maintenance::paths::canonical_data_root().ok()
+    #[cfg(any(debug_assertions, test))]
+    let qa_override = std::env::var_os("DTW_QA_DATA_DIR");
+    #[cfg(any(debug_assertions, test))]
+    let selection = select_data_root(
+        qa_override,
+        desktop_todo_maintenance::paths::canonical_data_root(),
+    );
+    // Release builds have no override: the selection layer is not called and
+    // the production root is the only possible answer (its `Err` becomes the
+    // same `None` the pre-override code produced).
+    #[cfg(not(any(debug_assertions, test)))]
+    let selection = desktop_todo_maintenance::paths::canonical_data_root()
+        .map(Some)
+        .map_err(|error| error.to_string());
+    match selection {
+        Ok(Some(dir)) => Some(dir),
+        // `Ok(None)` is the legacy "no trusted root on this platform"
+        // answer — with no override set, the caller's Tauri fallback is
+        // unchanged.
+        Ok(None) => None,
+        Err(error) => {
+            // An error means an explicit QA override could not be honored
+            // safely (debug/test only — release never reads the variable).
+            // Fail closed: abort the process here — before the
+            // rendering-backend read, before any database open, before any
+            // write. A panic is the honest failure for a misconfigured QA
+            // launch: this code only exists in builds with a console to
+            // show the message, and the message no longer claims the QA
+            // variable itself was invalid when it may have been the
+            // trusted-root resolution that failed.
+            #[cfg(any(debug_assertions, test))]
+            panic!("QA data-root selection failed (refusing to touch real app data): {error}");
+            // Release: the only reachable error is the production root's own
+            // resolution failure, which the caller has always tolerated as
+            // the legacy `None` (Tauri fallback).
+            #[cfg(not(any(debug_assertions, test)))]
+            {
+                let _ = error;
+                None
+            }
+        }
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
 fn app_data_dir() -> Option<std::path::PathBuf> {
     None
+}
+
+/// Selects the effective data root: the pure, testable core of
+/// [`app_data_dir`] in debug/test builds.
+///
+/// The raw override value is a parameter (already read by the caller), so
+/// tests pass explicit inputs and never mutate process environment state.
+/// The decision matrix is the fail-closed contract:
+///
+/// | override | production root | result                                    |
+/// |----------|-----------------|-------------------------------------------|
+/// | unset    | success         | `Ok(Some(canonical))`                     |
+/// | unset    | failure         | `Ok(None)` — legacy Tauri fallback        |
+/// | set      | success         | validated QA root, or `Err` if unsafe     |
+/// | set      | failure         | `Err` — startup aborts                    |
+/// | set      | invalid (any)   | `Err` — startup aborts                    |
+///
+/// An explicit override **requires** a successfully resolved trusted
+/// production root: the containment check cannot be performed without one,
+/// and no environment-derived stand-in may replace the Known Folder result.
+/// When the trusted resolver fails, a QA session refuses to start rather
+/// than risk selecting the real profile it can no longer prove distance
+/// from.
+///
+/// Release builds never call this function: their only caller compiles the
+/// call out, so no environment variable can redirect production data.
+#[cfg(all(target_os = "windows", any(debug_assertions, test)))]
+fn select_data_root(
+    qa_raw: Option<std::ffi::OsString>,
+    canonical: Result<std::path::PathBuf, desktop_todo_maintenance::Error>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(raw) = qa_raw else {
+        // No override: the production root's own failure is the legacy
+        // "no trusted root" answer, not an error — the caller falls back to
+        // Tauri exactly as the pre-override code did.
+        return Ok(canonical.ok());
+    };
+    // An override demands a trusted production root to validate containment
+    // against. Without one there is nothing to prove distance from, and no
+    // substitute authority (environment variables included) may stand in.
+    let canonical = canonical.map_err(|error| {
+        format!(
+            "the trusted production data root could not be resolved, so the \
+             QA directory cannot be proven safe: {error}"
+        )
+    })?;
+    // Lossless: the resolver consumes the OsStr value directly, so no
+    // invalid-Unicode path can be silently transformed by a lossy string
+    // conversion before validation.
+    resolve_qa_data_root(&raw, Some(&canonical)).map(Some)
+}
+
+/// Resolves the effective data root for a debug/test QA launch.
+///
+/// Pure and platform-neutral: callers pass the raw override value and the
+/// trusted production root explicitly, so tests never mutate process
+/// environment state and never touch real user data. The override is
+/// opt-in and validated strictly — any doubt fails with `Err`, never a
+/// fallback to the canonical root:
+///
+/// * the value (a lossless `OsStr`, never a lossy string conversion) must be
+///   non-empty, absolute, and resolve through `std::fs::canonicalize`, which
+///   both rejects paths that do not exist (the directory must be pre-created,
+///   so there is no ambiguity about who creates it) and resolves
+///   symlinks/reparse points to their real target;
+/// * the resolved target must be a directory, not a file;
+/// * it must not equal or sit inside of the canonical production root
+///   (case-insensitive component comparison — Windows paths are
+///   case-insensitive — so a differently-cased or linked path cannot sneak
+///   the real profile back in).
+///
+/// The `canonical` parameter is a trusted, already-resolved production root:
+/// the selection layer refuses to call this without one, so the containment
+/// check is never skipped. Release builds never call this: the only caller
+/// is compiled out, and the canonical root is used unchanged.
+fn resolve_qa_data_root(
+    qa_raw: &std::ffi::OsStr,
+    canonical: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf, String> {
+    let lossy_for_message = qa_raw.to_string_lossy();
+    let message_form = lossy_for_message.trim();
+    // Whitespace is checked through the string form; the path itself is
+    // always built from the original OsStr, so no non-Unicode byte is lost.
+    if message_form.is_empty() {
+        return Err("the variable is set but empty".to_string());
+    }
+    let requested = std::path::PathBuf::from(qa_raw);
+    if !requested.is_absolute() {
+        return Err(format!("`{message_form}` is not an absolute path"));
+    }
+    // Canonicalize or fail: a missing directory is an error on purpose — the
+    // QA harness pre-creates and owns the directory, and canonicalization is
+    // also what resolves symlinks/reparse points to their real target so a
+    // linked path cannot escape the checks below.
+    let resolved = std::fs::canonicalize(&requested)
+        .map_err(|error| format!("`{message_form}` cannot be resolved as an existing directory: {error}"))?;
+    if !resolved.is_dir() {
+        return Err(format!("`{message_form}` is not a directory"));
+    }
+    if let Some(canonical) = canonical {
+        // Compare against the canonical root *resolved* the same way, so a
+        // junction/reparse point inside the production path cannot make a
+        // nested QA directory look lexically unrelated to its real location.
+        // A missing production directory (fresh machine) keeps its lexical
+        // form: there is nothing on disk to resolve through, and the
+        // descendant rule must still apply.
+        let canonical_resolved =
+            std::fs::canonicalize(canonical).unwrap_or_else(|_| canonical.to_path_buf());
+        if is_same_or_inside(&resolved, &canonical_resolved) {
+            return Err(format!(
+                "`{message_form}` is the real application data directory or a location inside it"
+            ));
+        }
+    }
+    Ok(resolved)
+}
+
+/// Whether `candidate` is `ancestor` itself or a path inside it, compared
+/// case-insensitively component-wise (Windows path semantics; a component
+/// prefix comparison also refuses sibling names that merely share a prefix).
+fn is_same_or_inside(candidate: &std::path::Path, ancestor: &std::path::Path) -> bool {
+    fn lower_components(path: &std::path::Path) -> Vec<String> {
+        path.components()
+            .filter_map(|component| component.as_os_str().to_str())
+            .map(|text| text.to_lowercase())
+            .collect()
+    }
+    let (candidate_parts, ancestor_parts) = (lower_components(candidate), lower_components(ancestor));
+    !ancestor_parts.is_empty() && candidate_parts.starts_with(&ancestor_parts)
+}
+
+/// Whether this process is running under the debug/test QA data-root
+/// override. Compiled to a constant `false` in release builds, where the
+/// override does not exist and the diagnostics note can never fire.
+#[cfg(any(debug_assertions, test))]
+fn qa_data_override_active() -> bool {
+    std::env::var_os("DTW_QA_DATA_DIR").is_some()
+}
+
+#[cfg(not(any(debug_assertions, test)))]
+fn qa_data_override_active() -> bool {
+    false
 }
 
 /// Puts the product window into widget window semantics on Windows.
@@ -186,21 +378,42 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            let resolved_data_dir = app.path().app_data_dir()?;
+            // The database targets the same resolver the early read used —
+            // `app_data_dir()`, which debug/test builds may have redirected to
+            // a validated QA root. Using Tauri's own `app_data_dir()` here
+            // instead would open the real user profile in a QA session. A
+            // resolver failure falls through to Tauri's answer exactly as the
+            // pre-override code tolerated it for the early read.
+            let resolved_data_dir = match app_data_dir() {
+                Some(dir) => dir,
+                None => app.path().app_data_dir()?,
+            };
             let diagnostics = app.state::<qa_diagnostics::QaDiagnostics>();
             // The rendering backend was read before the WebView existed, using a
             // path derived without an AppHandle. Assert the two agree; if they
             // ever diverge the early read would silently target the wrong file.
             //
+            // A debug/test QA session diverges by design — the override
+            // redirects the data root away from Tauri's Known-Folder answer —
+            // so it records an honest informational note instead. The
+            // production mismatch message is unchanged.
+            //
             // Reported through the diagnostics log rather than stderr: this path
             // only matters in an optimized build, which is a GUI-subsystem process
             // with no console to print to.
-            if let Some(early_dir) = app_data_dir() {
-                if early_dir != resolved_data_dir {
+            let tauri_dir = app.path().app_data_dir()?;
+            if tauri_dir != resolved_data_dir {
+                if qa_data_override_active() {
+                    diagnostics.record(format!(
+                        "[qa-isolation] data_root={} tauri_app_data={} (override active)",
+                        resolved_data_dir.display(),
+                        tauri_dir.display()
+                    ));
+                } else {
                     diagnostics.record(format!(
                         "[rendering] app_data_dir_mismatch early={} tauri={} — rendering backend was read from the wrong location",
-                        early_dir.display(),
-                        resolved_data_dir.display()
+                        resolved_data_dir.display(),
+                        tauri_dir.display()
                     ));
                 }
             }
@@ -359,5 +572,241 @@ mod startup_failure_tests {
             source.contains("[startup-fatal] settings load failed"),
             "setup must record the settings failure before returning"
         );
+    }
+
+    // --- QA data-root override (v1.3.0-C4-A.1) --------------------------------
+
+    /// The resolver is pure: every test passes explicit inputs, so no test
+    /// mutates process environment state, and the "production root" below is
+    /// a temp directory standing in for the real one — the user's actual
+    /// `%APPDATA%` is never read or written.
+    mod qa_data_root {
+        use crate::{resolve_qa_data_root, select_data_root};
+        use std::ffi::OsStr;
+
+        /// A unique scratch directory under the system temp dir, following the
+        /// same convention as the settings tests' `temp_db_path` (no new
+        /// dependencies); removed best-effort on drop.
+        struct Scratch(std::path::PathBuf);
+        impl Scratch {
+            fn new(tag: &str) -> Self {
+                let suffix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos();
+                let path = std::env::temp_dir().join(format!(
+                    "dtw-qa-root-{tag}-{}-{suffix}",
+                    std::process::id()
+                ));
+                std::fs::create_dir_all(&path).expect("scratch dir");
+                Scratch(path)
+            }
+            fn path(&self) -> &std::path::Path {
+                &self.0
+            }
+        }
+        impl Drop for Scratch {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        /// Creates `prod/` (the stand-in production root) plus `qa/` (a valid
+        /// pre-created QA directory) under one fresh scratch dir.
+        fn fixture(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, Scratch) {
+            let scratch = Scratch::new(tag);
+            let prod = scratch.path().join("prod");
+            let qa = scratch.path().join("qa");
+            std::fs::create_dir_all(&prod).expect("prod dir");
+            std::fs::create_dir_all(&qa).expect("qa dir");
+            (prod, qa, scratch)
+        }
+
+        #[test]
+        fn decision_matrix_unset_override_matches_legacy_behavior() {
+            // Unset + production success → the canonical production root.
+            let (prod, _qa, _temp) = fixture("solo");
+            assert_eq!(
+                select_data_root(None, Ok(prod.clone())).expect("passes"),
+                Some(prod)
+            );
+            // Unset + production failure → `Ok(None)` — the legacy "no
+            // trusted root" answer the caller turns into the Tauri
+            // fallback. Not an error: production never panics over its own
+            // resolver.
+            assert_eq!(
+                select_data_root(None, Err(broken_root())).expect("legacy none"),
+                None
+            );
+        }
+
+        #[test]
+        fn decision_matrix_override_set_follows_the_fail_closed_policy() {
+            let (prod, qa, _temp) = fixture("x");
+            // Valid override + production success → the QA root.
+            let selected = select_data_root(Some(qa.as_os_str().to_owned()), Ok(prod.clone()))
+                .expect("valid override selects the qa root")
+                .expect("some root");
+            assert_eq!(selected, std::fs::canonicalize(&qa).unwrap());
+
+            // Valid override + production failure → Err: the containment
+            // check cannot run without a trusted root, and no stand-in
+            // authority may replace it. THE security-review corner: the
+            // previous implementation selected the QA root here, leaving the
+            // real profile reachable if the operator had named it.
+            let error = select_data_root(Some(qa.as_os_str().to_owned()), Err(broken_root()))
+                .expect_err("a production-root failure must abort a QA session");
+            assert!(error.contains("cannot be proven safe"), "unexpected error: {error}");
+
+            // Invalid override + production failure → Err (same refusal).
+            let missing = qa.parent().unwrap().join("no-such-dir");
+            assert!(
+                select_data_root(Some(missing.as_os_str().to_owned()), Err(broken_root())).is_err()
+            );
+            // Invalid override + production success → Err (no fallback in
+            // either direction).
+            let error = select_data_root(Some(missing.as_os_str().to_owned()), Ok(prod.clone()))
+                .expect_err("invalid override must fail closed");
+            assert!(error.contains("cannot be resolved"));
+
+            // Override equal to / inside the production root → Err, with the
+            // trusted root available for the containment check.
+            assert!(
+                select_data_root(Some(prod.as_os_str().to_owned()), Ok(prod.clone())).is_err(),
+                "the production root itself must be refused as a QA directory"
+            );
+            let nested = prod.join("nested-qa");
+            std::fs::create_dir_all(&nested).expect("nested dir");
+            assert!(
+                select_data_root(Some(nested.as_os_str().to_owned()), Ok(prod.clone())).is_err(),
+                "a QA directory inside the production root must be refused"
+            );
+        }
+
+        #[test]
+        fn an_override_linking_into_the_production_root_is_refused_where_links_can_be_created() {
+            // Symlink creation needs SeCreateSymbolicLinkPrivilege (or
+            // Developer Mode). The test runs where the capability allows and
+            // records a skip otherwise; the mechanism under test —
+            // `fs::canonicalize` resolving the link to its real target
+            // before the containment comparison — is what the permission
+            // gates, not the check itself.
+            let (prod, qa, temp) = fixture("link");
+            let real_target = prod.join("linked-qa");
+            std::fs::create_dir_all(&real_target).expect("target dir");
+            let link = temp.path().join("qa-link");
+            #[cfg(target_os = "windows")]
+            let created = std::os::windows::fs::symlink_dir(&real_target, &link).is_ok();
+            #[cfg(not(target_os = "windows"))]
+            let created = std::os::unix::fs::symlink(&real_target, &link).is_ok();
+            if !created {
+                eprintln!("skipped: this process may not create symlinks");
+                return;
+            }
+            // The link is outside `prod` lexically but resolves inside it:
+            // canonicalization must see through it and refuse.
+            assert!(
+                select_data_root(Some(link.as_os_str().to_owned()), Ok(prod.clone())).is_err(),
+                "a link into the production root must be refused"
+            );
+            // The honest QA directory still passes alongside the link case.
+            assert!(select_data_root(Some(qa.as_os_str().to_owned()), Ok(prod)).is_ok());
+        }
+
+        /// A production-root resolution failure to feed the selection layer.
+        fn broken_root() -> desktop_todo_maintenance::Error {
+            std::io::Error::other("simulated known-folder failure").into()
+        }
+
+        #[test]
+        fn valid_pre_created_directory_resolves_and_canonicalizes() {
+            let (prod, qa, _temp) = fixture("f");
+            // An input with redundant segments must come back canonicalized
+            // through the standard path API, not hand-rolled normalization.
+            let messy = qa
+                .parent()
+                .unwrap()
+                .join("qa")
+                .join("..")
+                .join("qa");
+            let resolved = resolve_qa_data_root(OsStr::new(messy.to_str().unwrap()), Some(&prod))
+                .expect("valid qa dir");
+            assert_eq!(resolved, std::fs::canonicalize(&qa).unwrap());
+        }
+
+        #[test]
+        fn empty_and_whitespace_values_are_refused() {
+            let (prod, _qa, _temp) = fixture("solo");
+            for raw in ["", "   ", "\t"] {
+                assert!(
+                    resolve_qa_data_root(OsStr::new(raw), Some(&prod)).is_err(),
+                    "`{raw}` must be refused"
+                );
+            }
+        }
+
+        #[test]
+        fn relative_paths_are_refused() {
+            let (prod, _qa, _temp) = fixture("solo");
+            assert!(resolve_qa_data_root(OsStr::new("qa-relative"), Some(&prod)).is_err());
+            assert!(resolve_qa_data_root(OsStr::new(".\\qa-relative"), Some(&prod)).is_err());
+        }
+
+        #[test]
+        fn the_production_directory_itself_is_refused() {
+            let (prod, _qa, _temp) = fixture("solo");
+            assert!(resolve_qa_data_root(OsStr::new(prod.to_str().unwrap()), Some(&prod)).is_err());
+        }
+
+        #[test]
+        fn a_descendant_of_the_production_directory_is_refused() {
+            let (prod, _qa, temp) = fixture("x");
+            let nested = prod.join("nested-qa");
+            std::fs::create_dir_all(&nested).expect("nested dir");
+            assert!(resolve_qa_data_root(OsStr::new(nested.to_str().unwrap()), Some(&prod)).is_err());
+            // The temp root itself (the production root's parent) is fine —
+            // only equality and containment in the production root are unsafe.
+            let sibling = temp.path().join("qa2");
+            std::fs::create_dir_all(&sibling).expect("sibling dir");
+            assert!(resolve_qa_data_root(OsStr::new(sibling.to_str().unwrap()), Some(&prod)).is_ok());
+        }
+
+        #[test]
+        fn windows_case_insensitivity_cannot_reintroduce_the_production_root() {
+            let (prod, _qa, temp) = fixture("x");
+            let upper = temp.path().join("PROD");
+            std::fs::create_dir_all(&upper).expect("upper dir");
+            // Same directory under a different casing (legal on Windows) must
+            // still be recognized as the production root.
+            assert!(resolve_qa_data_root(OsStr::new(upper.to_str().unwrap()), Some(&prod)).is_err());
+            let upper_nested = prod.join("NESTED-QA");
+            std::fs::create_dir_all(&upper_nested).expect("upper nested dir");
+            assert!(resolve_qa_data_root(OsStr::new(upper_nested.to_str().unwrap()), Some(&prod)).is_err());
+        }
+
+        #[test]
+        fn a_file_is_refused_even_though_it_exists() {
+            let (prod, _qa, temp) = fixture("x");
+            let file = temp.path().join("a-file.txt");
+            std::fs::write(&file, b"not a directory").expect("file");
+            assert!(resolve_qa_data_root(OsStr::new(file.to_str().unwrap()), Some(&prod)).is_err());
+        }
+
+        #[test]
+        fn a_missing_directory_is_refused_instead_of_created() {
+            let (prod, _qa, temp) = fixture("x");
+            let missing = temp.path().join("never-created");
+            assert!(resolve_qa_data_root(OsStr::new(missing.to_str().unwrap()), Some(&prod)).is_err());
+        }
+
+        #[test]
+        fn sibling_names_that_merely_share_a_prefix_stay_allowed() {
+            let (prod, _qa, temp) = fixture("x");
+            // "prod-2" shares a string prefix with "prod" but is a different
+            // directory: the component-wise comparison must not over-refuse.
+            let sibling = temp.path().join("prod-2");
+            std::fs::create_dir_all(&sibling).expect("sibling dir");
+            assert!(resolve_qa_data_root(OsStr::new(sibling.to_str().unwrap()), Some(&prod)).is_ok());
+        }
     }
 }
