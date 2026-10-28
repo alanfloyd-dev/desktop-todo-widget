@@ -30,8 +30,15 @@ const props = withDefaults(
      * text. Defaults to the title.
      */
     moduleName?: string;
+    /**
+     * Disables the toggle when the stored layout document cannot persist a
+     * collapse change (an opaque future-format document, D2). A disabled
+     * native button keeps the section's expanded presentation usable while
+     * making the unavailable persistence explicit; the label explains why.
+     */
+    toggleDisabled?: boolean;
   }>(),
-  { collapsed: false, moduleName: undefined },
+  { collapsed: false, moduleName: undefined, toggleDisabled: false },
 );
 
 const emit = defineEmits<{ toggle: [] }>();
@@ -39,9 +46,11 @@ const emit = defineEmits<{ toggle: [] }>();
 const { t } = useI18n();
 
 const toggleLabel = computed(() =>
-  t(props.collapsed ? "modules.expandAction" : "modules.collapseAction", {
-    module: props.moduleName ?? props.title,
-  }),
+  props.toggleDisabled
+    ? t("modules.collapseUnavailable")
+    : t(props.collapsed ? "modules.expandAction" : "modules.collapseAction", {
+        module: props.moduleName ?? props.title,
+      }),
 );
 
 const bodyId = useId();
@@ -68,6 +77,7 @@ const bodyId = useId();
         <button
           type="button"
           class="module-section-toggle"
+          :disabled="toggleDisabled"
           :aria-expanded="!collapsed"
           :aria-controls="bodyId"
           :aria-label="toggleLabel"

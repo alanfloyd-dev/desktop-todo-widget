@@ -22,6 +22,7 @@ import { openQuickLink as openQuickLinkCommand, type ShortcutsBridge } from "./m
 import { isModuleEnabled, resolveModuleVisibility, type ModuleVisibility } from "./modules/registry";
 import {
   DEFAULT_MODULE_LAYOUT,
+  canPersistModuleCollapse,
   resolveModuleLayout,
   setModuleCollapsed,
   type DashboardModuleId,
@@ -137,6 +138,17 @@ const moduleVisibility = computed(() =>
  * never rewritten and rides through saves verbatim.
  */
 const moduleLayout = computed(() => resolveModuleLayout(state.value.settings.moduleLayout));
+/**
+ * Whether a collapse click can actually persist (D2) — derived from the RAW
+ * stored layout document, never the resolved view above: the resolver renders
+ * an opaque future-format document as defaults, which would wrongly read as
+ * available. When false, the module toggles disable with a localized
+ * explanation; `applyModuleCollapsed`'s own `null`-patch early return remains
+ * as the independent second gate.
+ */
+const collapseAvailable = computed(() =>
+  canPersistModuleCollapse(state.value.settings.moduleLayout),
+);
 // A module preference that disables Review takes effect immediately, also on
 // an overlay that is already open: the preference governs whether the overlay
 // may remain open, not just whether its entry is offered.
@@ -709,6 +721,7 @@ onBeforeUnmount(() => {
         :quick-links="state.settings.quickLinks"
         :module-visibility="moduleVisibility"
         :module-layout="moduleLayout"
+        :collapse-available="collapseAvailable"
         :native-bridge-available="nativeBridgeAvailable"
         :weather="weather"
         :weather-message="weatherMessage"

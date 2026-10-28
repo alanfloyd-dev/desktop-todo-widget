@@ -213,6 +213,31 @@ export function resolveModuleLayout(preferences?: unknown): ModuleLayout {
 }
 
 /**
+ * Whether a collapse toggle can actually persist its change (D2).
+ *
+ * The decision is derived from the RAW stored layout document — never from the
+ * resolved projection, which normalizes an opaque future-format document into
+ * defaults and would therefore read as available when it is not. The gate is
+ * the exact complement of `setModuleCollapsed`'s refusal rules, and the two
+ * must stay in sync: available means a click will produce a patch; unavailable
+ * means the click would be silently dropped, which is why the UI disables the
+ * toggle and explains itself instead.
+ *
+ * - No stored document at all is AVAILABLE: there is provably nothing to
+ *   preserve, so `setModuleCollapsed` builds the complete default layout.
+ * - A document that provably declares the version-1 shape (object, `version`
+ *   exactly `1`, `entries` an array) is AVAILABLE.
+ * - Everything else — a future version, a missing version, a non-object, a
+ *   v1-shaped header over a non-array list — is UNAVAILABLE: the stored
+ *   document must never be replaced with V1, so collapse stays unapplied.
+ */
+export function canPersistModuleCollapse(preferences: unknown): boolean {
+  const shape = preferences as { version?: unknown; entries?: unknown } | null | undefined;
+  if (shape === undefined || shape === null) return true;
+  return typeof shape === "object" && shape.version === 1 && Array.isArray(shape.entries);
+}
+
+/**
  * Builds the collapse patch for one module from the RAW stored layout
  * document (D1).
  *

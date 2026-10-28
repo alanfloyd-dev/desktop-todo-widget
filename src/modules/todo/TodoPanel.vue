@@ -44,8 +44,14 @@ const props = withDefaults(
      * Purely presentational here: the panel never unmounts when collapsed.
      */
     collapsed?: boolean;
+    /**
+     * Whether a collapse change can actually persist (D2). Derived from the
+     * raw stored layout document by the app; when false the container disables
+     * its toggle and explains why, and the panel itself never changes.
+     */
+    collapseAvailable?: boolean;
   }>(),
-  { showReviewEntry: true, collapsed: false },
+  { showReviewEntry: true, collapsed: false, collapseAvailable: true },
 );
 const emit = defineEmits<{ error: [message: string]; openReview: []; toggle: [] }>();
 const { t, intlLocale } = useI18n();
@@ -475,6 +481,7 @@ onBeforeUnmount(() => {
     :title="t('today.title')"
     :module-name="t('modules.todo')"
     :collapsed="collapsed"
+    :toggle-disabled="!collapseAvailable"
     @toggle="emit('toggle')"
   >
     <template #title>

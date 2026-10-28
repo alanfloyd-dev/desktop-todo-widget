@@ -28,6 +28,12 @@ const props = defineProps<{
    * document; the slot order below is its entry order.
    */
   moduleLayout: ModuleLayout;
+  /**
+   * Whether a collapse change can actually persist (D2), derived by the app
+   * from the RAW stored layout document. False disables the module toggles
+   * with a localized explanation instead of letting a click do nothing.
+   */
+  collapseAvailable: boolean;
   nativeBridgeAvailable: boolean;
   weather: WeatherViewState;
   weatherMessage: string;
@@ -163,6 +169,7 @@ const dateLabel = computed(() =>
             :native-bridge-available="nativeBridgeAvailable"
             :show-review-entry="moduleVisibility.review"
             :collapsed="moduleCollapsed('todo')"
+            :collapse-available="collapseAvailable"
             @open-review="$emit('openReview')"
             @toggle="$emit('toggleModule', 'todo')"
             @error="$emit('error', $event)"
@@ -192,6 +199,7 @@ const dateLabel = computed(() =>
             :title="t('quickLinks.heading')"
             :module-name="t('modules.shortcuts')"
             :collapsed="moduleCollapsed('shortcuts')"
+            :toggle-disabled="!collapseAvailable"
             @toggle="$emit('toggleModule', 'shortcuts')"
           >
             <ul>

@@ -178,6 +178,11 @@ export const en: Record<string, string> = {
   // identical to a screen reader; `{module}` is the registry label.
   "modules.collapseAction": "Collapse {module}",
   "modules.expandAction": "Expand {module}",
+  // Disabled-toggle explanation (D2): the stored layout document is a future
+  // format this build must not overwrite, so collapse cannot persist. Shown
+  // as the toggle's accessible name and tooltip while it is disabled.
+  "modules.collapseUnavailable":
+    "Collapsing is unavailable: this layout was saved by a newer app version",
 
   // --- Settings -------------------------------------------------------------
   "settings.title": "SETTINGS",
@@ -515,6 +520,7 @@ export const zhHans: Record<string, string> = {
   "modules.review": "回顾",
   "modules.collapseAction": "折叠{module}",
   "modules.expandAction": "展开{module}",
+  "modules.collapseUnavailable": "无法折叠：此布局由更新版本的应用保存",
 
   "settings.title": "设置",
   "settings.close": "关闭",

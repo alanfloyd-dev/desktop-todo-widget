@@ -1925,10 +1925,28 @@ button.module-section-toggle {
   cursor: pointer;
 }
 
-button.module-section-toggle:hover,
-button.module-section-toggle:focus-visible {
+button.module-section-toggle:hover {
   color: var(--mineral);
   outline: none;
+}
+
+/*
+ * Keyboard focus draws the same 1px ring the weather refresh control uses
+ * (D2): the hover color shift alone is nearly invisible on Glass and
+ * Gradient backgrounds for an 18px glyph this faint.
+ */
+button.module-section-toggle:focus-visible {
+  color: var(--mineral);
+  outline: 1px solid var(--mineral);
+  outline-offset: 1px;
+}
+
+/* Persistence unavailable (D2): the toggle explains itself via its label and
+   reads as inactive, matching the disabled weather control's dimming. */
+button.module-section-toggle:disabled {
+  color: var(--faint);
+  cursor: default;
+  opacity: 0.42;
 }
 
 /* Expanded shows the collapse chevron (up); collapsed shows the expand

@@ -3,6 +3,7 @@ import { MODULE_REGISTRY, type ModuleId } from "./registry";
 import {
   DASHBOARD_MODULE_IDS,
   DEFAULT_MODULE_LAYOUT,
+  canPersistModuleCollapse,
   hasColumnSpan,
   resolveDashboardLayout,
   resolveModuleLayout,
@@ -417,5 +418,56 @@ describe("resolveDashboardLayout with a registry projection fixture", () => {
     expect(idsOf(layout)).toEqual(["todo", "weather", "shortcuts", "github"]);
     expect(layout.entries.map((entry) => entry.order)).toEqual([0, 1, 2, 3]);
     expect(layout.entries[3].colSpan).toBe(1);
+  });
+});
+
+describe("canPersistModuleCollapse (D2 opaque-layout availability)", () => {
+  it("accepts a provably version-1 raw document", () => {
+    expect(
+      canPersistModuleCollapse({
+        version: 1,
+        futureRoot: { kept: true },
+        entries: [{ id: "todo", order: 0, colSpan: 1 }],
+      }),
+    ).toBe(true);
+  });
+
+  it("accepts a missing layout: there is provably nothing to preserve", () => {
+    for (const missing of [undefined, null]) {
+      expect(canPersistModuleCollapse(missing)).toBe(true);
+    }
+  });
+
+  it("rejects every non-V1 shape setModuleCollapsed would refuse", () => {
+    // A future format the build must never overwrite…
+    expect(canPersistModuleCollapse({ version: 2, entries: [] })).toBe(false);
+    // …a document with no version…
+    expect(canPersistModuleCollapse({ entries: [] })).toBe(false);
+    // …a v1-shaped header over a corrupt entries list…
+    expect(canPersistModuleCollapse({ version: 1, entries: "junk" })).toBe(false);
+    expect(canPersistModuleCollapse({ version: 1, entries: null })).toBe(false);
+    // …and non-object inputs.
+    expect(canPersistModuleCollapse("compact-v3")).toBe(false);
+    expect(canPersistModuleCollapse(42)).toBe(false);
+    expect(canPersistModuleCollapse([])).toBe(false);
+  });
+
+  it("stays in sync with setModuleCollapsed: available exactly when a patch is built", () => {
+    // The gate and the patch builder are complementary by contract; a drift
+    // between them would either disable a working toggle or enable one that
+    // silently drops clicks. Probe the paired decision on every shape.
+    const shapes: Array<{ name: string; doc: unknown }> = [
+      { name: "v1", doc: { version: 1, entries: [{ id: "todo", order: 0, colSpan: 1 }] } },
+      { name: "missing-undefined", doc: undefined },
+      { name: "missing-null", doc: null },
+      { name: "v2", doc: { version: 2, entries: [] } },
+      { name: "no-version", doc: { entries: [] } },
+      { name: "non-array-entries", doc: { version: 1, entries: "junk" } },
+      { name: "string", doc: "compact-v3" },
+      { name: "number", doc: 42 },
+    ];
+    for (const { doc } of shapes) {
+      expect(canPersistModuleCollapse(doc)).toBe(setModuleCollapsed(doc, "todo", true) !== null);
+    }
   });
 });
