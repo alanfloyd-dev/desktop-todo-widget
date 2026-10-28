@@ -311,6 +311,7 @@ button {
 .weather-display,
 .product-section h1,
 .product-section h2,
+.module-section-heading h1,
 .signature > span,
 .menu-heading,
 .settings-panel header p {
@@ -321,6 +322,7 @@ button {
 .date-line,
 .product-section h1,
 .product-section h2,
+.module-section-heading h1,
 .signature > span,
 .product-section p {
   margin: 0;
@@ -458,7 +460,8 @@ button {
 }
 
 .product-section h1,
-.product-section h2 {
+.product-section h2,
+.module-section-heading h1 {
   color: var(--mineral);
   font-size: 13px;
   font-weight: 500;
@@ -1892,6 +1895,74 @@ button.profile-identity {
 .quick-links button:hover .quick-link-arrow,
 .quick-links button:focus-visible .quick-link-arrow {
   color: inherit;
+}
+
+/* --- Module collapse (v1.3.0-D1) ------------------------------------------- */
+
+/*
+ * The shared collapsible container (`ModuleSection.vue`). The header is the
+ * module's ONE heading row: the container hosts the module's own heading
+ * elements (Todo's `h1` renders here through the title slot), which is why
+ * the heading styles above extend `.module-section-heading h1` alongside
+ * `.product-section h1`. The body is the `v-show` wrapper; collapsing it
+ * leaves only the header, so a collapsed module shrinks to its header with
+ * no extra height, no new min-height, and no change to its grid placement.
+ * The toggle sits in the heading's actions group; the `button.` prefix keeps
+ * it ahead of the generic `.quick-links button` rule when the container
+ * carries that class.
+ */
+button.module-section-toggle {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  color: var(--faint);
+  background: transparent;
+  cursor: pointer;
+}
+
+button.module-section-toggle:hover,
+button.module-section-toggle:focus-visible {
+  color: var(--mineral);
+  outline: none;
+}
+
+/* Expanded shows the collapse chevron (up); collapsed shows the expand
+   chevron (down). A static transform, deliberately no transition. */
+.module-section-chevron {
+  width: 12px;
+  height: 12px;
+  transform: rotate(180deg);
+}
+
+.module-section--collapsed .module-section-chevron {
+  transform: none;
+}
+
+/*
+ * Todo's collapse header inherits the inset the today-section used to carry
+ * above its heading — the same top padding the per-mode `.product-section`
+ * rules own — and the body's first section gives up its own top inset, so the
+ * expanded rhythm and the total height stay exactly what they were.
+ */
+.todo-module > .module-section-heading {
+  padding: 42px 2px 0;
+}
+
+.todo-module .module-section-body > .product-section:first-child {
+  padding-top: 0;
+}
+
+.mode-sidebar .todo-module > .module-section-heading {
+  padding-top: 38px;
+}
+
+.mode-desktop .todo-module > .module-section-heading {
+  padding-top: 36px;
 }
 
 @media (max-width: 440px) {

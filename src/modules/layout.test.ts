@@ -6,6 +6,7 @@ import {
   hasColumnSpan,
   resolveDashboardLayout,
   resolveModuleLayout,
+  setModuleCollapsed,
   type LayoutEntry,
 } from "./layout";
 
@@ -219,6 +220,189 @@ describe("hasColumnSpan", () => {
         ])),
       ),
     ).toBe(false);
+  });
+
+  it("is independent of the collapsed state (D1)", () => {
+    const collapsed = resolveModuleLayout({
+      version: 1,
+      entries: [
+        { id: "weather", order: 0, colSpan: 2, collapsed: true },
+        { id: "todo", order: 1, colSpan: 1, collapsed: true },
+      ],
+    });
+    expect(hasColumnSpan(collapsed)).toBe(true);
+    // Collapsing the only spanned module must not deactivate the two-column
+    // canvas: the span preference and the collapse preference are independent.
+    const collapsedSpan = resolveModuleLayout({
+      version: 1,
+      entries: [{ id: "weather", order: 0, colSpan: 2, collapsed: true }],
+    });
+    expect(hasColumnSpan(collapsedSpan)).toBe(true);
+  });
+});
+
+describe("collapsed state in the resolved layout (D1)", () => {
+  it("resolves entries without a collapsed member to expanded", () => {
+    const layout = resolveModuleLayout(
+      storedLayout([
+        ["weather", 0, 1],
+        ["todo", 1, 1],
+      ]),
+    );
+    for (const entry of layout.entries) {
+      expect(entry.collapsed).toBeUndefined();
+    }
+    // The default layout stays exactly the shape it always had.
+    expect(DEFAULT_MODULE_LAYOUT.entries.every((entry) => entry.collapsed === undefined)).toBe(
+      true,
+    );
+  });
+
+  it("keeps a stored collapsed flag through normalization, first occurrence winning", () => {
+    const layout = resolveModuleLayout({
+      version: 1,
+      entries: [
+        { id: "todo", order: 1, colSpan: 1, collapsed: true },
+        { id: "todo", order: 0, colSpan: 1, collapsed: false },
+        { id: "shortcuts", order: 2, colSpan: 1, collapsed: true },
+      ],
+    });
+    expect(layout.entries.find((entry) => entry.id === "todo")?.collapsed).toBe(true);
+    expect(layout.entries.find((entry) => entry.id === "shortcuts")?.collapsed).toBe(true);
+  });
+
+  it("falls back non-boolean and false collapsed values to expanded", () => {
+    const layout = resolveModuleLayout({
+      version: 1,
+      entries: [
+        { id: "todo", order: 0, colSpan: 1, collapsed: "yes" },
+        { id: "shortcuts", order: 1, colSpan: 1, collapsed: false },
+        { id: "weather", order: 2, colSpan: 1, collapsed: null },
+      ],
+    });
+    for (const entry of layout.entries) {
+      expect(entry.collapsed).toBeUndefined();
+    }
+  });
+});
+
+describe("setModuleCollapsed (D1 raw-document patch)", () => {
+  /** A raw stored document with unknown members at every level. */
+  function rawDocument() {
+    return {
+      version: 1,
+      futureRoot: { mode: "something-new" },
+      entries: [
+        { id: "github", order: 0, colSpan: 1, pinned: true },
+        { id: "weather", order: 1, colSpan: 2, note: { deep: [1, 2] } },
+        { id: "todo", order: 2, colSpan: 1, futureEntryField: "kept" },
+      ],
+    };
+  }
+
+  it("toggles only the target entry's collapsed member, preserving the raw document", () => {
+    const raw = rawDocument();
+    const patch = setModuleCollapsed(raw, "todo", true);
+    expect(patch).not.toBeNull();
+    // The whole raw document, value for value — unknown root field, unknown
+    // entry, unknown per-entry fields — with exactly one change.
+    expect(patch).toEqual({
+      version: 1,
+      futureRoot: { mode: "something-new" },
+      entries: [
+        { id: "github", order: 0, colSpan: 1, pinned: true },
+        { id: "weather", order: 1, colSpan: 2, note: { deep: [1, 2] } },
+        { id: "todo", order: 2, colSpan: 1, futureEntryField: "kept", collapsed: true },
+      ],
+    });
+  });
+
+  it("does not change the target entry's order or colSpan", () => {
+    const patch = setModuleCollapsed(rawDocument(), "weather", true);
+    const weather = patch?.entries.find((entry) => entry.id === "weather");
+    expect(weather?.order).toBe(1);
+    expect(weather?.colSpan).toBe(2);
+  });
+
+  it("never mutates its input", () => {
+    const raw = rawDocument();
+    setModuleCollapsed(raw, "todo", true);
+    expect(raw).toEqual(rawDocument());
+    expect(
+      (raw.entries.find((entry) => entry.id === "todo") as Record<string, unknown>).collapsed,
+    ).toBeUndefined();
+  });
+
+  it("toggling back to expanded writes an explicit false", () => {
+    const collapsed = setModuleCollapsed(rawDocument(), "todo", true);
+    const expanded = setModuleCollapsed(collapsed, "todo", false);
+    const todo = expanded?.entries.find((entry) => entry.id === "todo");
+    expect(todo?.collapsed).toBe(false);
+  });
+
+  it("appends a complete entry for a missing known module, without touching unrelated entries", () => {
+    const partial = {
+      version: 1,
+      entries: [{ id: "shortcuts", order: 0, colSpan: 1 }],
+    };
+    const patch = setModuleCollapsed(partial, "todo", true);
+    // The resolver places the missing todo after the stored shortcuts entry
+    // and the also-missing weather module (projection order); the appended
+    // entry carries that resolved position and a full shape — never a partial
+    // `{ id, collapsed }`, which the backend merge would treat as erasing the
+    // entry's span.
+    expect(patch).toEqual({
+      version: 1,
+      entries: [
+        { id: "shortcuts", order: 0, colSpan: 1 },
+        { id: "todo", order: 2, colSpan: 1, collapsed: true },
+      ],
+    });
+  });
+
+  it("builds a complete document from a missing stored layout", () => {
+    // Nothing stored is the generalization of the missing-entry rule: there
+    // is provably nothing to preserve, so the patch is the complete default
+    // layout with exactly one collapse change.
+    for (const missing of [undefined, null]) {
+      const patch = setModuleCollapsed(missing, "shortcuts", true);
+      expect(patch).toEqual({
+        version: 1,
+        entries: [
+          { id: "weather", order: 0, colSpan: 1 },
+          { id: "todo", order: 1, colSpan: 1 },
+          { id: "shortcuts", order: 2, colSpan: 1, collapsed: true },
+        ],
+      });
+    }
+  });
+
+  it("rejects non-version-1 documents: no patch is built for an opaque layout", () => {
+    const future = { version: 2, entries: [], futureField: { mode: "something-new" } };
+    expect(setModuleCollapsed(future, "todo", true)).toBeNull();
+    expect(setModuleCollapsed({ entries: [] }, "todo", true)).toBeNull();
+    expect(setModuleCollapsed("not-an-object", "todo", true)).toBeNull();
+    // A v1-shaped header over a non-array entries list is corruption, not a
+    // mergeable document; refusing it keeps the fail-closed shape gate.
+    expect(setModuleCollapsed({ version: 1, entries: "junk" }, "todo", true)).toBeNull();
+  });
+
+  it("toggles the first occurrence of a duplicated known id and preserves the rest", () => {
+    const duplicate = {
+      version: 1,
+      entries: [
+        { id: "todo", order: 0, colSpan: 2 },
+        { id: "todo", order: 1, colSpan: 1 },
+      ],
+    };
+    const patch = setModuleCollapsed(duplicate, "todo", true);
+    expect(patch).toEqual({
+      version: 1,
+      entries: [
+        { id: "todo", order: 0, colSpan: 2, collapsed: true },
+        { id: "todo", order: 1, colSpan: 1 },
+      ],
+    });
   });
 });
 

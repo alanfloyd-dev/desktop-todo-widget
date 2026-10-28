@@ -275,8 +275,9 @@ impl ModuleLayout {
     /// it and is refused instead of guessed at.
     ///
     /// The returned error leaves the caller's stored state untouched: the
-    /// command computes the merge from its pre-update snapshot, before any
-    /// mutation or persistence.
+    /// command computes the merge inside its update transaction — against the
+    /// document under the settings lock, never a pre-update snapshot (the D1
+    /// concurrency gate) — before any mutation or persistence.
     pub fn merged_with(&self, patch: ModuleLayout) -> Result<ModuleLayout, String> {
         match (self, patch) {
             (ModuleLayout::V1(stored), ModuleLayout::V1(patch)) => {
@@ -866,9 +867,30 @@ impl AppState {
         &self,
         update: impl FnOnce(&mut ProductSettings),
     ) -> Result<ProductSettings, String> {
+        self.update_checked(|settings| {
+            update(settings);
+            Ok(())
+        })
+    }
+
+    /// [`Self::update`] for mutations that can themselves refuse to proceed.
+    ///
+    /// The same critical section with one extra guarantee: a closure that
+    /// returns `Err` aborts the transaction before normalize, serialize, and
+    /// persist run, so memory and disk both stay exactly at the pre-call
+    /// state — a refused mutation can never leave a half-applied candidate
+    /// behind. This is what lets the settings command compute its module
+    /// layout merge *inside* the transaction (against the locked document,
+    /// never a pre-update snapshot) and still fail closed on a version
+    /// conflict: the error propagates out of the closure, and nothing was
+    /// written anywhere.
+    pub fn update_checked(
+        &self,
+        update: impl FnOnce(&mut ProductSettings) -> Result<(), String>,
+    ) -> Result<ProductSettings, String> {
         let mut settings = self.settings.lock().map_err(|_| "settings lock poisoned")?;
         let mut candidate = settings.clone();
-        update(&mut candidate);
+        update(&mut candidate)?;
         candidate.normalize();
         let document = serde_json::to_string(&candidate).map_err(|error| error.to_string())?;
         self.database.set_setting(PRODUCT_SETTINGS_KEY, &document)?;
@@ -2713,6 +2735,196 @@ mod tests {
             r#"{"moduleLayout":{"version":1,"entries":[42]}}"#,
         );
         assert!(parsed.is_err(), "malformed v1 entries must fail, not default");
+    }
+
+    // --- Module collapse (v1.3.0-D1) ------------------------------------------
+
+    /// The collapse flag is a per-entry unknown field to this build: it rides
+    /// `LayoutEntry.extra` through the load → persist cycle exactly like any
+    /// other future-version member, with no schema change and no logic here.
+    #[test]
+    fn collapsed_flag_round_trips_as_an_entry_extra_field() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"moduleLayout":{"version":1,"entries":[
+                    {"id":"weather","order":0,"colSpan":1},
+                    {"id":"todo","order":1,"colSpan":1,"collapsed":true}
+                ]}}"#,
+            )
+            .expect("layout with collapse flag");
+        let state = AppState::load(database).expect("load");
+        let ModuleLayout::V1(document) = &state.snapshot().expect("snapshot").module_layout else {
+            panic!("expected a version-1 document");
+        };
+        let todo = document
+            .entries
+            .iter()
+            .find(|entry| entry.id == "todo")
+            .expect("todo entry");
+        assert_eq!(todo.extra.get("collapsed"), Some(&serde_json::json!(true)));
+        assert_eq!(todo.order, Some(serde_json::Number::from(1)));
+        assert_eq!(todo.col_span, Some(1));
+        // Serialized back into the stored document the flag keeps its name.
+        let stored = stored_document(&state.database);
+        assert_eq!(
+            stored["moduleLayout"]["entries"][1]["collapsed"],
+            serde_json::json!(true)
+        );
+    }
+
+    /// A settings save that does not change the layout — both the updates
+    /// that carry no layout member at all and the pass-through of the stored
+    /// document the Settings panel performs — must keep the collapse flag and
+    /// every stored entry byte-exact.
+    #[test]
+    fn unrelated_settings_patches_preserve_the_collapse_flag() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"moduleLayout":{"version":1,"entries":[
+                    {"id":"todo","order":1,"colSpan":1,"collapsed":true},
+                    {"id":"github","order":3,"colSpan":1,"source":"https://example.com/repo"}
+                ]}}"#,
+            )
+            .expect("layout with collapse flag");
+        let state = AppState::load(database).expect("load");
+        state
+            .update(|settings| {
+                settings.day_rollover = "05:00".into();
+            })
+            .expect("unrelated update");
+        let stored = stored_document(&state.database);
+        assert_eq!(stored["dayRollover"], serde_json::json!("05:00"));
+        let entries = stored["moduleLayout"]["entries"].as_array().expect("entries");
+        assert_eq!(entries[0]["collapsed"], serde_json::json!(true));
+        assert_eq!(entries[1]["source"], "https://example.com/repo");
+
+        // The merge path: a patch naming only `weather` leaves the collapsed
+        // entry — and the unknown entry — verbatim, in stored order.
+        let ModuleLayout::V1(stored_layout) = state.snapshot().expect("snapshot").module_layout
+        else {
+            panic!("expected a version-1 document");
+        };
+        let ModuleLayout::V1(merged) = ModuleLayout::V1(stored_layout)
+            .merged_with(ModuleLayout::V1(ModuleLayoutV1 {
+                entries: vec![LayoutEntry::new("weather", 0, 1)],
+                ..ModuleLayoutV1::default()
+            }))
+            .expect("merge")
+        else {
+            panic!("v1 merge must yield a version-1 document");
+        };
+        assert_eq!(merged.entries.len(), 3);
+        assert_eq!(
+            merged.entries[1].extra.get("collapsed"),
+            Some(&serde_json::json!(true)),
+            "the unnamed collapsed entry must survive the merge"
+        );
+        assert_eq!(merged.entries[2].id, "github");
+    }
+
+    /// A full-entry collapse patch — the shape the frontend's
+    /// `setModuleCollapsed` builds — rewrites exactly the named entry: the
+    /// patch's order and colSpan survive the merge, the collapse flag lands
+    /// in the entry's extras, and every other entry is untouched. The negative
+    /// half pins why the frontend must never send a partial entry: a patch
+    /// entry carrying only `id` and `collapsed` would overwrite order and
+    /// colSpan with nothing.
+    #[test]
+    fn full_entry_collapse_patch_preserves_order_and_span() {
+        let stored = ModuleLayoutV1 {
+            entries: vec![
+                LayoutEntry::new("weather", 0, 1),
+                LayoutEntry::new("todo", 4, 2),
+            ],
+            ..ModuleLayoutV1::default()
+        };
+        let collapse_patch = |order: Option<serde_json::Number>,
+                              col_span: Option<u8>,
+                              collapsed: Option<serde_json::Value>|
+         -> ModuleLayoutV1 {
+            let mut extra = std::collections::BTreeMap::new();
+            if let Some(flag) = collapsed {
+                extra.insert("collapsed".to_string(), flag);
+            }
+            ModuleLayoutV1 {
+                entries: vec![LayoutEntry {
+                    id: "todo".to_string(),
+                    order,
+                    col_span,
+                    extra,
+                }],
+                ..ModuleLayoutV1::default()
+            }
+        };
+
+        let ModuleLayout::V1(merged) = ModuleLayout::V1(stored.clone())
+            .merged_with(ModuleLayout::V1(collapse_patch(
+                Some(serde_json::Number::from(4)),
+                Some(2),
+                Some(serde_json::json!(true)),
+            )))
+            .expect("merge")
+        else {
+            panic!("v1 merge must yield a version-1 document");
+        };
+        assert_eq!(merged.entries.len(), 2, "the unnamed weather entry survives");
+        let todo = merged.entries.iter().find(|entry| entry.id == "todo").expect("todo");
+        assert_eq!(todo.order, Some(serde_json::Number::from(4)));
+        assert_eq!(todo.col_span, Some(2));
+        assert_eq!(todo.extra.get("collapsed"), Some(&serde_json::json!(true)));
+
+        // The partial-entry hazard: only `id` and `collapsed` erases the
+        // known members. Documented behavior the frontend patch builder is
+        // contractually required to avoid.
+        let ModuleLayout::V1(merged) = ModuleLayout::V1(stored)
+            .merged_with(ModuleLayout::V1(collapse_patch(
+                None,
+                None,
+                Some(serde_json::json!(false)),
+            )))
+            .expect("merge")
+        else {
+            panic!("v1 merge must yield a version-1 document");
+        };
+        let todo = merged.entries.iter().find(|entry| entry.id == "todo").expect("todo");
+        assert_eq!(todo.order, None, "a partial patch erases order");
+        assert_eq!(todo.col_span, None, "a partial patch erases colSpan");
+    }
+
+    /// `update_checked` is `update` plus a refusal lane: a closure that
+    /// returns `Err` aborts the transaction before normalize, serialize, and
+    /// persist run, so memory and disk keep the exact pre-call state — a
+    /// refused merge can never leave a half-applied candidate behind. An `Ok`
+    /// closure behaves exactly like `update`.
+    #[test]
+    fn update_checked_aborts_on_a_refused_mutation() {
+        let state = AppState::load(Database::in_memory().expect("database")).expect("state");
+        let error = state
+            .update_checked(|_settings| Err("merge refused".to_string()))
+            .expect_err("refusal propagates");
+        assert_eq!(error, "merge refused");
+        // Memory: the pre-call snapshot, untouched by the half-run closure.
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.mode, ProductWindowMode::Floating);
+        assert!(!snapshot.locked);
+
+        // An accepting mutation persists exactly like `update`.
+        state
+            .update_checked(|settings| {
+                settings.locked = true;
+                Ok(())
+            })
+            .expect("accepting mutation");
+        let stored = state
+            .database
+            .setting("product_settings")
+            .expect("stored")
+            .expect("value");
+        assert!(stored.contains("\"locked\":true"));
     }
 
     /// Documents that are not provably version 1 — a version 2, a missing

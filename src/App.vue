@@ -20,7 +20,14 @@ import { createI18n, normalizeLanguage, provideI18n } from "./i18n";
 import { browserWeatherState, createWeatherController, type WeatherMessage } from "./modules/weather/controller";
 import { openQuickLink as openQuickLinkCommand, type ShortcutsBridge } from "./modules/shortcuts/bridge";
 import { isModuleEnabled, resolveModuleVisibility, type ModuleVisibility } from "./modules/registry";
-import { DEFAULT_MODULE_LAYOUT, resolveModuleLayout, type ModuleLayout } from "./modules/layout";
+import {
+  DEFAULT_MODULE_LAYOUT,
+  resolveModuleLayout,
+  setModuleCollapsed,
+  type DashboardModuleId,
+  type ModuleLayout,
+} from "./modules/layout";
+import { createSerialQueue } from "./modules/shared/serialQueue";
 import type {
   AppearanceProfiles,
   AppearanceSettings,
@@ -215,6 +222,17 @@ function browserState(): ProductViewState {
       entries: [
         { id: "github", order: 0, colSpan: 1 },
         { id: "todo", order: 1, colSpan: 1 },
+      ],
+    },
+    // D1 preview seam: a stored collapse flag on the todo entry, so the
+    // collapsed presentation is inspectable in the plain browser without
+    // touching any persisted settings.
+    "todo-collapsed": {
+      version: 1,
+      entries: [
+        { id: "weather", order: 0, colSpan: 1 },
+        { id: "todo", order: 1, colSpan: 1, collapsed: true },
+        { id: "shortcuts", order: 2, colSpan: 1 },
       ],
     },
     duplicate: {
@@ -462,6 +480,65 @@ async function openQuickLink(id: string) {
   }
 }
 
+/**
+ * The one collapse path for a dashboard module (D1).
+ *
+ * The patch is built from the RAW stored layout document —
+ * `state.settings.moduleLayout`, exactly what the backend persists — through
+ * `setModuleCollapsed`, never from the resolved `moduleLayout` view above:
+ * the resolved view is a projection that drops unknown entries and fields,
+ * and a patch that dropped them would erase them from storage. The command is
+ * the same `update_product_settings` path every settings write uses, with a
+ * patch that names only `moduleLayout`; the backend returns the full product
+ * state, which becomes the next `state` exactly as `saveSettings` does.
+ *
+ * Toggles serialize through `moduleCollapseQueue` (the D1 concurrency gate):
+ * a click issued while the previous response is still in flight must not
+ * build its patch from the same pre-toggle document — both would compute the
+ * same change and one click would be lost. Held behind the queue, each patch
+ * is built from the state the previous response has already applied.
+ *
+ * A stored document that is not provably version 1 (an opaque future format)
+ * produces no patch and no write: the opaque document is never overwritten
+ * and the collapse stays unapplied. The browser preview applies the same
+ * document to its draft state, mirroring `saveSettings`'s local path.
+ */
+const moduleCollapseQueue = createSerialQueue();
+
+function toggleModuleCollapsed(id: DashboardModuleId) {
+  return moduleCollapseQueue(() => applyModuleCollapsed(id));
+}
+
+async function applyModuleCollapsed(id: DashboardModuleId) {
+  const collapsedNow =
+    moduleLayout.value.entries.find((entry) => entry.id === id)?.collapsed === true;
+  const patchDocument = setModuleCollapsed(
+    state.value.settings.moduleLayout,
+    id,
+    !collapsedNow,
+  );
+  if (!patchDocument) return;
+  if (!nativeBridgeAvailable) {
+    Object.assign(state.value.settings, { moduleLayout: patchDocument });
+    return;
+  }
+  try {
+    state.value = await invoke<ProductViewState>("update_product_settings", {
+      patch: { moduleLayout: patchDocument },
+    });
+  } catch (reason) {
+    error.value = String(reason);
+  }
+}
+
+/**
+ * The Settings panel's save path.
+ *
+ * The patch carries no `moduleLayout` on purpose (the D1 concurrency gate):
+ * absent means "no change" on the backend, which preserves the stored
+ * document — including any collapse committed between the panel opening and
+ * saving — without depending on the payload echoing a possibly stale copy.
+ */
 async function saveSettings(patch: {
   dayRollover: string;
   weatherLocationLabel: string;
@@ -478,7 +555,6 @@ async function saveSettings(patch: {
   avatarAssetId: string | null;
   quickLinks: QuickLink[];
   moduleVisibility: ModuleVisibility;
-  moduleLayout: ModuleLayout;
 }) {
   const active = state.value.settings;
   const weatherIdentityChanged =
@@ -638,6 +714,7 @@ onBeforeUnmount(() => {
         :weather-message="weatherMessage"
         @open-quick-link="openQuickLink"
         @collapse="runAction('floating.collapse')"
+        @toggle-module="toggleModuleCollapsed"
         @open-settings="runAction('settings')"
         @configure-weather="openWeatherSettings"
         @refresh-weather="refreshWeather(true)"

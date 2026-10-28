@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useI18n } from "../../i18n";
 import { qaTrace } from "../../qa-trace";
+import ModuleSection from "../shared/ModuleSection.vue";
 
 type TaskStatus = "pending" | "completed" | "cancelled" | "carried";
 
@@ -38,10 +39,15 @@ const props = withDefaults(
     nativeBridgeAvailable: boolean;
     /** Whether the Review overlay entry is offered in this panel's heading. */
     showReviewEntry?: boolean;
+    /**
+     * The stored collapse state, owned by the app's layout document (D1).
+     * Purely presentational here: the panel never unmounts when collapsed.
+     */
+    collapsed?: boolean;
   }>(),
-  { showReviewEntry: true },
+  { showReviewEntry: true, collapsed: false },
 );
-const emit = defineEmits<{ error: [message: string]; openReview: [] }>();
+const emit = defineEmits<{ error: [message: string]; openReview: []; toggle: [] }>();
 const { t, intlLocale } = useI18n();
 
 function formatTaskDay(value: string) {
@@ -455,176 +461,193 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="product-section today-section" aria-labelledby="today-title">
-    <div class="section-heading">
+  <!--
+    The shared collapsible container (D1). The panel's own heading row — the
+    title, the task-day label, and the Review entry — renders through the
+    container's header slots, so there is exactly one heading in every collapse
+    state and no duplicated title. The `today-title` id stays on the `h1`, so
+    the section's `aria-labelledby` still resolves to it from the header.
+    Collapse is visibility-only: both sections stay mounted with their draft,
+    category composer, and drag listeners intact.
+  -->
+  <ModuleSection
+    class="todo-module"
+    :title="t('today.title')"
+    :module-name="t('modules.todo')"
+    :collapsed="collapsed"
+    @toggle="emit('toggle')"
+  >
+    <template #title>
       <h1 id="today-title">{{ t("today.title") }}</h1>
-      <div class="section-heading-actions">
-        <span>{{ taskDayLabel }}</span>
-        <button
-          v-if="showReviewEntry"
-          type="button"
-          class="review-entry"
-          @click="emit('openReview')"
-        >
-          {{ t("today.reviewEntry") }}
-        </button>
-      </div>
-    </div>
-
-    <div v-if="reviewTasks.length" class="previous-review">
-      <p>{{ t("today.previousUnfinished", { count: reviewTasks.length, date: state.previousTaskDay }) }}</p>
-      <div v-for="task in reviewTasks" :key="task.id" class="review-row">
-        <span>{{ task.title }}</span>
-        <div>
-          <button type="button" @click="carryTask(task, true)">{{ t("today.previousCarry") }}</button>
-          <button type="button" @click="keepPrevious(task)">{{ t("today.previousKeep") }}</button>
-          <button type="button" @click="cancelTask(task, true)">{{ t("today.previousCancel") }}</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="task-list" aria-live="polite">
-      <article
-        v-for="task in pending"
-        :key="task.id"
-        class="task-row pending-row"
-        :data-task-id="task.id"
-      >
-        <span
-          class="task-drag-handle"
-          :aria-label="t('task.dragHandle')"
-          :title="t('task.dragHandleTitle')"
-          @pointerdown="dragPointerDown(task, $event)"
-        >⋮⋮</span>
-        <button
-          class="task-check"
-          type="button"
-          :aria-label="t('task.completeAriaLabel')"
-          @click="toggleComplete(task)"
-        ></button>
-        <template v-if="editingId === task.id">
-          <div class="task-editing">
-            <input
-              v-model="editTitle"
-              :aria-label="t('task.titleAriaLabel')"
-              @keydown.enter.prevent="saveEdit(task)"
-              @keydown.esc.prevent="cancelEdit"
-            />
-            <select v-model="editCategoryId" :aria-label="t('task.categoryAriaLabel')">
-              <option value="">{{ t("task.noCategory") }}</option>
-              <option v-for="category in state.categories" :key="category.id" :value="category.id">
-                {{ category.name }}
-              </option>
-            </select>
-          </div>
-        </template>
-        <div v-else class="task-copy" @dblclick="beginEdit(task)">
-          <span>{{ task.title }}</span>
-          <small v-if="task.categoryName">{{ task.categoryName }}</small>
-        </div>
-        <div class="task-actions">
-          <button type="button" @click="beginEdit(task)">{{ t("task.action.edit") }}</button>
-          <button type="button" @click="carryTask(task)">{{ t("task.action.carry") }}</button>
-          <button type="button" @click="cancelTask(task)">{{ t("task.action.cancel") }}</button>
-          <button type="button" @click="removeTask(task)">{{ t("task.action.delete") }}</button>
-        </div>
-      </article>
-
-      <article v-for="task in completed" :key="task.id" class="task-row task-completed">
-        <button
-          class="task-check checked"
-          type="button"
-          :aria-label="t('task.reopenAriaLabel')"
-          @click="toggleComplete(task)"
-        >✓</button>
-        <div class="task-copy">
-          <span>{{ task.title }}</span>
-          <small v-if="task.categoryName">{{ task.categoryName }}</small>
-        </div>
-        <div class="task-actions">
-          <button type="button" @click="removeTask(task)">{{ t("task.action.delete") }}</button>
-        </div>
-      </article>
-    </div>
-
-    <p v-if="!state.tasks.length" class="todo-empty">{{ t("todo.empty") }}</p>
-
-    <!--
-      One submit control: the leading `＋` *is* the button, so clicking the
-      affordance the user sees and pressing Enter in the field both go through this
-      form's `@submit`. There is deliberately no second "Add" button beside it.
-      The accessible name carries the meaning the glyph cannot ("Add task" /
-      "添加任务"); the visible UI stays exactly one glyph.
-    -->
-    <form class="task-add" @submit.prevent="submitNewTask">
+    </template>
+    <template #actions>
+      <span>{{ taskDayLabel }}</span>
       <button
-        type="submit"
-        class="add-submit"
-        :aria-label="t('task.addSubmitAriaLabel')"
-        :title="t('task.addSubmitAriaLabel')"
-        @click="qaTrace('add_submit_click')"
-      >＋</button>
-      <input
-        ref="addInput"
-        v-model="newTitle"
-        :aria-label="t('task.addAriaLabel')"
-        :placeholder="t('task.addPlaceholder')"
-        @keydown="traceAddKey"
-        @keydown.enter="addSubmitFromInput"
-        @click="qaTrace('add_submit_click')"
-      />
-      <select v-model="newCategoryId" :aria-label="t('task.newCategoryAriaLabel')">
-        <option value="">{{ t("task.noCategory") }}</option>
-        <option v-for="category in state.categories" :key="category.id" :value="category.id">
-          {{ category.name }}
-        </option>
-      </select>
-      <button
+        v-if="showReviewEntry"
         type="button"
-        class="category-add"
-        :aria-label="t('category.createAriaLabel')"
-        @click="openCategoryComposer"
-      >{{ t("category.add") }}</button>
-    </form>
+        class="review-entry"
+        @click="emit('openReview')"
+      >
+        {{ t("today.reviewEntry") }}
+      </button>
+    </template>
 
-    <form v-if="categoryComposerOpen" class="category-composer" @submit.prevent="createCategory">
-      <input
-        ref="categoryInput"
-        v-model="categoryName"
-        :aria-label="t('category.nameAriaLabel')"
-        :placeholder="t('category.namePlaceholder')"
-        @keydown.enter.prevent="createCategory"
-        @keydown.esc.prevent="categoryComposerOpen = false"
-      />
-      <button type="submit">{{ t("category.create") }}</button>
-      <button type="button" @click="categoryComposerOpen = false">{{ t("category.cancel") }}</button>
-    </form>
-
-    <details v-if="history.length" class="task-history">
-      <summary>{{ t("task.historySummary", { count: history.length }) }}</summary>
-      <article v-for="task in history" :key="task.id" class="task-row history-row">
-        <span class="history-mark">{{ task.status === "carried" ? "→" : "×" }}</span>
-        <div class="task-copy">
+    <section class="product-section today-section" aria-labelledby="today-title">
+      <div v-if="reviewTasks.length" class="previous-review">
+        <p>{{ t("today.previousUnfinished", { count: reviewTasks.length, date: state.previousTaskDay }) }}</p>
+        <div v-for="task in reviewTasks" :key="task.id" class="review-row">
           <span>{{ task.title }}</span>
-          <small>{{ taskStatusLabel(task.status) }}</small>
+          <div>
+            <button type="button" @click="carryTask(task, true)">{{ t("today.previousCarry") }}</button>
+            <button type="button" @click="keepPrevious(task)">{{ t("today.previousKeep") }}</button>
+            <button type="button" @click="cancelTask(task, true)">{{ t("today.previousCancel") }}</button>
+          </div>
         </div>
-        <div class="task-actions">
-          <button type="button" @click="removeTask(task)">{{ t("task.action.delete") }}</button>
-        </div>
-      </article>
-    </details>
-  </section>
+      </div>
 
-  <section class="product-section month-section" aria-labelledby="month-title">
-    <h2 id="month-title">{{ t("month.title") }}</h2>
-    <p>
-      {{
-        t("month.summary", {
-          month: monthLabel,
-          completed: state.monthSummary.completed,
-          carried: state.monthSummary.carried,
-        })
-      }}
-    </p>
-  </section>
+      <div class="task-list" aria-live="polite">
+        <article
+          v-for="task in pending"
+          :key="task.id"
+          class="task-row pending-row"
+          :data-task-id="task.id"
+        >
+          <span
+            class="task-drag-handle"
+            :aria-label="t('task.dragHandle')"
+            :title="t('task.dragHandleTitle')"
+            @pointerdown="dragPointerDown(task, $event)"
+          >⋮⋮</span>
+          <button
+            class="task-check"
+            type="button"
+            :aria-label="t('task.completeAriaLabel')"
+            @click="toggleComplete(task)"
+          ></button>
+          <template v-if="editingId === task.id">
+            <div class="task-editing">
+              <input
+                v-model="editTitle"
+                :aria-label="t('task.titleAriaLabel')"
+                @keydown.enter.prevent="saveEdit(task)"
+                @keydown.esc.prevent="cancelEdit"
+              />
+              <select v-model="editCategoryId" :aria-label="t('task.categoryAriaLabel')">
+                <option value="">{{ t("task.noCategory") }}</option>
+                <option v-for="category in state.categories" :key="category.id" :value="category.id">
+                  {{ category.name }}
+                </option>
+              </select>
+            </div>
+          </template>
+          <div v-else class="task-copy" @dblclick="beginEdit(task)">
+            <span>{{ task.title }}</span>
+            <small v-if="task.categoryName">{{ task.categoryName }}</small>
+          </div>
+          <div class="task-actions">
+            <button type="button" @click="beginEdit(task)">{{ t("task.action.edit") }}</button>
+            <button type="button" @click="carryTask(task)">{{ t("task.action.carry") }}</button>
+            <button type="button" @click="cancelTask(task)">{{ t("task.action.cancel") }}</button>
+            <button type="button" @click="removeTask(task)">{{ t("task.action.delete") }}</button>
+          </div>
+        </article>
+
+        <article v-for="task in completed" :key="task.id" class="task-row task-completed">
+          <button
+            class="task-check checked"
+            type="button"
+            :aria-label="t('task.reopenAriaLabel')"
+            @click="toggleComplete(task)"
+          >✓</button>
+          <div class="task-copy">
+            <span>{{ task.title }}</span>
+            <small v-if="task.categoryName">{{ task.categoryName }}</small>
+          </div>
+          <div class="task-actions">
+            <button type="button" @click="removeTask(task)">{{ t("task.action.delete") }}</button>
+          </div>
+        </article>
+      </div>
+
+      <p v-if="!state.tasks.length" class="todo-empty">{{ t("todo.empty") }}</p>
+
+      <!--
+        One submit control: the leading `＋` *is* the button, so clicking the
+        affordance the user sees and pressing Enter in the field both go through this
+        form's `@submit`. There is deliberately no second "Add" button beside it.
+        The accessible name carries the meaning the glyph cannot ("Add task" /
+        "添加任务"); the visible UI stays exactly one glyph.
+      -->
+      <form class="task-add" @submit.prevent="submitNewTask">
+        <button
+          type="submit"
+          class="add-submit"
+          :aria-label="t('task.addSubmitAriaLabel')"
+          :title="t('task.addSubmitAriaLabel')"
+          @click="qaTrace('add_submit_click')"
+        >＋</button>
+        <input
+          ref="addInput"
+          v-model="newTitle"
+          :aria-label="t('task.addAriaLabel')"
+          :placeholder="t('task.addPlaceholder')"
+          @keydown="traceAddKey"
+          @keydown.enter="addSubmitFromInput"
+          @click="qaTrace('add_submit_click')"
+        />
+        <select v-model="newCategoryId" :aria-label="t('task.newCategoryAriaLabel')">
+          <option value="">{{ t("task.noCategory") }}</option>
+          <option v-for="category in state.categories" :key="category.id" :value="category.id">
+            {{ category.name }}
+          </option>
+        </select>
+        <button
+          type="button"
+          class="category-add"
+          :aria-label="t('category.createAriaLabel')"
+          @click="openCategoryComposer"
+        >{{ t("category.add") }}</button>
+      </form>
+
+      <form v-if="categoryComposerOpen" class="category-composer" @submit.prevent="createCategory">
+        <input
+          ref="categoryInput"
+          v-model="categoryName"
+          :aria-label="t('category.nameAriaLabel')"
+          :placeholder="t('category.namePlaceholder')"
+          @keydown.enter.prevent="createCategory"
+          @keydown.esc.prevent="categoryComposerOpen = false"
+        />
+        <button type="submit">{{ t("category.create") }}</button>
+        <button type="button" @click="categoryComposerOpen = false">{{ t("category.cancel") }}</button>
+      </form>
+
+      <details v-if="history.length" class="task-history">
+        <summary>{{ t("task.historySummary", { count: history.length }) }}</summary>
+        <article v-for="task in history" :key="task.id" class="task-row history-row">
+          <span class="history-mark">{{ task.status === "carried" ? "→" : "×" }}</span>
+          <div class="task-copy">
+            <span>{{ task.title }}</span>
+            <small>{{ taskStatusLabel(task.status) }}</small>
+          </div>
+          <div class="task-actions">
+            <button type="button" @click="removeTask(task)">{{ t("task.action.delete") }}</button>
+          </div>
+        </article>
+      </details>
+    </section>
+
+    <section class="product-section month-section" aria-labelledby="month-title">
+      <h2 id="month-title">{{ t("month.title") }}</h2>
+      <p>
+        {{
+          t("month.summary", {
+            month: monthLabel,
+            completed: state.monthSummary.completed,
+            carried: state.monthSummary.carried,
+          })
+        }}
+      </p>
+    </section>
+  </ModuleSection>
 </template>

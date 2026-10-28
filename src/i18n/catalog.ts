@@ -173,6 +173,11 @@ export const en: Record<string, string> = {
   "modules.weather": "Weather",
   "modules.shortcuts": "Quick links",
   "modules.review": "Review",
+  // Accessible name (and tooltip) of a module header's collapse toggle (D1).
+  // The name carries the module, so two collapsible headers never sound
+  // identical to a screen reader; `{module}` is the registry label.
+  "modules.collapseAction": "Collapse {module}",
+  "modules.expandAction": "Expand {module}",
 
   // --- Settings -------------------------------------------------------------
   "settings.title": "SETTINGS",
@@ -508,6 +513,8 @@ export const zhHans: Record<string, string> = {
   "modules.weather": "天气",
   "modules.shortcuts": "快捷链接",
   "modules.review": "回顾",
+  "modules.collapseAction": "折叠{module}",
+  "modules.expandAction": "展开{module}",
 
   "settings.title": "设置",
   "settings.close": "关闭",

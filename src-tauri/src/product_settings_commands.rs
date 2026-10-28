@@ -121,14 +121,46 @@ pub fn update_product_settings(
     if let Some(layout) = &patch.module_layout {
         validate_module_layout_patch(layout)?;
     }
+    // Read for the appearance-asset cleanup below only (which replaced
+    // profiles it should release); it never feeds the persisted value. The
+    // layout merge runs inside the update transaction, against the locked
+    // document — see `apply_patch_to_settings`.
     let before = state.snapshot()?;
-    // Computed from the pre-update snapshot so a version conflict (or any
-    // merge refusal) fails the command before the update transaction begins.
-    let merged_layout = match &patch.module_layout {
-        Some(layout) => Some(before.module_layout.merged_with(layout.clone())?),
-        None => None,
-    };
-    let settings = state.update(|settings| {
+    let settings = state.update_checked(apply_patch_to_settings(patch))?;
+    appearance::cleanup_replaced_assets(
+        &state,
+        &before.appearance_profiles,
+        before.avatar_asset_id.as_deref(),
+        &settings.appearance_profiles,
+        settings.avatar_asset_id.as_deref(),
+    );
+    let effective_settings = settings.clone();
+    apply_native_composition(
+        &window,
+        effective_settings.mode,
+        effective_settings.floating_presentation,
+        &effective_settings
+            .appearance_profiles
+            .for_mode(effective_settings.mode),
+    )?;
+    Ok(ProductViewState::new(&state, effective_settings))
+}
+
+/// The settings-mutation half of `update_product_settings`, as one fallible
+/// closure for [`AppState::update_checked`].
+///
+/// Everything here runs inside the update transaction's critical section: the
+/// closure receives a candidate cloned from the document under the settings
+/// lock, so the layout merge below reads the module layout under the same
+/// lock that persists it — never from a pre-update snapshot (the D1
+/// concurrency gate). A refused merge — a version-1 patch over an opaque
+/// stored document — returns `Err` and aborts the transaction before
+/// anything is normalized, serialized, or persisted, leaving the in-memory
+/// state and the stored document exactly as they were.
+fn apply_patch_to_settings(
+    patch: SettingsPatch,
+) -> impl FnOnce(&mut ProductSettings) -> Result<(), String> {
+    move |settings| {
         if let Some(value) = patch.day_rollover {
             settings.day_rollover = value;
         }
@@ -183,27 +215,15 @@ pub fn update_product_settings(
         if let Some(value) = patch.module_visibility {
             settings.module_visibility = settings.module_visibility.clone().replaced_by(value);
         }
-        if let Some(value) = merged_layout {
-            settings.module_layout = value;
+        if let Some(layout) = &patch.module_layout {
+            // Merged against the document this closure received — the locked
+            // candidate — not a snapshot taken before the transaction began.
+            // The `?` aborts the whole transaction on a version conflict,
+            // including any field assignments above.
+            settings.module_layout = settings.module_layout.merged_with(layout.clone())?;
         }
-    })?;
-    appearance::cleanup_replaced_assets(
-        &state,
-        &before.appearance_profiles,
-        before.avatar_asset_id.as_deref(),
-        &settings.appearance_profiles,
-        settings.avatar_asset_id.as_deref(),
-    );
-    let effective_settings = settings.clone();
-    apply_native_composition(
-        &window,
-        effective_settings.mode,
-        effective_settings.floating_presentation,
-        &effective_settings
-            .appearance_profiles
-            .for_mode(effective_settings.mode),
-    )?;
-    Ok(ProductViewState::new(&state, effective_settings))
+        Ok(())
+    }
 }
 
 /// Rejects a layout patch this build must not store.
@@ -288,8 +308,228 @@ fn validate_quick_links(links: &[settings::QuickLink]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_module_layout_patch, validate_quick_links, SettingsPatch};
-    use crate::settings::ModuleLayout;
+    use super::{apply_patch_to_settings, validate_module_layout_patch, validate_quick_links, SettingsPatch};
+    use crate::database::Database;
+    use crate::settings::{AppState, ModuleLayout};
+
+    /// Reads the persisted settings document back as JSON.
+    fn stored_document(state: &AppState) -> serde_json::Value {
+        serde_json::from_str(
+            &state
+                .database
+                .setting("product_settings")
+                .expect("read stored document")
+                .expect("stored document exists"),
+        )
+        .expect("stored document parses")
+    }
+
+    /// Two collapse patches computed from the SAME stored document — what two
+    /// requests racing through the old pre-lock merge would both have read as
+    /// `before` — are applied in sequence. Because the merge now runs inside
+    /// the update transaction against the locked candidate, the second patch
+    /// cannot erase the first collapse: the per-entry unknown fields the
+    /// stale patch cannot name are carried over from the stored entry.
+    ///
+    /// The negative control at the bottom reproduces the pre-gate failure
+    /// deterministically: merging the stale patch against the original
+    /// snapshot (exactly what `before.module_layout.merged_with(...)`
+    /// computed) drops the first toggle's flag.
+    #[test]
+    fn competing_collapse_patches_computed_from_one_snapshot_do_not_lose_each_other() {
+        let raw_layout = serde_json::json!({
+            "version": 1,
+            "entries": [
+                { "id": "github", "order": 0, "colSpan": 1 },
+                { "id": "todo", "order": 1, "colSpan": 1 },
+                { "id": "shortcuts", "order": 2, "colSpan": 1 }
+            ]
+        });
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                &serde_json::to_string(&serde_json::json!({ "moduleLayout": raw_layout }))
+                    .expect("seed document"),
+            )
+            .expect("seed");
+        let state = AppState::load(database).expect("load");
+
+        // Patch A and patch B are both built from the same pre-toggle
+        // document: A collapses todo, B collapses shortcuts and still carries
+        // todo exactly as the stale snapshot had it — no collapsed member.
+        let mut document_a = raw_layout.clone();
+        document_a["entries"][1]["collapsed"] = serde_json::json!(true);
+        let patch_a: SettingsPatch =
+            serde_json::from_value(serde_json::json!({ "moduleLayout": document_a }))
+                .expect("patch a parses");
+
+        let mut document_b = raw_layout.clone();
+        document_b["entries"][2]["collapsed"] = serde_json::json!(true);
+        let patch_b: SettingsPatch =
+            serde_json::from_value(serde_json::json!({ "moduleLayout": document_b }))
+                .expect("patch b parses");
+
+        state
+            .update_checked(apply_patch_to_settings(patch_a))
+            .expect("first toggle commits");
+        state
+            .update_checked(apply_patch_to_settings(patch_b))
+            .expect("second toggle commits");
+
+        let entries = stored_document(&state)["moduleLayout"]["entries"]
+            .as_array()
+            .expect("entries")
+            .clone();
+        assert_eq!(
+            entries[1]["collapsed"],
+            serde_json::json!(true),
+            "the second patch must not erase the first collapse"
+        );
+        assert_eq!(entries[2]["collapsed"], serde_json::json!(true));
+        // Untouched entries and stored order are intact.
+        assert_eq!(entries[0]["id"], "github");
+        assert_eq!(entries[1]["order"], serde_json::json!(1));
+        assert!(entries[0].get("collapsed").is_none());
+
+        // Failure reproduction (pre-gate command shape): the stale patch
+        // merged against the pre-update snapshot — not the locked candidate —
+        // loses the first toggle. This is the computation the gate removed.
+        let stored_snapshot: ModuleLayout =
+            serde_json::from_value(raw_layout).expect("snapshot layout parses");
+        let stale_patch: ModuleLayout = serde_json::from_value(document_b).expect("patch parses");
+        let ModuleLayout::V1(lost) = stored_snapshot.merged_with(stale_patch).expect("merge")
+        else {
+            panic!("v1 merge must yield a version-1 document");
+        };
+        let todo = lost
+            .entries
+            .iter()
+            .find(|entry| entry.id == "todo")
+            .expect("todo");
+        assert!(
+            todo.extra.get("collapsed").is_none(),
+            "the pre-gate merge demonstrably drops the competing collapse"
+        );
+    }
+
+    /// A full-document collapse patch — exactly what the frontend's
+    /// `setModuleCollapsed` sends through this command — preserves the raw
+    /// stored document with exactly one change: unknown root members, unknown
+    /// entries, unknown per-entry fields, order, and colSpan.
+    #[test]
+    fn command_collapse_patch_preserves_the_raw_document() {
+        let stored_layout = serde_json::json!({
+            "version": 1,
+            "futureRoot": { "mode": "something-new" },
+            "entries": [
+                { "id": "github", "order": 0, "colSpan": 1, "pinned": true },
+                { "id": "todo", "order": 2, "colSpan": 1, "note": "kept" }
+            ]
+        });
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                &serde_json::to_string(&serde_json::json!({ "moduleLayout": stored_layout }))
+                    .expect("seed document"),
+            )
+            .expect("seed");
+        let state = AppState::load(database).expect("load");
+
+        let mut collapsed = stored_layout.clone();
+        collapsed["entries"][1]["collapsed"] = serde_json::json!(true);
+        let patch: SettingsPatch =
+            serde_json::from_value(serde_json::json!({ "moduleLayout": collapsed }))
+                .expect("patch parses");
+        state
+            .update_checked(apply_patch_to_settings(patch))
+            .expect("collapse commits");
+
+        // The persisted layout equals the patch document exactly: one change,
+        // everything else value-for-value.
+        assert_eq!(stored_document(&state)["moduleLayout"], collapsed);
+    }
+
+    /// An unrelated settings save — the Settings panel's shape since it
+    /// stopped echoing the layout — leaves a recently committed collapse and
+    /// the unknown entry byte-exact: absent `moduleLayout` means no change at
+    /// all, a strictly stronger guarantee than pass-through.
+    #[test]
+    fn unrelated_save_without_a_layout_member_preserves_the_committed_collapse() {
+        let stored_layout = serde_json::json!({
+            "version": 1,
+            "entries": [
+                { "id": "todo", "order": 1, "colSpan": 1, "collapsed": true },
+                { "id": "github", "order": 3, "colSpan": 1, "source": "https://example.com/repo" }
+            ]
+        });
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                &serde_json::to_string(&serde_json::json!({ "moduleLayout": stored_layout }))
+                    .expect("seed document"),
+            )
+            .expect("seed");
+        let state = AppState::load(database).expect("load");
+
+        let patch: SettingsPatch = serde_json::from_value(serde_json::json!({
+            "displayName": "Example Person"
+        }))
+        .expect("a patch with no layout member parses");
+        state
+            .update_checked(apply_patch_to_settings(patch))
+            .expect("unrelated save commits");
+
+        let stored = stored_document(&state);
+        assert_eq!(stored["displayName"], "Example Person");
+        assert_eq!(
+            stored["moduleLayout"], stored_layout,
+            "the layout document must survive an unrelated save untouched"
+        );
+    }
+
+    /// A version-1 patch over an opaque stored layout is refused inside the
+    /// transaction, and the refusal aborts the whole update: not even the
+    /// patch's non-layout fields reach memory or disk.
+    #[test]
+    fn refused_layout_merge_aborts_the_whole_transaction() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting(
+                "product_settings",
+                r#"{"dayRollover":"06:00","moduleLayout":{"version":2,"entries":[],"futureField":{"mode":"new"}}}"#,
+            )
+            .expect("seed");
+        let state = AppState::load(database).expect("load");
+
+        let patch: SettingsPatch = serde_json::from_value(serde_json::json!({
+            "dayRollover": "07:30",
+            "moduleLayout": {
+                "version": 1,
+                "entries": [{ "id": "todo", "order": 0, "colSpan": 1, "collapsed": true }]
+            }
+        }))
+        .expect("patch parses");
+        let result = state.update_checked(apply_patch_to_settings(patch));
+        assert!(result.is_err(), "a v1 patch over an opaque layout must refuse");
+
+        // Memory: the refusal left the pre-call snapshot.
+        let snapshot = state.snapshot().expect("snapshot");
+        assert_eq!(snapshot.day_rollover, "06:00");
+        assert!(matches!(snapshot.module_layout, ModuleLayout::Opaque(_)));
+
+        // Disk: byte-for-byte the seeded document, including the opaque
+        // layout the v1 patch must not overwrite.
+        let stored = stored_document(&state);
+        assert_eq!(stored["dayRollover"], serde_json::json!("06:00"));
+        assert_eq!(stored["moduleLayout"]["version"], serde_json::json!(2));
+        assert_eq!(
+            stored["moduleLayout"]["futureField"]["mode"],
+            serde_json::json!("new")
+        );
+    }
 
     /// The visibility patch member is optional (absent = no change) and its
     /// known members are type-checked during deserialization — the command's

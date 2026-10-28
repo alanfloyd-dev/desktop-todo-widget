@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import { profileInitials } from "../appearance";
 import { useI18n } from "../i18n";
-import { hasColumnSpan } from "../modules/layout";
+import { hasColumnSpan, type DashboardModuleId } from "../modules/layout";
 import type {
   ModuleLayout,
   ModuleVisibility,
@@ -10,6 +10,7 @@ import type {
   QuickLink,
   WeatherViewState,
 } from "../types";
+import ModuleSection from "../modules/shared/ModuleSection.vue";
 import TodoPanel from "../modules/todo/TodoPanel.vue";
 import WeatherDisplay from "../modules/weather/WeatherDisplay.vue";
 
@@ -38,6 +39,7 @@ defineEmits<{
   refreshWeather: [];
   openReview: [];
   openSettings: [];
+  toggleModule: [id: DashboardModuleId];
   error: [message: string];
 }>();
 
@@ -50,6 +52,16 @@ const { t, intlLocale } = useI18n();
  * which is what keeps today's full-width presentation the default.
  */
 const spannedLayout = computed(() => hasColumnSpan(props.moduleLayout));
+
+/**
+ * The stored collapse state of one dashboard module (D1), read from the
+ * effective layout the app resolved. Absent means expanded; the flag is
+ * presentation data only and never influences the slot order or the span
+ * classes below.
+ */
+function moduleCollapsed(id: DashboardModuleId): boolean {
+  return props.moduleLayout.entries.find((entry) => entry.id === id)?.collapsed === true;
+}
 
 const dragRegionEnabled = computed(
   () => (props.mode === "floating" || props.mode === "desktop") && !props.locked,
@@ -142,13 +154,17 @@ const dateLabel = computed(() =>
             ephemeral UI state (it removes its own drag listeners on unmount),
             while every task lives in SQLite behind commands that stay
             invokable. A later re-enable mounts the panel fresh, which
-            re-queries the current task day. The wrapper makes the two-root
-            panel one coherent grid item.
+            re-queries the current task day. The wrapper keeps the grid item
+            and its span class in one place. Collapsing (D1) is different by
+            design: the panel itself stays mounted behind its container's
+            `v-show` body, so the draft and drag state survive.
           -->
           <TodoPanel
             :native-bridge-available="nativeBridgeAvailable"
             :show-review-entry="moduleVisibility.review"
+            :collapsed="moduleCollapsed('todo')"
             @open-review="$emit('openReview')"
+            @toggle="$emit('toggleModule', 'todo')"
             @error="$emit('error', $event)"
           />
         </div>
@@ -157,15 +173,27 @@ const dateLabel = computed(() =>
           Quick Links is a product section, not a footer affordance: it sits
           in the same section rhythm as the todo panel. The whole slot is
           absent when the module is disabled, or when no links are configured
-          — which is why the heading lives inside the `v-if` conditions.
+          — which is why the heading lives inside the `v-if` conditions. Since
+          D1 the section renders through the shared collapsible container:
+          the container's root receives the `quick-links` class (and the
+          landmark label) by fallthrough, so the border-top rhythm and the
+          `.quick-links` selectors keep applying unchanged, the heading moves
+          into the container's header, and the list renders behind the
+          visibility-only body.
         -->
         <div
           v-if="entry.id === 'shortcuts' && moduleVisibility.shortcuts && quickLinks.length"
           class="dashboard-slot"
           :class="{ 'dashboard-slot--span-2': spannedLayout && entry.colSpan === 2 }"
         >
-          <section class="quick-links" :aria-label="t('quickLinks.heading')">
-            <p class="section-heading">{{ t("quickLinks.heading") }}</p>
+          <ModuleSection
+            class="quick-links"
+            :aria-label="t('quickLinks.heading')"
+            :title="t('quickLinks.heading')"
+            :module-name="t('modules.shortcuts')"
+            :collapsed="moduleCollapsed('shortcuts')"
+            @toggle="$emit('toggleModule', 'shortcuts')"
+          >
             <ul>
               <li v-for="link in quickLinks" :key="link.id">
                 <button
@@ -178,7 +206,7 @@ const dateLabel = computed(() =>
                 </button>
               </li>
             </ul>
-          </section>
+          </ModuleSection>
         </div>
       </template>
     </div>
