@@ -454,6 +454,159 @@ button {
   letter-spacing: 0.06em;
 }
 
+/*
+ * The GitHub statistics card (v1.3.0-G1). The weather card's visual
+ * language at a smaller scale: the same reserved top-right refresh slot,
+ * the same two-line metric rhythm, the same age/status typography. The card
+ * renders only inside the shared ModuleSection body, so the section header
+ * owns the module spacing; nothing here touches the grid or the collapse
+ * machinery.
+ */
+.github-display {
+  position: relative;
+  /* Reserved refresh slot, so the icon never overlaps the metric line. */
+  padding-right: 30px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+}
+
+.github-display p {
+  margin: 0;
+}
+
+.github-primary {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 7px 18px;
+  color: var(--ink);
+}
+
+.github-metric {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.github-metric-value {
+  color: var(--ink);
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 15px;
+  letter-spacing: 0.08em;
+}
+
+.github-metric-label {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.github-secondary {
+  margin-top: 8px !important;
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* The profile hand-off: a labeled control, not a raw anchor, so the username
+   is validated by the backend before any shell navigation happens. */
+.github-account {
+  padding: 0;
+  border: 0;
+  color: var(--mineral);
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.github-account:hover,
+.github-account:focus-visible {
+  color: var(--ink);
+}
+
+.github-account:focus-visible {
+  outline: 1px solid var(--mineral);
+  outline-offset: 2px;
+}
+
+.github-empty {
+  letter-spacing: 0.14em;
+}
+
+.github-configure {
+  margin-top: 9px;
+  padding: 0;
+  border: 0;
+  color: var(--mineral);
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.github-age {
+  margin-top: 8px !important;
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+}
+
+.github-refresh {
+  position: absolute;
+  top: -3px;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  color: var(--mineral);
+  background: transparent;
+  cursor: pointer;
+}
+
+.github-refresh:hover,
+.github-refresh:focus-visible {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.github-refresh:focus-visible {
+  outline: 1px solid var(--mineral);
+  outline-offset: 1px;
+}
+
+.github-refresh:disabled {
+  cursor: default;
+  opacity: 0.42;
+}
+
+.github-refresh-icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* The weather card's spin keyframes are shared verbatim. */
+.github-refresh.refreshing .github-refresh-icon {
+  animation: weather-refresh-spin 1s linear infinite;
+}
+
+.github-status {
+  margin-top: 8px !important;
+  color: var(--faint);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+}
+
 .product-section {
   padding: 42px 2px 46px;
   border-bottom: 1px solid var(--line);

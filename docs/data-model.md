@@ -9,7 +9,7 @@ desktop-todo-widget is local-first. Tauri resolves the platform app-data directo
 - Migrations are idempotent and preserve existing Phase 2 data.
 - SQLite foreign keys are enabled and WAL journal mode is requested at initialization.
 
-Migration 1 creates the initial product tables. Migration 2 adds the enabled/sort shortcut index without deleting the earlier development seed on upgraded databases. Migration 3 adds the isolated weather cache without altering Todo, category, shortcut, or settings data. Fresh open-source databases do not create a personal shortcut.
+Migration 1 creates the initial product tables. Migration 2 adds the enabled/sort shortcut index without deleting the earlier development seed on upgraded databases. Migration 3 adds the isolated weather cache without altering Todo, category, shortcut, or settings data. Migration 4 adds the isolated GitHub snapshot cache (`github_cache`) on the same additive pattern; it alters no existing table. Fresh open-source databases do not create a personal shortcut.
 
 ## Tables
 
@@ -59,6 +59,14 @@ The `shortcuts` table is no longer written by the product. Quick Links live in t
 
 The composite `(location_key, temperature_unit)` primary key isolates caches across selected places and °C/°F. `payload_json` contains the internal normalized `WeatherSnapshot`, never the provider's raw response. A corrupt or mismatched payload is ignored as missing while the rest of the application continues normally.
 
+### github_cache
+
+- `username`
+- `payload_json`
+- `fetched_at`
+
+The `username` primary key holds the configured GitHub username lowercased (GitHub usernames are case-insensitive, so one account has exactly one row no matter how it is spelled in Settings). `payload_json` contains the internal normalized `GithubSnapshot` — canonical login, follower count, and the complete owned-public-non-fork star total — never the provider's raw responses; only a complete pagination traversal is ever written. A corrupt or mismatched payload is ignored as missing while the rest of the application continues normally.
+
 ### app_settings
 
 Key/value storage for typed JSON settings. The product settings document includes window mode, independent expanded-Floating/Desktop geometry, Floating presentation and Orb geometry, monitor identity, Sidebar state, lock/topmost flags, day rollover, weather location/unit, appearance, and profile fields. Desktop geometry uses:
@@ -96,7 +104,7 @@ Weather fields use:
 
 The label and administrative text are presentation only. Forecast requests use the saved coordinates and weather-location timezone; they never re-geocode the label at startup. Todo task-day calculation remains tied to the computer's local time and is intentionally independent.
 
-Geometry values are logical pixels (DIP), not raw device pixels. Missing fields from an older settings document receive defaults during compatible deserialization. Desktop defaults to a bounded 420×700 DIP Widget rather than inheriting Floating geometry. A one-time settings migration converts legacy Floating and Sidebar physical values to DIP while retaining the Desktop numeric defaults as their originally intended logical values. No SQLite migration was added after schema 3, and later features (Quick Links, per-mode appearance profiles, the rendering backend choice, UI language) are additive settings fields only.
+Geometry values are logical pixels (DIP), not raw device pixels. Missing fields from an older settings document receive defaults during compatible deserialization. Desktop defaults to a bounded 420×700 DIP Widget rather than inheriting Floating geometry. A one-time settings migration converts legacy Floating and Sidebar physical values to DIP while retaining the Desktop numeric defaults as their originally intended logical values. Schema 4 is the current schema, and later features (Quick Links, per-mode appearance profiles, the rendering backend choice, UI language) are additive settings fields only.
 
 ## Privacy boundary
 

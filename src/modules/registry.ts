@@ -19,7 +19,7 @@
  */
 
 /** The closed set of product modules. A new module is a new member here. */
-export type ModuleId = "todo" | "weather" | "shortcuts" | "review";
+export type ModuleId = "todo" | "weather" | "shortcuts" | "review" | "github";
 
 /** How a module presents on the product surface. */
 export type ModuleSurface = "dashboard" | "overlay";
@@ -30,11 +30,14 @@ export interface ModuleDescriptor {
   labelKey: string;
   surface: ModuleSurface;
   /**
-   * Every module ships enabled: the literal `true` type is what makes
-   * "all modules enabled" a compile-time property of the registry instead of
-   * a value someone can flip.
+   * Whether a user who never opened Settings sees the module. GitHub is the
+   * one deliberate `false` (ADR-DG-001 Amendment ①): a module that talks to
+   * a network service must not appear uninvited on an existing dashboard,
+   * and its absence is what keeps a legacy document without a `github` key
+   * resolving to hidden on both sides of the wire. Everything else stays
+   * `true`: the upgrade contract below is untouched.
    */
-  defaultEnabled: true;
+  defaultEnabled: boolean;
 }
 
 export const MODULE_REGISTRY = [
@@ -42,18 +45,21 @@ export const MODULE_REGISTRY = [
   { id: "weather", labelKey: "modules.weather", surface: "dashboard", defaultEnabled: true },
   { id: "shortcuts", labelKey: "modules.shortcuts", surface: "dashboard", defaultEnabled: true },
   { id: "review", labelKey: "modules.review", surface: "overlay", defaultEnabled: true },
+  { id: "github", labelKey: "modules.github", surface: "dashboard", defaultEnabled: false },
 ] as const satisfies readonly ModuleDescriptor[];
 
-/** Effective module visibility: exactly the four known ids, no others. */
+/** Effective module visibility: exactly the five known ids, no others. */
 export type ModuleVisibility = Readonly<Record<ModuleId, boolean>>;
 
 /**
  * The visibility every installation starts from.
  *
- * All-enabled is not just a product default, it is the upgrade contract: an
+ * All-enabled is the upgrade contract for the four surface modules: an
  * existing profile whose document predates module preferences must keep the
  * exact v1.2.1 surface, so the absence of a stored preference always
- * resolves to enabled.
+ * resolves to enabled. GitHub alone resolves to hidden — a v1.2.x profile
+ * never asked for it, and enabling a network module silently is not an
+ * upgrade this product performs.
  */
 export const DEFAULT_MODULE_VISIBILITY: ModuleVisibility = resolveModuleVisibility();
 

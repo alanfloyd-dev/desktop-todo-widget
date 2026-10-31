@@ -75,13 +75,18 @@ pub fn validate_quick_link_url(url: &str) -> Result<(), String> {
 
 /// Per-module visibility preferences: the one persisted module on/off switch.
 ///
-/// The four known members mirror `ModuleId` in `src/modules/registry.ts`; both
-/// sides default every module to **enabled**, so a document from before this
-/// field existed (and a nested object that names only some modules) resolves to
-/// exactly the pre-module-visibility surface. Unknown members are ids written
-/// by a future version; the flattened map round-trips them verbatim — the same
-/// Phase 2A contract `QuickLink::extra` implements one level deeper — so a
-/// rollback can never silently delete a newer module's preference.
+/// The five known members mirror `ModuleId` in `src/modules/registry.ts`. The
+/// four pre-GitHub modules default to **enabled**, so a document from before
+/// this field existed (and a nested object that names only some modules)
+/// resolves to exactly the pre-module-visibility surface. GitHub is the
+/// deliberate exception (ADR-DG-001 Amendment ①): it defaults to **hidden** —
+/// a module that talks to a network service must not appear uninvited on an
+/// existing user's dashboard, so a document (or nested object) without a
+/// `github` key resolves to hidden on both sides of the wire. Unknown members
+/// are ids written by a future version; the flattened map round-trips them
+/// verbatim — the same Phase 2A contract `QuickLink::extra` implements one
+/// level deeper — so a rollback can never silently delete a newer module's
+/// preference.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModuleVisibility {
@@ -93,6 +98,8 @@ pub struct ModuleVisibility {
     pub shortcuts: bool,
     #[serde(default = "default_module_enabled")]
     pub review: bool,
+    #[serde(default = "default_module_disabled")]
+    pub github: bool,
     /// Unknown module ids written by a future version of this object.
     /// Round-tripped verbatim; never consulted by this build's logic.
     #[serde(flatten, default)]
@@ -103,6 +110,10 @@ fn default_module_enabled() -> bool {
     true
 }
 
+fn default_module_disabled() -> bool {
+    false
+}
+
 impl Default for ModuleVisibility {
     fn default() -> Self {
         Self {
@@ -110,6 +121,7 @@ impl Default for ModuleVisibility {
             weather: true,
             shortcuts: true,
             review: true,
+            github: false,
             extra: BTreeMap::new(),
         }
     }
@@ -118,7 +130,7 @@ impl Default for ModuleVisibility {
 impl ModuleVisibility {
     /// The next stored visibility when a settings patch replaces this one.
     ///
-    /// The patch speaks for a client that can only name the four known members,
+    /// The patch speaks for a client that can only name the five known members,
     /// so its known values always win — replacement is the patch semantic, not
     /// a member-wise merge — but unknown ids the sender *cannot express* are
     /// carried over from the stored object instead of being silently dropped by
@@ -193,6 +205,12 @@ impl Default for ModuleLayoutV1 {
                 LayoutEntry::new("weather", 0, 1),
                 LayoutEntry::new("todo", 1, 1),
                 LayoutEntry::new("shortcuts", 2, 1),
+                // GitHub joins last (ADR-DG-001 Amendment ①): an upgraded
+                // document without this entry resolves it through the same
+                // append-missing-modules rule the frontend resolver applies,
+                // and the module is visibility-hidden by default, so the
+                // entry changes nothing until the user enables it.
+                LayoutEntry::new("github", 3, 1),
             ],
             extra: BTreeMap::new(),
         }
@@ -546,6 +564,14 @@ pub struct ProductSettings {
     /// [`ModuleLayout`].
     #[serde(default)]
     pub module_layout: ModuleLayout,
+    /// The GitHub account the dashboard module renders, or the empty string
+    /// when the user has not configured one (ADR-DG-001 Amendment ①: empty is
+    /// the default, and an empty username is the first of the two zero-request
+    /// gates — the github commands refuse to touch the network while it
+    /// stands). Only the username is stored: no tokens, no OAuth state, no
+    /// credential material of any kind ever reaches this document.
+    #[serde(default)]
+    pub github_username: String,
     /// Deserialize-only bridge for the single footer homepage.
     ///
     /// Documents written before Quick Links stored one label/URL pair. Both still
@@ -632,12 +658,17 @@ impl Default for ProductSettings {
             // complete one, and an upgraded document without this member resolves
             // through this default unchanged.
             module_visibility: ModuleVisibility::default(),
-            // The default dashboard layout: the same three modules in the
+            // The default dashboard layout: the same modules in the
             // presentation order `DASHBOARD_MODULE_IDS` owns in
             // `src/modules/layout.ts` (a source-pinned test keeps the two from
             // drifting). An upgraded document without this member resolves
             // through this default unchanged.
             module_layout: ModuleLayout::default(),
+            // No GitHub account by default: the module ships hidden AND
+            // unconfigured, so a fresh install makes zero GitHub requests.
+            // `default_profile_identity_is_neutral`-style neutrality extends
+            // here: no username, ever, ships in the open-source build.
+            github_username: String::new(),
             homepage_label: DEFAULT_QUICK_LINK_NAME.into(),
             homepage_url: String::new(),
             extra: BTreeMap::new(),
@@ -768,6 +799,10 @@ impl ProductSettings {
         self.appearance_profiles.normalize();
         appearance::normalize_avatar_asset_id(&mut self.avatar_asset_id);
         self.display_name = self.display_name.trim().to_string();
+        // Trim only, never validate here: a stored value that a future (or
+        // hand-edited) document carries must still load, and the github
+        // commands re-validate strictly before they build any URL.
+        self.github_username = self.github_username.trim().to_string();
     }
 }
 
@@ -1436,6 +1471,10 @@ mod tests {
         // adds one, and the open-source default stays neutral.
         assert!(settings.quick_links.is_empty());
         assert!(settings.homepage_url.is_empty());
+        // Nor any GitHub account: the module ships hidden and unconfigured,
+        // so the default surface makes zero GitHub requests.
+        assert!(settings.github_username.is_empty());
+        assert!(!settings.module_visibility.github);
         assert_eq!(settings.display_name, "User");
         assert!(settings.avatar_asset_id.is_none());
         assert_eq!(
@@ -1903,6 +1942,28 @@ mod tests {
         assert_eq!(parsed.quick_links, settings.quick_links);
     }
 
+    /// The GitHub username round-trips as an additive settings member and is
+    /// trimmed by normalize; an empty (unconfigured) value is the default.
+    #[test]
+    fn github_username_round_trips_and_normalizes() {
+        let database = Database::in_memory().expect("database");
+        database
+            .set_setting("product_settings", r#"{"githubUsername":"  Octo-Cat  "}"#)
+            .expect("username document");
+        let state = AppState::load(database).expect("load");
+        assert_eq!(
+            state.snapshot().expect("snapshot").github_username,
+            "Octo-Cat",
+            "normalize trims surrounding whitespace and preserves case"
+        );
+        let stored = stored_document(&state.database);
+        assert_eq!(stored["githubUsername"], serde_json::json!("Octo-Cat"));
+
+        // The default document carries the empty username: unconfigured.
+        let fresh = super::ProductSettings::default();
+        assert!(fresh.github_username.is_empty());
+    }
+
     #[test]
     fn legacy_homepage_migrates_to_one_quick_link_once() {
         let database = Database::in_memory().expect("database");
@@ -2220,10 +2281,11 @@ mod tests {
 
     // --- Module visibility (v1.3.0-B2) ---------------------------------------
 
-    /// Fresh default: every module enabled, and the serialized document
-    /// carries the fully resolved object.
+    /// Fresh default: the four surface modules enabled and GitHub hidden (the
+    /// Amendment ① exception), and the serialized document carries the fully
+    /// resolved object.
     #[test]
-    fn module_visibility_defaults_to_all_enabled() {
+    fn module_visibility_defaults_follow_the_registry_contract() {
         let state = AppState::load(Database::in_memory().expect("database")).expect("state");
         let visibility = state.snapshot().expect("snapshot").module_visibility;
         assert_eq!(
@@ -2233,20 +2295,26 @@ mod tests {
                 weather: true,
                 shortcuts: true,
                 review: true,
+                github: false,
                 extra: Default::default(),
             }
         );
         let stored = stored_document(&state.database);
         assert_eq!(
             stored["moduleVisibility"],
-            serde_json::json!({ "todo": true, "weather": true, "shortcuts": true, "review": true })
+            serde_json::json!({
+                "todo": true, "weather": true, "shortcuts": true,
+                "review": true, "github": false
+            })
         );
     }
 
-    /// A v1.2.1 document has no `moduleVisibility` member; it resolves to the
-    /// all-enabled default, which is byte-for-byte the pre-module-visibility
-    /// surface, and the member is materialized by the load-time rewrite just
-    /// like any other defaulted field.
+    /// A v1.2.1 document has no `moduleVisibility` member; the four original
+    /// modules resolve to the all-enabled default — byte-for-byte the
+    /// pre-module-visibility surface — and GitHub, which did not exist then,
+    /// resolves to hidden: an upgrade must not switch a network module on
+    /// nobody ever asked for. The member is materialized by the load-time
+    /// rewrite just like any other defaulted field.
     #[test]
     fn legacy_document_without_module_visibility_resolves_all_enabled() {
         let database = Database::in_memory().expect("database");
@@ -2256,15 +2324,18 @@ mod tests {
         let state = AppState::load(database).expect("load");
         let visibility = state.snapshot().expect("snapshot").module_visibility;
         assert!(visibility.todo && visibility.weather && visibility.shortcuts && visibility.review);
+        assert!(!visibility.github);
         assert!(visibility.extra.is_empty());
         let stored = stored_document(&state.database);
         assert_eq!(stored["moduleVisibility"]["todo"], serde_json::json!(true));
+        assert_eq!(stored["moduleVisibility"]["github"], serde_json::json!(false));
         // The rest of the legacy document is untouched.
         assert_eq!(stored["mode"], "sidebar");
     }
 
     /// A nested object that names only some modules defaults the omitted
-    /// members to enabled. The outer struct's `#[serde(default)]` does not
+    /// members per their own field defaults: the original modules to enabled,
+    /// GitHub to hidden. The outer struct's `#[serde(default)]` does not
     /// reach inside a present-but-partial object — the field-level member
     /// defaults are what make this resolve correctly.
     #[test]
@@ -2277,6 +2348,7 @@ mod tests {
         let visibility = state.snapshot().expect("snapshot").module_visibility;
         assert!(!visibility.todo);
         assert!(visibility.weather && visibility.shortcuts && visibility.review);
+        assert!(!visibility.github);
     }
 
     /// An explicit `false` is a persisted choice: it survives the load-time
@@ -2307,7 +2379,7 @@ mod tests {
     }
 
     /// With no future ids present, the serialized object carries exactly the
-    /// four known keys.
+    /// five known keys.
     #[test]
     fn module_visibility_serialization_keeps_exactly_the_known_keys() {
         let document: serde_json::Value =
@@ -2319,7 +2391,7 @@ mod tests {
             .cloned()
             .collect();
         keys.sort();
-        assert_eq!(keys, vec!["review", "shortcuts", "todo", "weather"]);
+        assert_eq!(keys, vec!["github", "review", "shortcuts", "todo", "weather"]);
     }
 
     /// Unknown nested module ids written by a future version survive the
@@ -2464,7 +2536,9 @@ mod tests {
 
     /// Fresh default: the default presentation order — the same sequence
     /// `DASHBOARD_MODULE_IDS` owns in `src/modules/layout.ts` — on one column,
-    /// serialized as the additive `moduleLayout` member.
+    /// serialized as the additive `moduleLayout` member. GitHub is the last
+    /// entry: it joined latest (Amendment ①) and stays out of the way of the
+    /// established order.
     #[test]
     fn module_layout_defaults_to_the_presentation_order() {
         let state = AppState::load(Database::in_memory().expect("database")).expect("state");
@@ -2473,14 +2547,14 @@ mod tests {
             panic!("a fresh default must be a version-1 document");
         };
         let ids: Vec<&str> = document.entries.iter().map(|entry| entry.id.as_str()).collect();
-        assert_eq!(ids, ["weather", "todo", "shortcuts"]);
+        assert_eq!(ids, ["weather", "todo", "shortcuts", "github"]);
         assert_eq!(
             document
                 .entries
                 .iter()
                 .map(|entry| entry.col_span)
                 .collect::<Vec<_>>(),
-            [Some(1), Some(1), Some(1)]
+            [Some(1), Some(1), Some(1), Some(1)]
         );
         let stored = stored_document(&state.database);
         assert_eq!(
@@ -2491,6 +2565,7 @@ mod tests {
                     { "id": "weather", "order": 0, "colSpan": 1 },
                     { "id": "todo", "order": 1, "colSpan": 1 },
                     { "id": "shortcuts", "order": 2, "colSpan": 1 },
+                    { "id": "github", "order": 3, "colSpan": 1 },
                 ],
             })
         );
@@ -2508,12 +2583,12 @@ mod tests {
         let end = start + source[start..].find(']').expect("projection end");
         let projection = &source[start..end];
         let mut cursor = 0;
-        for expected in ["weather", "todo", "shortcuts"] {
+        for expected in ["weather", "todo", "shortcuts", "github"] {
             let needle = format!("\"{expected}\"");
             let found = projection[cursor..].find(&needle).expect(expected);
             cursor += found + needle.len();
         }
-        // The projection lists nothing beyond the three Rust default ids.
+        // The projection lists nothing beyond the four Rust default ids.
         assert!(
             !projection[cursor..].contains('"'),
             "unexpected extra id in the frontend projection: {}",
@@ -2534,10 +2609,10 @@ mod tests {
         let ModuleLayout::V1(document) = &state.snapshot().expect("snapshot").module_layout else {
             panic!("a defaulted layout must be a version-1 document");
         };
-        assert_eq!(document.entries.len(), 3);
+        assert_eq!(document.entries.len(), 4);
         let stored = stored_document(&state.database);
         assert_eq!(stored["moduleLayout"]["version"], serde_json::json!(1));
-        assert_eq!(stored["moduleLayout"]["entries"].as_array().expect("entries").len(), 3);
+        assert_eq!(stored["moduleLayout"]["entries"].as_array().expect("entries").len(), 4);
         assert_eq!(stored["mode"], "sidebar");
     }
 

@@ -167,6 +167,12 @@ export interface ProductSettings {
    * never read from here directly.
    */
   moduleLayout: ModuleLayout;
+  /**
+   * The GitHub account the dashboard module renders, or the empty string
+   * when unconfigured. Only a username ever lives here — the feature has no
+   * token, no OAuth state, no credential of any kind.
+   */
+  githubUsername: string;
 }
 
 export interface QuickLink {
@@ -214,6 +220,37 @@ export interface WeatherViewState {
   cacheAgeSeconds: number | null;
   refreshRecommended: boolean;
   refreshing: boolean;
+  lastRefresh: string;
+}
+
+export type GithubCacheStatus = "fresh" | "stale" | "missing";
+
+/**
+ * One complete GitHub statistics fetch, as the Rust backend normalized it.
+ * `stars` is the total across the account's owned public non-fork
+ * repositories (archived included); the backend never stores a partial sum,
+ * so a snapshot present here is a complete traversal.
+ */
+export interface GithubSnapshot {
+  /** The account's canonical login as GitHub names it. */
+  username: string;
+  followers: number;
+  stars: number;
+  fetchedAt: number;
+}
+
+export interface GithubViewState {
+  /** Whether a username is configured; false renders the setup state. */
+  configured: boolean;
+  /** The configured username as typed (trimmed); empty when unconfigured. */
+  username: string;
+  snapshot: GithubSnapshot | null;
+  cacheStatus: GithubCacheStatus;
+  cacheAgeSeconds: number | null;
+  refreshing: boolean;
+  /** A provider rate-limit backoff is in force until `retryAfterSeconds`. */
+  rateLimited: boolean;
+  retryAfterSeconds: number | null;
   lastRefresh: string;
 }
 

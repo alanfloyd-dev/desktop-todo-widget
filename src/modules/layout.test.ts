@@ -51,13 +51,13 @@ describe("default module layout", () => {
   });
 
   it("contains exactly the known dashboard modules, review excluded", () => {
-    expect(idsOf(DEFAULT_MODULE_LAYOUT).sort()).toEqual(["shortcuts", "todo", "weather"]);
+    expect(idsOf(DEFAULT_MODULE_LAYOUT).sort()).toEqual(["github", "shortcuts", "todo", "weather"]);
     expect(idsOf(DEFAULT_MODULE_LAYOUT)).not.toContain("review");
   });
 
-  it("reproduces the current presentation order: weather, todo, shortcuts", () => {
-    expect(idsOf(DEFAULT_MODULE_LAYOUT)).toEqual(["weather", "todo", "shortcuts"]);
-    expect(DEFAULT_MODULE_LAYOUT.entries.map((entry) => entry.colSpan)).toEqual([1, 1, 1]);
+  it("reproduces the current presentation order: weather, todo, shortcuts, github", () => {
+    expect(idsOf(DEFAULT_MODULE_LAYOUT)).toEqual(["weather", "todo", "shortcuts", "github"]);
+    expect(DEFAULT_MODULE_LAYOUT.entries.map((entry) => entry.colSpan)).toEqual([1, 1, 1, 1]);
   });
 });
 
@@ -70,14 +70,14 @@ describe("resolveModuleLayout", () => {
         ["weather", 2, 1],
       ]),
     );
-    expect(idsOf(layout)).toEqual(["shortcuts", "todo", "weather"]);
+    expect(idsOf(layout)).toEqual(["shortcuts", "todo", "weather", "github"]);
     expect(layout.entries[0]).toEqual({ id: "shortcuts", order: 0, colSpan: 2 });
   });
 
   it("appends missing known modules in default presentation order", () => {
     const layout = resolveModuleLayout(storedLayout([["shortcuts", 5]]));
-    expect(idsOf(layout)).toEqual(["shortcuts", "weather", "todo"]);
-    expect(layout.entries.map((entry) => entry.order)).toEqual([0, 1, 2]);
+    expect(idsOf(layout)).toEqual(["shortcuts", "weather", "todo", "github"]);
+    expect(layout.entries.map((entry) => entry.order)).toEqual([0, 1, 2, 3]);
   });
 
   it("resolves duplicate known ids deterministically, first occurrence winning", () => {
@@ -88,7 +88,7 @@ describe("resolveModuleLayout", () => {
         ["weather", 1],
       ]),
     );
-    expect(idsOf(layout)).toEqual(["weather", "todo", "shortcuts"]);
+    expect(idsOf(layout)).toEqual(["weather", "todo", "shortcuts", "github"]);
     expect(layout.entries.find((entry) => entry.id === "todo")?.colSpan).toBe(2);
   });
 
@@ -100,8 +100,9 @@ describe("resolveModuleLayout", () => {
         ["shortcuts"],
       ]),
     );
-    // weather is keyed; todo and shortcuts are unkeyed, in input sequence.
-    expect(idsOf(layout)).toEqual(["weather", "todo", "shortcuts"]);
+    // weather is keyed; todo and shortcuts are unkeyed, in input sequence;
+    // github is missing and appended last.
+    expect(idsOf(layout)).toEqual(["weather", "todo", "shortcuts", "github"]);
   });
 
   it("falls back invalid column spans to one", () => {
@@ -112,13 +113,13 @@ describe("resolveModuleLayout", () => {
         ["shortcuts", 2, "wide" as unknown as number],
       ]),
     );
-    expect(layout.entries.map((entry) => entry.colSpan)).toEqual([1, 1, 1]);
+    expect(layout.entries.map((entry) => entry.colSpan)).toEqual([1, 1, 1, 1]);
   });
 
   it("excludes unknown module ids and malformed entries from the effective layout", () => {
     const layout = resolveModuleLayout(
       storedLayout([
-        ["github", 0],
+        ["newsfeed", 0],
         ["review", 1],
         ["todo", 2],
         [42],
@@ -126,9 +127,9 @@ describe("resolveModuleLayout", () => {
         [{ id: "weather", order: 3 }],
       ]),
     );
-    // github is unknown today, review is an overlay; both never render from
+    // newsfeed is unknown today, review is an overlay; both never render from
     // layout. The malformed rows are skipped; the object entry survives.
-    expect(idsOf(layout)).toEqual(["todo", "weather", "shortcuts"]);
+    expect(idsOf(layout)).toEqual(["todo", "weather", "shortcuts", "github"]);
   });
 
   it("resolves unsupported or missing layout versions to the default", () => {
@@ -162,7 +163,7 @@ describe("resolveModuleLayout", () => {
         ["todo", 1],
       ]),
     );
-    expect(idsOf(layout)).toEqual(["shortcuts", "weather", "todo"]);
+    expect(idsOf(layout)).toEqual(["shortcuts", "weather", "todo", "github"]);
   });
 
   it("never mutates its input, including unknown fields on known entries", () => {
@@ -294,7 +295,7 @@ describe("setModuleCollapsed (D1 raw-document patch)", () => {
       version: 1,
       futureRoot: { mode: "something-new" },
       entries: [
-        { id: "github", order: 0, colSpan: 1, pinned: true },
+        { id: "newsfeed", order: 0, colSpan: 1, pinned: true },
         { id: "weather", order: 1, colSpan: 2, note: { deep: [1, 2] } },
         { id: "todo", order: 2, colSpan: 1, futureEntryField: "kept" },
       ],
@@ -311,7 +312,7 @@ describe("setModuleCollapsed (D1 raw-document patch)", () => {
       version: 1,
       futureRoot: { mode: "something-new" },
       entries: [
-        { id: "github", order: 0, colSpan: 1, pinned: true },
+        { id: "newsfeed", order: 0, colSpan: 1, pinned: true },
         { id: "weather", order: 1, colSpan: 2, note: { deep: [1, 2] } },
         { id: "todo", order: 2, colSpan: 1, futureEntryField: "kept", collapsed: true },
       ],
@@ -373,6 +374,7 @@ describe("setModuleCollapsed (D1 raw-document patch)", () => {
           { id: "weather", order: 0, colSpan: 1 },
           { id: "todo", order: 1, colSpan: 1 },
           { id: "shortcuts", order: 2, colSpan: 1, collapsed: true },
+          { id: "github", order: 3, colSpan: 1 },
         ],
       });
     }
@@ -409,13 +411,14 @@ describe("setModuleCollapsed (D1 raw-document patch)", () => {
 
 describe("resolveDashboardLayout with a registry projection fixture", () => {
   it("appends a future module registered later, without rewriting saved entries", () => {
-    // A future version adds `github` to the registry; an old stored layout
-    // cannot contain it. The projection form exercises that path without
-    // adding the module today (the cast is the fixture, as with the bridge
-    // test doubles).
-    const futureDashboardIds = ["todo", "weather", "shortcuts", "github"] as ModuleId[];
+    // A future version adds `newsfeed` to the registry; today's stored
+    // layouts cannot contain it. `github` played this role before v1.3.0
+    // registered it as known — the projection form exercises the path with a
+    // genuinely future id (the cast is the fixture, as with the bridge test
+    // doubles).
+    const futureDashboardIds = ["todo", "weather", "shortcuts", "newsfeed"] as ModuleId[];
     const layout = resolveDashboardLayout(futureDashboardIds, storedLayout([["todo", 4]]));
-    expect(idsOf(layout)).toEqual(["todo", "weather", "shortcuts", "github"]);
+    expect(idsOf(layout)).toEqual(["todo", "weather", "shortcuts", "newsfeed"]);
     expect(layout.entries.map((entry) => entry.order)).toEqual([0, 1, 2, 3]);
     expect(layout.entries[3].colSpan).toBe(1);
   });

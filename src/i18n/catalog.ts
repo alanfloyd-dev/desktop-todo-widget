@@ -92,6 +92,30 @@ export const en: Record<string, string> = {
   "weather.ageYesterday": "Last updated yesterday",
   "weather.ageUnavailable": "Update unavailable",
 
+  // --- GitHub dashboard module ------------------------------------------------
+  // GitHub is a technology brand and stays untranslated (see the header
+  // note); only the surrounding UI copy is localized.
+  "github.heading": "GitHub",
+  "github.setupHint": "Show your followers and stars",
+  "github.setUsername": "Set username",
+  "github.followers": "Followers",
+  "github.stars": "Stars",
+  "github.refreshAriaLabel": "Refresh GitHub statistics",
+  "github.profileAriaLabel": "Open {name} on GitHub",
+  "github.ageMinutes": "Updated {minutes}m ago",
+  "github.ageHours": "Updated {hours}h ago",
+  "github.ageYesterday": "Last updated yesterday",
+  "github.ageUnavailable": "Update unavailable",
+  "github.empty": "No public statistics yet.",
+  "github.rateLimited": "GitHub rate limit reached. Try again in {minutes} minutes.",
+  "github.error.notFound": "GitHub user {name} was not found.",
+  "github.error.invalidUsername": "That username is not a valid GitHub account name.",
+  "github.error.cooldown": "Please wait a moment before refreshing again.",
+  "github.error.inProgress": "A GitHub refresh is already running.",
+  "github.error.incomplete":
+    "This account has more repositories than the app fetches. The last complete total is shown.",
+  "github.error.generic": "GitHub is unavailable right now. Saved data is unchanged.",
+
   // --- Today / task lifecycle ----------------------------------------------
   "today.title": "TODAY",
   "today.reviewEntry": "Review",
@@ -173,6 +197,7 @@ export const en: Record<string, string> = {
   "modules.weather": "Weather",
   "modules.shortcuts": "Quick links",
   "modules.review": "Review",
+  "modules.github": "GitHub",
   // Accessible name (and tooltip) of a module header's collapse toggle (D1).
   // The name carries the module, so two collapsible headers never sound
   // identical to a screen reader; `{module}` is the registry label.
@@ -268,6 +293,12 @@ export const en: Record<string, string> = {
   "settings.weatherAttributionHint": "CC BY 4.0 attribution",
   "settings.refreshNow": "Refresh now",
   "settings.refreshing": "Refreshing…",
+
+  "settings.githubHeading": "GITHUB",
+  "settings.githubUsername": "GitHub username",
+  "settings.githubUsernameHint": "Public account for the dashboard module",
+  "settings.githubUsernamePlaceholder": "octocat",
+  "status.githubUpdated": "GitHub statistics updated.",
 
   "settings.update.heading": "UPDATES",
   "settings.update.currentVersion": "Current version",
@@ -402,6 +433,27 @@ export const zhHans: Record<string, string> = {
   "status.weatherUpdated": "天气已更新。",
   "weather.refreshAriaLabel": "刷新天气",
 
+  // GitHub 是技术品牌名，不作翻译（见文件头部说明）；仅界面文案本地化。
+  "github.heading": "GitHub",
+  "github.setupHint": "显示你的关注者与获星数",
+  "github.setUsername": "设置用户名",
+  "github.followers": "关注者",
+  "github.stars": "获星",
+  "github.refreshAriaLabel": "刷新 GitHub 统计",
+  "github.profileAriaLabel": "在 GitHub 打开 {name}",
+  "github.ageMinutes": "更新于 {minutes} 分钟前",
+  "github.ageHours": "更新于 {hours} 小时前",
+  "github.ageYesterday": "上次更新于昨天",
+  "github.ageUnavailable": "更新时间不可用",
+  "github.empty": "暂无公开统计数据。",
+  "github.rateLimited": "已达到 GitHub 速率限制，请在 {minutes} 分钟后重试。",
+  "github.error.notFound": "未找到 GitHub 用户 {name}。",
+  "github.error.invalidUsername": "该用户名不是有效的 GitHub 账号名。",
+  "github.error.cooldown": "请稍候再刷新。",
+  "github.error.inProgress": "GitHub 统计正在刷新中。",
+  "github.error.incomplete": "该账号的仓库数量超出应用的获取范围，显示的是最近一次完整统计。",
+  "github.error.generic": "GitHub 暂时不可用，已保存的数据未变更。",
+
   "menu.ariaLabel": "窗口菜单",
   "menu.windowMode": "窗口模式",
   "menu.mode.sidebar": "侧边栏",
@@ -518,6 +570,7 @@ export const zhHans: Record<string, string> = {
   "modules.weather": "天气",
   "modules.shortcuts": "快捷链接",
   "modules.review": "回顾",
+  "modules.github": "GitHub",
   "modules.collapseAction": "折叠{module}",
   "modules.expandAction": "展开{module}",
   "modules.collapseUnavailable": "无法折叠：此布局由更新版本的应用保存",
@@ -604,6 +657,12 @@ export const zhHans: Record<string, string> = {
   "settings.weatherAttributionHint": "CC BY 4.0 署名",
   "settings.refreshNow": "立即刷新",
   "settings.refreshing": "刷新中…",
+
+  "settings.githubHeading": "GITHUB",
+  "settings.githubUsername": "GitHub 用户名",
+  "settings.githubUsernameHint": "仪表盘模块使用的公开账号",
+  "settings.githubUsernamePlaceholder": "octocat",
+  "status.githubUpdated": "GitHub 统计已更新。",
 
   "settings.update.heading": "更新",
   "settings.update.currentVersion": "当前版本",

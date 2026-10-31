@@ -65,6 +65,11 @@ pub struct SettingsPatch {
     /// patch and stored document fails the command before anything mutates
     /// (see `ModuleLayout::merged_with`).
     module_layout: Option<settings::ModuleLayout>,
+    /// The GitHub account the dashboard module renders. Absent = no change;
+    /// an empty string is the explicit "unconfigured" value. Validated before
+    /// anything mutates (see `crate::github::validate_username`); the module
+    /// stores a username only — no token, ever.
+    github_username: Option<String>,
     /// Persisted UI language preference. Applied immediately on the frontend.
     language: Option<crate::locale::Language>,
 }
@@ -222,6 +227,16 @@ fn apply_patch_to_settings(
             // including any field assignments above.
             settings.module_layout = settings.module_layout.merged_with(layout.clone())?;
         }
+        if let Some(value) = &patch.github_username {
+            // Validated here, inside the transaction: a malformed username
+            // aborts the whole update before anything is normalized,
+            // serialized, or persisted (the same fail-closed shape as the
+            // layout merge above). An empty string is the explicit
+            // unconfigured value and is stored trimmed.
+            let trimmed = value.trim();
+            crate::github::validate_username(trimmed)?;
+            settings.github_username = trimmed.to_string();
+        }
         Ok(())
     }
 }
@@ -337,10 +352,14 @@ mod tests {
     /// computed) drops the first toggle's flag.
     #[test]
     fn competing_collapse_patches_computed_from_one_snapshot_do_not_lose_each_other() {
+        // "newsfeed" stands in for a module id this build does not know (it
+        // was "github" before v1.3.0 registered that module as known — using
+        // a genuinely unknown id keeps these fixtures covering the
+        // future-module preservation contract).
         let raw_layout = serde_json::json!({
             "version": 1,
             "entries": [
-                { "id": "github", "order": 0, "colSpan": 1 },
+                { "id": "newsfeed", "order": 0, "colSpan": 1 },
                 { "id": "todo", "order": 1, "colSpan": 1 },
                 { "id": "shortcuts", "order": 2, "colSpan": 1 }
             ]
@@ -388,7 +407,7 @@ mod tests {
         );
         assert_eq!(entries[2]["collapsed"], serde_json::json!(true));
         // Untouched entries and stored order are intact.
-        assert_eq!(entries[0]["id"], "github");
+        assert_eq!(entries[0]["id"], "newsfeed");
         assert_eq!(entries[1]["order"], serde_json::json!(1));
         assert!(entries[0].get("collapsed").is_none());
 
@@ -419,11 +438,13 @@ mod tests {
     /// entries, unknown per-entry fields, order, and colSpan.
     #[test]
     fn command_collapse_patch_preserves_the_raw_document() {
+        // "newsfeed" is a module id this build does not know (see the
+        // competing-collapse test above for why it replaced "github").
         let stored_layout = serde_json::json!({
             "version": 1,
             "futureRoot": { "mode": "something-new" },
             "entries": [
-                { "id": "github", "order": 0, "colSpan": 1, "pinned": true },
+                { "id": "newsfeed", "order": 0, "colSpan": 1, "pinned": true },
                 { "id": "todo", "order": 2, "colSpan": 1, "note": "kept" }
             ]
         });
@@ -457,11 +478,13 @@ mod tests {
     /// all, a strictly stronger guarantee than pass-through.
     #[test]
     fn unrelated_save_without_a_layout_member_preserves_the_committed_collapse() {
+        // "newsfeed" is a module id this build does not know (see the
+        // competing-collapse test above for why it replaced "github").
         let stored_layout = serde_json::json!({
             "version": 1,
             "entries": [
                 { "id": "todo", "order": 1, "colSpan": 1, "collapsed": true },
-                { "id": "github", "order": 3, "colSpan": 1, "source": "https://example.com/repo" }
+                { "id": "newsfeed", "order": 3, "colSpan": 1, "source": "https://example.com/repo" }
             ]
         });
         let database = Database::in_memory().expect("database");
@@ -629,5 +652,45 @@ mod tests {
         assert!(validate_quick_links(&[link("a", "   ", "https://example.com")]).is_err());
         assert!(validate_quick_links(&[link(" ", "Docs", "https://example.com")]).is_err());
         assert!(validate_quick_links(&[link("a", "Docs", "javascript:alert(1)")]).is_err());
+    }
+
+    /// The GitHub username patch member is optional (absent = no change),
+    /// stored trimmed, and validated before anything mutates: an invalid
+    /// value aborts the whole update, leaving memory and disk untouched.
+    #[test]
+    fn github_username_patch_is_optional_validated_and_applied_trimmed() {
+        let patch: SettingsPatch = serde_json::from_value(serde_json::json!({})).expect("empty");
+        assert!(patch.github_username.is_none());
+
+        let patch: SettingsPatch = serde_json::from_value(serde_json::json!({
+            "githubUsername": "  octo-cat  "
+        }))
+        .expect("username patch parses");
+        assert_eq!(patch.github_username.as_deref(), Some("  octo-cat  "));
+
+        let state = AppState::load(Database::in_memory().expect("database")).expect("state");
+        state
+            .update_checked(apply_patch_to_settings(patch))
+            .expect("valid username commits");
+        assert_eq!(
+            state.snapshot().expect("snapshot").github_username,
+            "octo-cat",
+            "the stored value is trimmed; case is the user's own"
+        );
+
+        // An empty string is the explicit unconfigured value and commits.
+        let patch: SettingsPatch =
+            serde_json::from_value(serde_json::json!({ "githubUsername": "  " }))
+                .expect("empty patch parses");
+        state
+            .update_checked(apply_patch_to_settings(patch))
+            .expect("empty username commits");
+        assert!(state.snapshot().expect("snapshot").github_username.is_empty());
+
+        // An invalid value refuses the whole transaction.
+        let patch: SettingsPatch =
+            serde_json::from_value(serde_json::json!({ "githubUsername": "no spaces allowed" }))
+                .expect("patch parses");
+        assert!(state.update_checked(apply_patch_to_settings(patch)).is_err());
     }
 }

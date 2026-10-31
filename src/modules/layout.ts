@@ -22,7 +22,7 @@
  * the registry without updating this projection fails the suite). The default
  * order is layout data, which is why it lives here and not in the registry.
  */
-export const DASHBOARD_MODULE_IDS = ["weather", "todo", "shortcuts"] as const;
+export const DASHBOARD_MODULE_IDS = ["weather", "todo", "shortcuts", "github"] as const;
 
 export type DashboardModuleId = (typeof DASHBOARD_MODULE_IDS)[number];
 

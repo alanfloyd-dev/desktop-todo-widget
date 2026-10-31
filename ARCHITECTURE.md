@@ -17,6 +17,8 @@ Rust product boundary
   reviews.rs           dynamic task-history aggregation for Daily/Weekly/Monthly Review
   task_day.rs          centralized local rollover calculation
   weather.rs           Open-Meteo adapter, normalization, cache policy, refresh gate
+  github.rs            GitHub public-profile adapter: username validation, bounded
+                       serial fetch, snapshot cache, refresh/rate-limit gates
   appearance.rs        validation, local managed assets, wallpaper read, contrast utility
   diagnostics.rs       privacy-allowlisted support report
                  │ thin adapter call
@@ -174,7 +176,7 @@ At startup, Tauri resolves the platform app-data directory and opens `alan-deskt
 - `shortcuts`
 - `app_settings`
 
-`tasks.status` is constrained to `pending`, `completed`, `cancelled`, or `carried`; the schema includes scheduled/completed timestamps, ordering, nullable category, and `carried_from`. Migration 3 adds only `weather_cache`; it does not modify task, category, shortcut, or settings rows. No migration was added after schema 3. `tasks.rs` owns validation and repository operations; Vue never issues SQL or derives the authoritative task day.
+`tasks.status` is constrained to `pending`, `completed`, `cancelled`, or `carried`; the schema includes scheduled/completed timestamps, ordering, nullable category, and `carried_from`. Migration 3 adds only `weather_cache`; it does not modify task, category, shortcut, or settings rows. Migration 4 adds only `github_cache` on the same additive pattern. `tasks.rs` owns validation and repository operations; Vue never issues SQL or derives the authoritative task day.
 
 Carry is history-preserving: one transaction changes the original pending row to `carried`, then inserts a pending successor for the next task day with copied title/category and `carried_from` pointing to the original. Reordering validates that every pending row for the task day appears exactly once and updates all sort positions in one transaction.
 
@@ -189,6 +191,8 @@ Appearance is split into a transparent native/WebView surface, transparent DOM r
 Auto contrast uses a centralized representative-luminance calculation. Solid colors and gradient stops are deterministic; image/wallpaper data are sampled once with a 32×32 browser canvas when loaded or changed. A small hysteresis band prevents threshold flicker. Manual Light and Dark remain explicit overrides.
 
 Weather is an isolated optional capability. Vue first requests cache state and renders the product immediately; stale or missing configured data triggers a background command. `weather.rs` alone understands Open-Meteo JSON and WMO codes. It validates HTTP status and payload shape, normalizes errors, and writes only a `WeatherSnapshot` to SQLite. Cache lookup requires both the stable coordinate/timezone location key and temperature unit, so a changed setting cannot relabel another location's result. One backend atomic gate and one App-level hourly timer prevent mode transitions from creating duplicate refresh loops.
+
+GitHub statistics (v1.3.0-G1) follow the same isolation shape with a smaller surface. `github.rs` alone understands api.github.com responses: the frontend holds no GitHub origin in its CSP and calls only `github_state`, `refresh_github`, and `open_github_profile`. Requests are unauthenticated public-API reads for one user-configured username; a username is grammar-validated before any URL is built, the fetch is one profile request plus at most ten owned-repository pages traversed serially through Link `rel="next"` targets re-checked against the fixed API origin, and response bodies are size-capped. Only a complete traversal is ever stored: hitting the page budget or the provider's rate budget fails the refresh and keeps the previous snapshot — a partial star sum is never presented as a total. The snapshot cache is keyed by the lowercased username in its own `github_cache` table (migration 4), freshness is 30 minutes, concurrent refreshes are single-flighted, manual refreshes carry a cooldown, and a recognized rate-limit response (429 or 403 with `X-RateLimit-Remaining: 0`) starts a bounded runtime backoff that refuses refreshes without network activity. An unconfigured (empty) username is refused before the refresh gate — no GitHub request exists for a module that is hidden, unconfigured, or merely rendering. The module ships hidden and unconfigured (ADR-DG-001 Amendment ①), and no credential, token, or PAT exists anywhere in the feature. On the frontend, refreshes serialize per configured identity behind the in-flight invoke (which settles exactly when the backend releases its single-flight flag), so an account switch can neither leak the previous account's late response into the new account's card nor lose the new account's refresh to an in-progress refusal; every async completion validates the identity generation it started under and is discarded whole when superseded.
 
 Public issue diagnostics use an explicit allowlist. They include runtime/window/schema metadata plus total task count and current task day, but never task titles, categories, history content, profile values, Quick Link URLs, weather location, or the precise database path.
 

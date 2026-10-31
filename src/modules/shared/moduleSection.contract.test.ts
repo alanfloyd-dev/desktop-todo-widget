@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import moduleSectionSource from "./ModuleSection.vue?raw";
 import productContentSource from "../../components/ProductContent.vue?raw";
 import todoPanelSource from "../todo/TodoPanel.vue?raw";
+import githubPanelSource from "../github/GithubPanel.vue?raw";
 
 /**
  * Source contracts of the collapse container (D2).
@@ -72,5 +73,32 @@ describe("collapse integration source contracts (D2)", () => {
     // The Review entry lives in the panel's header and stays available as
     // designed in every collapse state of the container.
     expect(todoPanelSource).toContain("review-entry");
+  });
+});
+
+describe("GitHub panel source contracts (G1)", () => {
+  it("renders every interactive control as a real labeled button", () => {
+    // The refresh affordance must stay keyboard-activatable with a localized
+    // accessible name — an icon-only control without a label would be
+    // unnamed to assistive technology.
+    expect(githubPanelSource).toContain('<button\n      v-if="github.configured"');
+    expect(githubPanelSource).toContain('type="button"');
+    expect(githubPanelSource).toContain(':aria-label="t(\'github.refreshAriaLabel\')"');
+    // The profile hand-off is a labeled control, never a raw anchor with an
+    // unvalidated href: the username goes to the backend command, which
+    // re-validates before the shell opens the fixed profile origin.
+    expect(githubPanelSource).toContain(':aria-label="t(\'github.profileAriaLabel\'');
+    expect(githubPanelSource).not.toMatch(/<a\s/i);
+  });
+
+  it("never fetches by itself: presentation only, actions emitted", () => {
+    // No requests from render, hover, or collapse events (G1 request
+    // policy): the card renders from the app-owned state and hands every
+    // action up. Pins the boundary if the component is ever reshaped.
+    expect(githubPanelSource).not.toContain("invoke");
+    expect(githubPanelSource).not.toContain("fetch(");
+    expect(githubPanelSource).toContain("$emit('refresh')");
+    expect(githubPanelSource).toContain("$emit('configure')");
+    expect(githubPanelSource).toContain("$emit('openProfile')");
   });
 });

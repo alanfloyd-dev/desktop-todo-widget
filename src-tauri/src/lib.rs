@@ -26,6 +26,11 @@ mod platform;
 mod product_commands;
 mod product_settings_commands;
 mod product_window;
+// v1.3.0-G1 GitHub dashboard module: the only place this build speaks to
+// api.github.com. Crate-private like the updater — the network capability is
+// not part of the product's public API, and the frontend reaches it only
+// through the three commands registered below.
+mod github;
 mod qa_diagnostics;
 #[cfg(test)]
 mod qa_fixture;
@@ -352,7 +357,8 @@ pub fn run() {
         .manage(NativeWindowState::default())
         .manage(product_runtime)
         .manage(qa_diagnostics)
-        .manage(weather::WeatherRuntime::default());
+        .manage(weather::WeatherRuntime::default())
+        .manage(github::GithubRuntime::default());
     // The admission record — and with it the shared application lease — must
     // live until process exit so maintenance cannot start mid-session.
     #[cfg(target_os = "windows")]
@@ -494,6 +500,9 @@ pub fn run() {
             weather::search_weather_locations,
             weather::refresh_weather,
             weather::open_weather_attribution,
+            github::github_state,
+            github::refresh_github,
+            github::open_github_profile,
             window_mode::set_window_mode,
             window_mode::window_diagnostics,
             window_mode::start_win_d_trace,

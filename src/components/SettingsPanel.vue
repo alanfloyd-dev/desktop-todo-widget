@@ -39,6 +39,7 @@ const props = defineProps<{
   weather: WeatherViewState;
   weatherMessage: string;
   focusWeather: boolean;
+  focusGithub: boolean;
   imageAvailable: boolean;
   wallpaperAvailable: boolean;
   avatarUrl: string;
@@ -63,6 +64,7 @@ const emit = defineEmits<{
     avatarAssetId: string | null;
     quickLinks: QuickLink[];
     moduleVisibility: ModuleVisibility;
+    githubUsername: string;
   }];
 }>();
 
@@ -81,6 +83,30 @@ const { t } = i18n;
 let languageSaved = false;
 
 const dayRollover = ref(props.settings.dayRollover);
+/**
+ * GitHub username draft (v1.3.0-G1). The Settings-minimal configuration the
+ * GitHub module needs: one optional field, empty = unconfigured. Validation
+ * mirrors the backend's grammar exactly (1–39 characters, letters/digits/
+ * hyphens, no leading or trailing hyphen) so the inline error and the
+ * backend's refusal can never disagree; the backend re-validates inside its
+ * transaction and remains authoritative.
+ */
+const githubUsername = ref(props.settings.githubUsername);
+const githubUsernameError = computed(() => {
+  const value = githubUsername.value.trim();
+  if (!value) return "";
+  if (
+    value.length > 39 ||
+    value.startsWith("-") ||
+    value.endsWith("-") ||
+    /[^A-Za-z0-9-]/.test(value)
+  ) {
+    return t("github.error.invalidUsername");
+  }
+  return "";
+});
+const githubSection = ref<HTMLElement | null>(null);
+const githubInput = ref<HTMLInputElement | null>(null);
 const weatherLocationLabel = ref(props.settings.weatherLocationLabel);
 const weatherLatitude = ref(props.settings.weatherLatitude);
 const weatherLongitude = ref(props.settings.weatherLongitude);
@@ -423,6 +449,7 @@ function save() {
     // preferences change. The backend preserves unknown future ids the
     // payload cannot express (B2's replace semantics).
     moduleVisibility: { ...moduleVisibilityDraft.value },
+    githubUsername: githubUsername.value,
     // No layout editor exists yet (a later C slice), and unrelated saves do
     // not send the layout at all (the D1 concurrency gate): absent means "no
     // change" on the backend, which is a strictly stronger preservation
@@ -573,10 +600,17 @@ async function openAttribution() {
 }
 
 onMounted(async () => {
-  if (!props.focusWeather) return;
-  await nextTick();
-  weatherSection.value?.scrollIntoView({ block: "start" });
-  locationInput.value?.focus();
+  if (props.focusWeather) {
+    await nextTick();
+    weatherSection.value?.scrollIntoView({ block: "start" });
+    locationInput.value?.focus();
+    return;
+  }
+  if (props.focusGithub) {
+    await nextTick();
+    githubSection.value?.scrollIntoView({ block: "start" });
+    githubInput.value?.focus();
+  }
 });
 
 onBeforeUnmount(() => {
@@ -851,6 +885,34 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
           </button>
           <small v-if="weatherMessage" role="status">{{ weatherMessage }}</small>
         </div>
+      </section>
+
+      <!--
+        The GitHub section (v1.3.0-G1): the module's whole configuration is
+        one optional username — no login, no token, no account link of any
+        kind. Empty means unconfigured, which keeps the module (default
+        hidden) entirely offline. The inline error mirrors the backend's
+        username grammar; the backend re-validates inside its transaction.
+      -->
+      <div class="settings-section-heading settings-major-heading">
+        <strong>{{ t("settings.githubHeading") }}</strong>
+      </div>
+      <section ref="githubSection" class="github-settings" aria-labelledby="github-settings-heading">
+        <label class="settings-row">
+          <span>
+            <strong id="github-settings-heading">{{ t("settings.githubUsername") }}</strong>
+            <small>{{ t("settings.githubUsernameHint") }}</small>
+          </span>
+          <input
+            ref="githubInput"
+            v-model="githubUsername"
+            type="text"
+            :placeholder="t('settings.githubUsernamePlaceholder')"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+        <p v-if="githubUsernameError" class="settings-error" role="alert">{{ githubUsernameError }}</p>
       </section>
       <section class="appearance-settings" aria-labelledby="appearance-settings-heading">
         <div class="settings-section-heading settings-major-heading">

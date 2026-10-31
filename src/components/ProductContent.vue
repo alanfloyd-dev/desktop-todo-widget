@@ -4,6 +4,7 @@ import { profileInitials } from "../appearance";
 import { useI18n } from "../i18n";
 import { hasColumnSpan, type DashboardModuleId } from "../modules/layout";
 import type {
+  GithubViewState,
   ModuleLayout,
   ModuleVisibility,
   ProductWindowMode,
@@ -13,6 +14,7 @@ import type {
 import ModuleSection from "../modules/shared/ModuleSection.vue";
 import TodoPanel from "../modules/todo/TodoPanel.vue";
 import WeatherDisplay from "../modules/weather/WeatherDisplay.vue";
+import GithubPanel from "../modules/github/GithubPanel.vue";
 
 const props = defineProps<{
   mode: ProductWindowMode;
@@ -37,12 +39,20 @@ const props = defineProps<{
   nativeBridgeAvailable: boolean;
   weather: WeatherViewState;
   weatherMessage: string;
+  /** The one GitHub state owned by the app-level controller (v1.3.0-G1). */
+  github: GithubViewState;
+  githubMessage: string;
+  /** Account the backend reported as nonexistent, for the current identity (M2). */
+  githubNotFound: string | null;
 }>();
 defineEmits<{
   openQuickLink: [id: string];
   collapse: [];
   configureWeather: [];
   refreshWeather: [];
+  configureGithub: [];
+  refreshGithub: [];
+  openGithubProfile: [];
   openReview: [];
   openSettings: [];
   toggleModule: [id: DashboardModuleId];
@@ -214,6 +224,39 @@ const dateLabel = computed(() =>
                 </button>
               </li>
             </ul>
+          </ModuleSection>
+        </div>
+
+        <!--
+          The GitHub statistics module (v1.3.0-G1). Hidden by default — the
+          registry ships it disabled and the backend refuses any request for
+          an unconfigured username — so this slot changes nothing for existing
+          surfaces until the user both enables the module and configures an
+          account. Collapse rides the same shared container as Quick Links;
+          the card itself only ever renders from the app-owned state.
+        -->
+        <div
+          v-if="entry.id === 'github' && moduleVisibility.github"
+          class="dashboard-slot"
+          :class="{ 'dashboard-slot--span-2': spannedLayout && entry.colSpan === 2 }"
+        >
+          <ModuleSection
+            class="github-module"
+            :aria-label="t('github.heading')"
+            :title="t('github.heading')"
+            :module-name="t('modules.github')"
+            :collapsed="moduleCollapsed('github')"
+            :toggle-disabled="!collapseAvailable"
+            @toggle="$emit('toggleModule', 'github')"
+          >
+            <GithubPanel
+              :github="github"
+              :github-message="githubMessage"
+              :not-found="githubNotFound"
+              @configure="$emit('configureGithub')"
+              @refresh="$emit('refreshGithub')"
+              @open-profile="$emit('openGithubProfile')"
+            />
           </ModuleSection>
         </div>
       </template>

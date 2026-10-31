@@ -18,6 +18,7 @@ import {
 } from "./appearance";
 import { createI18n, normalizeLanguage, provideI18n } from "./i18n";
 import { browserWeatherState, createWeatherController, type WeatherMessage } from "./modules/weather/controller";
+import { createGithubController, type GithubMessage } from "./modules/github/controller";
 import { openQuickLink as openQuickLinkCommand, type ShortcutsBridge } from "./modules/shortcuts/bridge";
 import { isModuleEnabled, resolveModuleVisibility, type ModuleVisibility } from "./modules/registry";
 import {
@@ -48,6 +49,7 @@ const error = ref("");
 const settingsOpen = ref(false);
 const reviewOpen = ref(false);
 const weatherSettingsRequested = ref(false);
+const githubSettingsRequested = ref(false);
 /**
  * The single weather state owner (see `modules/weather/controller.ts`). The app resolves its
  * message keys through this component's i18n instance, so a status re-renders
@@ -67,6 +69,28 @@ const {
   loadWeather,
   refreshWeather,
 } = weatherController;
+/**
+ * The single GitHub state owner (see `modules/github/controller.ts`), the
+ * weather controller's shape at a smaller scope. The message resolves through
+ * this component's i18n instance like the weather message does.
+ */
+const githubController = createGithubController({
+  available: nativeBridgeAvailable,
+  invoke,
+});
+const github = githubController.github;
+const githubMessageKey = githubController.message as Ref<GithubMessage | null>;
+const githubNotFound = githubController.notFound;
+const githubMessage = computed(() =>
+  githubMessageKey.value ? t(githubMessageKey.value.key, githubMessageKey.value.params) : "",
+);
+const {
+  loadGithub,
+  refreshGithub,
+  refreshIfStale,
+  switchIdentity,
+  invalidate,
+} = githubController;
 const imageAsset = ref<AssetPayload>(emptyAsset());
 const wallpaperAsset = ref<AssetPayload>(emptyAsset());
 const avatarAsset = ref<AssetPayload>(emptyAsset());
@@ -181,6 +205,16 @@ function browserState(): ProductViewState {
       .map((id) => id.trim())
       .filter(Boolean),
   );
+  // Preview-only QA seam for default-hidden modules (v1.3.0-G1): `?modules=`
+  // only hides, so a module the registry ships disabled — GitHub — has no
+  // path into the browser preview without this companion parameter
+  // (`?show=github`). The native build never reads it.
+  const shownModules = new Set(
+    (preview.get("show") ?? "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean),
+  );
   // Preview-only QA seam for custom layouts: a fixed table of known variants
   // (`?layout=spanned`, `?layout=todo-first`, …) stored RAW into the draft so
   // the app-boundary resolver runs the exact path it runs in production. The
@@ -232,7 +266,9 @@ function browserState(): ProductViewState {
     "unknown-entry": {
       version: 1,
       entries: [
-        { id: "github", order: 0, colSpan: 1 },
+        // "newsfeed" stands in for a module id this build does not know — it
+        // was "github" before v1.3.0 registered that module as known.
+        { id: "newsfeed", order: 0, colSpan: 1 },
         { id: "todo", order: 1, colSpan: 1 },
       ],
     },
@@ -303,6 +339,9 @@ function browserState(): ProductViewState {
       displayName: "User",
       avatarAssetId: null,
       quickLinks: [],
+      // The browser preview never carries a GitHub account: the sample card
+      // (if shown) is controller-provided preview data, not a configured one.
+      githubUsername: "",
       // Preview-only QA seam for module visibility: `?modules=` lists the
       // module ids to hide (`?modules=todo,review`), so the rendering matrix
       // is inspectable in the plain browser. The native build never reads it —
@@ -313,6 +352,7 @@ function browserState(): ProductViewState {
         weather: !hiddenModules.has("weather"),
         shortcuts: !hiddenModules.has("shortcuts"),
         review: !hiddenModules.has("review"),
+        github: shownModules.has("github"),
       }),
       // The raw variant document — not a pre-resolved one — so the boundary
       // resolver below runs the exact path production runs.
@@ -395,6 +435,38 @@ function openWeatherSettings() {
   weatherSettingsRequested.value = true;
   settingsOpen.value = true;
   menu.value.open = false;
+}
+
+/** The GitHub card's setup entry: Settings, focused on the username field. */
+function openGithubSettings() {
+  reviewOpen.value = false;
+  githubSettingsRequested.value = true;
+  settingsOpen.value = true;
+  menu.value.open = false;
+}
+
+/**
+ * The card's profile hand-off. The username — never a URL — goes to the
+ * backend command, which re-validates it and opens the fixed profile origin
+ * through the shell; the browser preview has no shell and opens the same
+ * fixed-origin URL itself.
+ */
+async function openGithubProfile() {
+  const username = (github.value.snapshot?.username || github.value.username).trim();
+  if (!username) return;
+  if (!nativeBridgeAvailable) {
+    window.open(
+      `https://github.com/${encodeURIComponent(username)}`,
+      "_blank",
+      "noopener,noreferrer",
+    );
+    return;
+  }
+  try {
+    await invoke("open_github_profile", { username });
+  } catch (reason) {
+    error.value = String(reason);
+  }
 }
 
 /**
@@ -567,6 +639,7 @@ async function saveSettings(patch: {
   avatarAssetId: string | null;
   quickLinks: QuickLink[];
   moduleVisibility: ModuleVisibility;
+  githubUsername: string;
 }) {
   const active = state.value.settings;
   const weatherIdentityChanged =
@@ -585,6 +658,16 @@ async function saveSettings(patch: {
       refreshRecommended: patch.weatherLatitude !== null && patch.weatherLongitude !== null,
     };
   }
+  if (active.githubUsername.trim() !== patch.githubUsername.trim()) {
+    // Same rule for the GitHub identity: a changed username must never keep
+    // rendering the previous account's numbers. The controller's
+    // `switchIdentity` resets the card to the new account's honest state,
+    // clears the previous account's message and not-found fact (M4), and
+    // invalidates every pending refresh intent of the old account (M1) —
+    // `github_state` re-reads the cache for the new username (cache keys are
+    // per-account) right after the save lands.
+    switchIdentity(patch.githubUsername);
+  }
   if (!nativeBridgeAvailable) {
     Object.assign(state.value.settings, patch);
     settingsOpen.value = false;
@@ -596,10 +679,20 @@ async function saveSettings(patch: {
     state.value = await invoke<ProductViewState>("update_product_settings", { patch });
     settingsOpen.value = false;
     weatherSettingsRequested.value = false;
+    githubSettingsRequested.value = false;
     await loadAppearanceRuntime();
     await loadWeather();
     if (weather.value.configured && weather.value.refreshRecommended) {
       void refreshWeather(false);
+    }
+    await loadGithub();
+    // The one automatic refresh trigger now lives in the controller. Hiding
+    // the module in the same save invalidates any pending refresh intent for
+    // it, so nothing queued for a hidden module can still run.
+    if (isModuleEnabled(moduleVisibility.value, "github")) {
+      refreshIfStale(true);
+    } else {
+      invalidate();
     }
   } catch (reason) {
     error.value = String(reason);
@@ -626,6 +719,8 @@ onMounted(async () => {
   if (weather.value.configured && weather.value.refreshRecommended) {
     void refreshWeather(false);
   }
+  await loadGithub();
+  refreshIfStale(isModuleEnabled(moduleVisibility.value, "github"));
   weatherTimer = window.setInterval(() => {
     void loadWeather().then(() => {
       if (weather.value.configured && weather.value.refreshRecommended) {
@@ -725,12 +820,18 @@ onBeforeUnmount(() => {
         :native-bridge-available="nativeBridgeAvailable"
         :weather="weather"
         :weather-message="weatherMessage"
+        :github="github"
+        :github-message="githubMessage"
+        :github-not-found="githubNotFound"
         @open-quick-link="openQuickLink"
         @collapse="runAction('floating.collapse')"
         @toggle-module="toggleModuleCollapsed"
         @open-settings="runAction('settings')"
         @configure-weather="openWeatherSettings"
         @refresh-weather="refreshWeather(true)"
+        @configure-github="openGithubSettings"
+        @refresh-github="refreshGithub(true)"
+        @open-github-profile="openGithubProfile"
         @open-review="openReview"
         @error="error = $event"
       />
@@ -750,6 +851,7 @@ onBeforeUnmount(() => {
       :weather="weather"
       :weather-message="weatherMessage"
       :focus-weather="weatherSettingsRequested"
+      :focus-github="githubSettingsRequested"
       @close="settingsOpen = false"
       @save="saveSettings"
       @refresh-weather="refreshWeather(true)"

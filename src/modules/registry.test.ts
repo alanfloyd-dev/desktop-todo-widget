@@ -18,8 +18,9 @@ function asMutable(visibility: ModuleVisibility): Record<string, boolean> {
 }
 
 describe("module registry", () => {
-  it("declares exactly the four known module ids", () => {
+  it("declares exactly the five known module ids", () => {
     expect([...MODULE_REGISTRY].map((module) => module.id).sort()).toEqual([
+      "github",
       "review",
       "shortcuts",
       "todo",
@@ -32,7 +33,7 @@ describe("module registry", () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  it("classifies the audited surfaces: three dashboard sections and one overlay", () => {
+  it("classifies the audited surfaces: four dashboard sections and one overlay", () => {
     const surfaceOf = Object.fromEntries(
       MODULE_REGISTRY.map((module) => [module.id, module.surface]),
     );
@@ -40,13 +41,27 @@ describe("module registry", () => {
       todo: "dashboard",
       weather: "dashboard",
       shortcuts: "dashboard",
+      github: "dashboard",
       review: "overlay",
     });
   });
 
-  it("ships every module enabled and labels it in both catalogs", () => {
+  it("ships the four surface modules enabled, GitHub disabled, and labels all in both catalogs", () => {
+    // The Amendment ① contract: the pre-GitHub surface ships exactly as
+    // v1.2.x left it, and the network module stays out until the user asks
+    // for it. A default flipped in either direction is an upgrade-behavior
+    // change, so it is pinned per module rather than as one aggregate.
+    const defaults = Object.fromEntries(
+      MODULE_REGISTRY.map((module) => [module.id, module.defaultEnabled]),
+    );
+    expect(defaults).toEqual({
+      todo: true,
+      weather: true,
+      shortcuts: true,
+      review: true,
+      github: false,
+    });
     for (const module of MODULE_REGISTRY) {
-      expect(module.defaultEnabled, `${module.id} must default to enabled`).toBe(true);
       expect(en[module.labelKey], `${module.labelKey} missing from en`).toBeTruthy();
       expect(zhHans[module.labelKey], `${module.labelKey} missing from zh-Hans`).toBeTruthy();
     }
@@ -54,17 +69,19 @@ describe("module registry", () => {
 });
 
 describe("resolveModuleVisibility", () => {
-  it("resolves missing preferences to all enabled", () => {
+  it("resolves missing preferences to the registry defaults (surface enabled, GitHub hidden)", () => {
     expect(resolveModuleVisibility(undefined)).toEqual(DEFAULT_MODULE_VISIBILITY);
     expect(resolveModuleVisibility(null)).toEqual(DEFAULT_MODULE_VISIBILITY);
+    expect(DEFAULT_MODULE_VISIBILITY.github).toBe(false);
   });
 
-  it("resolves a partially stated preference against the enabled default", () => {
+  it("resolves a partially stated preference against the per-module default", () => {
     expect(resolveModuleVisibility({ weather: false })).toEqual({
       todo: true,
       weather: false,
       shortcuts: true,
       review: true,
+      github: false,
     });
   });
 
@@ -76,14 +93,24 @@ describe("resolveModuleVisibility", () => {
     expect(visibility.shortcuts).toBe(true);
   });
 
-  it("keeps an explicit true enabled", () => {
-    expect(resolveModuleVisibility({ todo: true })).toEqual(DEFAULT_MODULE_VISIBILITY);
+  it("keeps an explicit true enabled — including GitHub, the user's own choice", () => {
+    expect(resolveModuleVisibility({ github: true }).github).toBe(true);
+    expect(resolveModuleVisibility({ todo: true, github: true })).toEqual({
+      ...DEFAULT_MODULE_VISIBILITY,
+      github: true,
+    });
   });
 
-  it("ignores unknown preference keys and returns exactly the four known ids", () => {
+  it("ignores unknown preference keys and returns exactly the five known ids", () => {
     const stray = { news: false, todo: false } as Partial<ModuleVisibility>;
     const visibility = resolveModuleVisibility(stray);
-    expect(Object.keys(visibility).sort()).toEqual(["review", "shortcuts", "todo", "weather"]);
+    expect(Object.keys(visibility).sort()).toEqual([
+      "github",
+      "review",
+      "shortcuts",
+      "todo",
+      "weather",
+    ]);
     expect(visibility.todo).toBe(false);
   });
 
@@ -112,5 +139,6 @@ describe("isModuleEnabled", () => {
     const visibility = resolveModuleVisibility({ shortcuts: false });
     expect(isModuleEnabled(visibility, "shortcuts")).toBe(false);
     expect(isModuleEnabled(visibility, "todo")).toBe(true);
+    expect(isModuleEnabled(visibility, "github")).toBe(false);
   });
 });
