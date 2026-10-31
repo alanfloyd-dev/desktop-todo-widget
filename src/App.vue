@@ -87,10 +87,21 @@ const githubMessage = computed(() =>
 const {
   loadGithub,
   refreshGithub,
+  refreshSearch,
   refreshIfStale,
   switchIdentity,
   invalidate,
 } = githubController;
+/**
+ * The card's manual refresh affordance (G2): one click refreshes both
+ * planes — the profile fetch and the search fetch — each behind its own
+ * queue and its own backend single-flight flag, so they run independently
+ * and neither can be dropped by the other's in-progress state.
+ */
+function refreshGithubCard() {
+  void refreshGithub(true);
+  void refreshSearch(true);
+}
 const imageAsset = ref<AssetPayload>(emptyAsset());
 const wallpaperAsset = ref<AssetPayload>(emptyAsset());
 const avatarAsset = ref<AssetPayload>(emptyAsset());
@@ -830,7 +841,7 @@ onBeforeUnmount(() => {
         @configure-weather="openWeatherSettings"
         @refresh-weather="refreshWeather(true)"
         @configure-github="openGithubSettings"
-        @refresh-github="refreshGithub(true)"
+        @refresh-github="refreshGithubCard"
         @open-github-profile="openGithubProfile"
         @open-review="openReview"
         @error="error = $event"

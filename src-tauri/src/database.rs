@@ -110,6 +110,21 @@ CREATE TABLE IF NOT EXISTS github_cache (
 );
 "#;
 
+// GitHub search-index cache (v1.3.0-G2), a separate table rather than a wider
+// github_cache payload on purpose: the profile/stars snapshot and the
+// search-index totals are refreshed by different commands against different
+// provider rate budgets, so they must be able to succeed, age, and fail
+// independently. Sharing one row would couple their fetched_at values and let
+// a search failure erase a fresh profile snapshot's freshness. The same
+// per-username key rule as MIGRATION_4 applies.
+const MIGRATION_5: &str = r#"
+CREATE TABLE IF NOT EXISTS github_search_cache (
+  username TEXT NOT NULL PRIMARY KEY,
+  payload_json TEXT NOT NULL,
+  fetched_at INTEGER NOT NULL
+);
+"#;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Shortcut {
     pub id: String,
@@ -136,6 +151,11 @@ pub struct GithubCacheRow {
     pub payload_json: String,
     pub fetched_at: i64,
 }
+
+/// The search-index cache row (`github_search_cache`), the G1 row's exact
+/// shape under a different name: one row per lowercased username, holding the
+/// small normalized search snapshot, never provider responses.
+pub type GithubSearchCacheRow = GithubCacheRow;
 
 pub struct Database {
     path: PathBuf,
@@ -253,6 +273,17 @@ impl Database {
             transaction
                 .execute(
                     "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(4, ?1)",
+                    [unix_timestamp()],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        if current_version < 5 {
+            transaction
+                .execute_batch(MIGRATION_5)
+                .map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(5, ?1)",
                     [unix_timestamp()],
                 )
                 .map_err(|error| error.to_string())?;
@@ -433,6 +464,47 @@ impl Database {
         Ok(())
     }
 
+    /// Reads the search-index snapshot cached for one normalized username.
+    /// Deliberately independent of [`Self::github_cache`]: either plane can be
+    /// present, fresh, stale, or missing without implying anything about the
+    /// other.
+    pub fn github_search_cache(&self, username: &str) -> Result<Option<GithubSearchCacheRow>, String> {
+        self.connection
+            .lock()
+            .map_err(|_| "database lock poisoned")?
+            .query_row(
+                "SELECT username, payload_json, fetched_at
+                 FROM github_search_cache
+                 WHERE username = ?1",
+                params![username],
+                |row| {
+                    Ok(GithubSearchCacheRow {
+                        username: row.get(0)?,
+                        payload_json: row.get(1)?,
+                        fetched_at: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn upsert_github_search_cache(&self, row: &GithubSearchCacheRow) -> Result<(), String> {
+        self.connection
+            .lock()
+            .map_err(|_| "database lock poisoned")?
+            .execute(
+                "INSERT INTO github_search_cache(username, payload_json, fetched_at)
+                 VALUES(?1, ?2, ?3)
+                 ON CONFLICT(username) DO UPDATE SET
+                   payload_json = excluded.payload_json,
+                   fetched_at = excluded.fetched_at",
+                params![row.username, row.payload_json, row.fetched_at],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
     #[cfg(test)]
     fn table_exists(&self, table: &str) -> bool {
         self.connection
@@ -460,8 +532,8 @@ fn unix_timestamp() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Database, GithubCacheRow, Shortcut, WeatherCacheRow, MIGRATION_1, MIGRATION_2, MIGRATION_3};
-    use rusqlite::Connection;
+    use super::{Database, GithubCacheRow, GithubSearchCacheRow, Shortcut, WeatherCacheRow, MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4};
+    use rusqlite::{params, Connection};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     /// A temp SQLite path unique to one test run; callers clean up themselves.
@@ -509,10 +581,11 @@ mod tests {
             "app_settings",
             "weather_cache",
             "github_cache",
+            "github_search_cache",
         ] {
             assert!(database.table_exists(table), "missing {table}");
         }
-        assert_eq!(database.schema_version().expect("version"), 4);
+        assert_eq!(database.schema_version().expect("version"), 5);
     }
 
     #[test]
@@ -574,7 +647,7 @@ mod tests {
         }
 
         let database = Database::open(&path).expect("upgrade");
-        assert_eq!(database.schema_version().expect("version"), 4);
+        assert_eq!(database.schema_version().expect("version"), 5);
         assert_eq!(
             database.shortcut("custom").expect("shortcut"),
             Some(Shortcut {
@@ -628,7 +701,7 @@ mod tests {
         }
 
         let database = Database::open(&path).expect("upgrade");
-        assert_eq!(database.schema_version().expect("version"), 4);
+        assert_eq!(database.schema_version().expect("version"), 5);
         assert!(database.table_exists("weather_cache"));
         let connection = database.connection.lock().expect("connection");
         assert_eq!(
@@ -707,10 +780,101 @@ mod tests {
         }
 
         let database = Database::open(&path).expect("upgrade");
-        assert_eq!(database.schema_version().expect("version"), 4);
+        assert_eq!(database.schema_version().expect("version"), 5);
         assert!(database.table_exists("github_cache"));
+        assert!(database.table_exists("github_search_cache"), "migration 5 upgrades the same open");
         let stored = database.setting("product_settings").expect("settings");
         assert_eq!(stored.as_deref(), Some(r#"{"mode":"sidebar"}"#));
+        drop(database);
+        for candidate in [
+            path.clone(),
+            path.with_extension("sqlite3-wal"),
+            path.with_extension("sqlite3-shm"),
+        ] {
+            let _ = std::fs::remove_file(candidate);
+        }
+    }
+
+    /// Migration 5 upgrades an existing (schema-4, G1-era) database
+    /// additively: the github_search_cache table appears, and the pre-existing
+    /// G1 snapshot rows — the data this migration must never reinterpret —
+    /// survive byte-identically.
+    #[test]
+    fn migration_five_adds_search_cache_and_preserves_g1_rows() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "alan-desktop-search-migration-{}-{suffix}.sqlite3",
+            std::process::id()
+        ));
+        let g1_row = GithubCacheRow {
+            username: "octocat".into(),
+            payload_json: r#"{"username":"octocat","followers":12,"stars":34,"fetchedAt":9}"#.into(),
+            fetched_at: 9,
+        };
+        {
+            let connection = Connection::open(&path).expect("schema-four database");
+            connection
+                .execute_batch(MIGRATION_1)
+                .expect("migration one");
+            connection
+                .execute_batch(MIGRATION_2)
+                .expect("migration two");
+            connection
+                .execute_batch(MIGRATION_3)
+                .expect("migration three");
+            connection
+                .execute_batch(MIGRATION_4)
+                .expect("migration four");
+            connection
+                .execute_batch(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES(1, 1);
+                     INSERT INTO schema_migrations(version, applied_at) VALUES(2, 2);
+                     INSERT INTO schema_migrations(version, applied_at) VALUES(3, 3);
+                     INSERT INTO schema_migrations(version, applied_at) VALUES(4, 4);
+                     INSERT INTO app_settings(key, value, updated_at)
+                       VALUES('product_settings', '{\"githubUsername\":\"octocat\"}', 1);",
+                )
+                .expect("schema four");
+            connection
+                .execute(
+                    "INSERT INTO github_cache(username, payload_json, fetched_at) VALUES(?1, ?2, ?3)",
+                    params![g1_row.username, g1_row.payload_json, g1_row.fetched_at],
+                )
+                .expect("g1 cache row");
+        }
+
+        let database = Database::open(&path).expect("upgrade");
+        assert_eq!(database.schema_version().expect("version"), 5);
+        assert!(database.table_exists("github_search_cache"));
+        // The G1 row is untouched — same key, same bytes, same fetched_at.
+        assert_eq!(
+            database.github_cache("octocat").expect("g1 row"),
+            Some(g1_row),
+            "migration 5 must not touch the G1 snapshot"
+        );
+        // The new plane starts empty and round-trips independently.
+        assert_eq!(database.github_search_cache("octocat").expect("missing"), None);
+        let search_row = GithubSearchCacheRow {
+            username: "octocat".into(),
+            payload_json: r#"{"username":"octocat","openIssues":3,"pullRequests":5,"fetchedAt":77}"#.into(),
+            fetched_at: 77,
+        };
+        database
+            .upsert_github_search_cache(&search_row)
+            .expect("search upsert");
+        assert_eq!(
+            database.github_search_cache("octocat").expect("search row"),
+            Some(search_row),
+            "search writes never leak into or from the G1 table"
+        );
+        assert_eq!(
+            database.github_search_cache("someone-else").expect("other"),
+            None,
+            "a different username must not see another account's search row"
+        );
         drop(database);
         for candidate in [
             path.clone(),
@@ -806,7 +970,7 @@ mod tests {
         // test must not be a stopwatch.
         assert!(elapsed >= Duration::from_millis(200), "elapsed {elapsed:?}");
         assert!(elapsed < Duration::from_secs(5), "elapsed {elapsed:?}");
-        assert_eq!(reopened.unwrap().schema_version().expect("version"), 4);
+        assert_eq!(reopened.unwrap().schema_version().expect("version"), 5);
         releaser.join().expect("releaser thread");
         remove_db(&path);
     }
@@ -845,7 +1009,7 @@ mod tests {
         // Once the lock is gone the same database migrates normally.
         drop(holder);
         let recovered = Database::open(&path).expect("open after release");
-        assert_eq!(recovered.schema_version().expect("version"), 4);
+        assert_eq!(recovered.schema_version().expect("version"), 5);
         drop(recovered);
         remove_db(&path);
     }
@@ -926,7 +1090,7 @@ mod tests {
         {
             let state = crate::settings::AppState::load(Database::open(&path).expect("reopen"))
                 .expect("rollback runtime must open");
-            assert_eq!(state.database.schema_version().expect("version"), 4);
+            assert_eq!(state.database.schema_version().expect("version"), 5);
             assert_eq!(
                 state.database.task_count().expect("task count"),
                 1,

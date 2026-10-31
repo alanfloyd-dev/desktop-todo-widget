@@ -502,6 +502,7 @@ pub fn run() {
             weather::open_weather_attribution,
             github::github_state,
             github::refresh_github,
+            github::refresh_github_search,
             github::open_github_profile,
             window_mode::set_window_mode,
             window_mode::window_diagnostics,

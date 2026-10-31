@@ -96,10 +96,14 @@ export const en: Record<string, string> = {
   // GitHub is a technology brand and stays untranslated (see the header
   // note); only the surrounding UI copy is localized.
   "github.heading": "GitHub",
-  "github.setupHint": "Show your followers and stars",
+  "github.setupHint": "Show your public GitHub statistics",
   "github.setUsername": "Set username",
   "github.followers": "Followers",
   "github.stars": "Stars",
+  "github.openIssues": "Open issues",
+  "github.pullRequests": "Pull requests",
+  "github.searchLoading": "Loading search data…",
+  "github.searchUnavailable": "Issue and pull request data unavailable.",
   "github.refreshAriaLabel": "Refresh GitHub statistics",
   "github.profileAriaLabel": "Open {name} on GitHub",
   "github.ageMinutes": "Updated {minutes}m ago",
@@ -114,6 +118,8 @@ export const en: Record<string, string> = {
   "github.error.inProgress": "A GitHub refresh is already running.",
   "github.error.incomplete":
     "This account has more repositories than the app fetches. The last complete total is shown.",
+  "github.error.searchIncomplete":
+    "GitHub search results were incomplete. The last complete totals are shown.",
   "github.error.generic": "GitHub is unavailable right now. Saved data is unchanged.",
 
   // --- Today / task lifecycle ----------------------------------------------
@@ -435,10 +441,14 @@ export const zhHans: Record<string, string> = {
 
   // GitHub 是技术品牌名，不作翻译（见文件头部说明）；仅界面文案本地化。
   "github.heading": "GitHub",
-  "github.setupHint": "显示你的关注者与获星数",
+  "github.setupHint": "显示你的公开 GitHub 统计",
   "github.setUsername": "设置用户名",
   "github.followers": "关注者",
   "github.stars": "获星",
+  "github.openIssues": "开放 Issue",
+  "github.pullRequests": "Pull Request",
+  "github.searchLoading": "正在获取搜索数据…",
+  "github.searchUnavailable": "Issue 与 Pull Request 数据暂不可用。",
   "github.refreshAriaLabel": "刷新 GitHub 统计",
   "github.profileAriaLabel": "在 GitHub 打开 {name}",
   "github.ageMinutes": "更新于 {minutes} 分钟前",
@@ -452,6 +462,7 @@ export const zhHans: Record<string, string> = {
   "github.error.cooldown": "请稍候再刷新。",
   "github.error.inProgress": "GitHub 统计正在刷新中。",
   "github.error.incomplete": "该账号的仓库数量超出应用的获取范围，显示的是最近一次完整统计。",
+  "github.error.searchIncomplete": "GitHub 搜索结果不完整，显示的是最近一次完整统计。",
   "github.error.generic": "GitHub 暂时不可用，已保存的数据未变更。",
 
   "menu.ariaLabel": "窗口菜单",

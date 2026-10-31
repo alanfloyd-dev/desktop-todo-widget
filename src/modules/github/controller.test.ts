@@ -28,6 +28,16 @@ function snapshotState(overrides: Partial<GithubViewState> = {}): GithubViewStat
     cacheStatus: "fresh",
     cacheAgeSeconds: 30,
     refreshing: false,
+    search: {
+      username: "octocat",
+      openIssues: 5,
+      pullRequests: 42,
+      fetchedAt: 1_800_000_000,
+    },
+    searchCacheStatus: "fresh",
+    searchCacheAgeSeconds: 30,
+    searchRefreshing: false,
+    searchLastRefresh: "success",
     rateLimited: false,
     retryAfterSeconds: null,
     lastRefresh: "success",
@@ -39,6 +49,7 @@ function accountAState(): GithubViewState {
   return snapshotState({
     username: "alanfloyd-dev",
     snapshot: { username: "alanfloyd-dev", followers: 117, stars: 19, fetchedAt: 1 },
+    search: { username: "alanfloyd-dev", openIssues: 3, pullRequests: 7, fetchedAt: 1 },
   });
 }
 
@@ -72,6 +83,8 @@ function sequenceBridge(stateAnswer: () => GithubViewState | Promise<GithubViewS
     }) as GithubBridge["invoke"],
   };
   const refreshCount = () => calls.filter((c) => c.command === "refresh_github").length;
+  const searchCount = () =>
+    calls.filter((c) => c.command === "refresh_github_search").length;
   const indexOf = (command: string, occurrence = 0) => {
     let seen = 0;
     for (let index = 0; index < calls.length; index += 1) {
@@ -85,6 +98,7 @@ function sequenceBridge(stateAnswer: () => GithubViewState | Promise<GithubViewS
     bridge,
     calls,
     refreshCount,
+    searchCount,
     async settle(command: string, value: unknown, occurrence = 0) {
       const entry = calls[indexOf(command, occurrence)];
       entry.done = true;
@@ -414,5 +428,223 @@ describe("github controller — account-scoped messages (M4)", () => {
     // A's snapshot would flash onto B's card.
     expect(controller.github.value.username).toBe("octocat");
     expect(controller.github.value.snapshot).toBeNull();
+  });
+});
+
+describe("github controller — search plane (G2)", () => {
+  it("a manual search refresh rides refresh_github_search once and lands the view", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = snapshotState({ searchCacheStatus: "stale" });
+
+    const pending = controller.refreshSearch(true);
+    expect(controller.github.value.searchRefreshing).toBe(true);
+    await harness.settle("refresh_github_search", snapshotState({ searchCacheStatus: "fresh" }));
+    await pending;
+
+    expect(harness.searchCount()).toBe(1);
+    // The profile plane is untouched by a search refresh.
+    expect(harness.refreshCount()).toBe(0);
+    expect(controller.github.value.searchRefreshing).toBe(false);
+    expect(controller.github.value.searchCacheStatus).toBe("fresh");
+  });
+
+  it("the search plane is single-flighted independently of the profile plane", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = snapshotState({ cacheStatus: "stale", searchCacheStatus: "stale" });
+
+    // Both planes trigger at once: neither waits behind the other's queue.
+    const stats = controller.refreshGithub(false);
+    const search = controller.refreshSearch(false);
+    await tick();
+    expect(harness.refreshCount()).toBe(1);
+    expect(harness.searchCount()).toBe(1);
+
+    // A second trigger on either plane while its own fetch is in flight is a
+    // no-op.
+    controller.refreshGithub(false);
+    controller.refreshSearch(false);
+    await tick();
+    expect(harness.refreshCount()).toBe(1);
+    expect(harness.searchCount()).toBe(1);
+
+    await harness.settle("refresh_github", snapshotState());
+    await harness.settle("refresh_github_search", snapshotState());
+    await Promise.all([stats, search]);
+  });
+
+  it("a search success never clears the profile plane's not-found fact", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = snapshotState({ cacheStatus: "stale" });
+    controller.notFound.value = "octocat"; // the profile plane proved this
+
+    const pending = controller.refreshSearch(true);
+    await harness.settle("refresh_github_search", snapshotState());
+    await pending;
+
+    expect(controller.notFound.value).toBe("octocat");
+    expect(controller.message.value).toBeNull();
+  });
+
+  it("a search failure never sets the not-found fact and re-syncs the cache", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = snapshotState({ searchCacheStatus: "stale" });
+
+    const pending = controller.refreshSearch(true);
+    await harness.fail("refresh_github_search", { kind: "Network" });
+    await pending;
+
+    expect(controller.notFound.value).toBeNull();
+    expect(controller.message.value).toEqual({ key: "github.error.generic" });
+    // The failure re-syncs from the backend cache instead of blanking.
+    expect(controller.github.value).toEqual(snapshotState());
+  });
+
+  it("a stale search response never overwrites the switched identity's state", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = accountAState();
+
+    const pending = controller.refreshSearch(true);
+    controller.switchIdentity("octocat");
+    await harness.settle("refresh_github_search", accountAState());
+    await pending;
+
+    expect(controller.github.value.username).toBe("octocat");
+    expect(controller.github.value.search).toBeNull();
+    expect(controller.github.value.searchRefreshing).toBe(false);
+  });
+
+  it("switching identity invalidates the queued search refresh", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = accountAState();
+
+    const stats = controller.refreshGithub(false); // A's profile fetch in flight
+    controller.switchIdentity("octocat");
+    const search = controller.refreshSearch(false); // B's search, queued nowhere
+    await tick();
+    controller.switchIdentity("carol"); // B superseded before A settles
+
+    await harness.settle("refresh_github", accountAState());
+    await stats;
+    await harness.settle("refresh_github_search", accountAState());
+    await search;
+    await tick();
+
+    // B's search fetch was abandoned: the late search answer is discarded
+    // whole and C's card carries no numbers at all.
+    expect(harness.searchCount()).toBe(1);
+    expect(controller.github.value.username).toBe("carol");
+    expect(controller.github.value.search).toBeNull();
+    expect(controller.github.value.snapshot).toBeNull();
+  });
+
+  it("hiding the module invalidates the pending search refresh intent", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = snapshotState({ searchCacheStatus: "stale" });
+
+    const pending = controller.refreshSearch(false);
+    controller.invalidate(); // module hidden while the fetch is in flight
+    await harness.settle("refresh_github_search", snapshotState());
+    await pending;
+
+    // The stale response was discarded whole — the card keeps its previous
+    // (stale) honesty; a re-show must schedule fresh work.
+    expect(harness.searchCount()).toBe(1);
+    expect(controller.github.value.searchCacheStatus).toBe("stale");
+  });
+
+  it("refreshIfStale judges each plane independently", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+
+    // Fresh profile + stale search → only the search refresh.
+    controller.github.value = snapshotState({ searchCacheStatus: "stale" });
+    controller.refreshIfStale(true);
+    await tick();
+    expect(harness.refreshCount()).toBe(0);
+    expect(harness.searchCount()).toBe(1);
+    await harness.settle("refresh_github_search", snapshotState());
+
+    // Stale profile + fresh search → only the profile refresh.
+    controller.github.value = snapshotState({ cacheStatus: "stale" });
+    controller.refreshIfStale(true);
+    await tick();
+    expect(harness.refreshCount()).toBe(1);
+    expect(harness.searchCount()).toBe(1);
+    await harness.settle("refresh_github", snapshotState());
+
+    // Fresh everywhere → nothing.
+    controller.refreshIfStale(true);
+    await tick();
+    expect(harness.refreshCount()).toBe(1);
+    expect(harness.searchCount()).toBe(1);
+  });
+
+  it("the shared rate-limit backoff pauses both planes and neither retries", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = snapshotState({
+      cacheStatus: "stale",
+      searchCacheStatus: "stale",
+      rateLimited: true,
+      retryAfterSeconds: 120,
+    });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      controller.refreshIfStale(true);
+    }
+    await tick();
+
+    // No plane may touch the network during a backoff.
+    expect(harness.calls.length).toBe(0);
+  });
+
+  it("an unconfigured module keeps both planes off the network", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = snapshotState({ configured: false, username: "" });
+
+    await controller.refreshGithub(true);
+    await controller.refreshSearch(true);
+    controller.refreshIfStale(true);
+    await tick();
+
+    expect(harness.calls.length).toBe(0);
+  });
+
+  it("the error label maps the search plane's incomplete kind to its own copy", () => {
+    // The profile plane's incomplete error is about the repository traversal.
+    expect(githubErrorLabel({ kind: "Incomplete" }, "x")).toEqual({
+      key: "github.error.incomplete",
+    });
+    // The search plane's is about the provider's declared index incompleteness.
+    expect(githubErrorLabel({ kind: "Incomplete" }, "x", "search")).toEqual({
+      key: "github.error.searchIncomplete",
+    });
+    // Every other kind maps identically on both planes.
+    expect(githubErrorLabel({ kind: "RateLimited", message: 300 }, "x", "search")).toEqual({
+      key: "github.rateLimited",
+      params: { minutes: 5 },
+    });
+    expect(githubErrorLabel({ kind: "Network" }, "x", "search").key).toBe(
+      "github.error.generic",
+    );
+  });
+
+  it("the preview fallback carries a search sample and the native fallback starts empty", () => {
+    const preview = browserGithubState(false);
+    expect(preview.search?.openIssues).toBeGreaterThan(0);
+    expect(preview.searchCacheStatus).toBe("fresh");
+
+    const native = browserGithubState(true);
+    expect(native.search).toBeNull();
+    expect(native.searchCacheStatus).toBe("missing");
+    expect(native.searchLastRefresh).toBe("none");
   });
 });

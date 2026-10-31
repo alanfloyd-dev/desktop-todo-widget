@@ -1,5 +1,5 @@
 use crate::{
-    database::GithubCacheRow,
+    database::{GithubCacheRow, GithubSearchCacheRow},
     settings::AppState,
 };
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,28 @@ pub struct GithubSnapshot {
     pub fetched_at: i64,
 }
 
+/// The search-index snapshot (v1.3.0-G2): two account-wide totals read from
+/// GitHub's public search index — currently open issues authored by the
+/// account anywhere GitHub's index can see, and all pull requests it has
+/// authored (open, merged, or closed unmerged; each counted once). The data
+/// source is the searchable PUBLIC index by definition: these numbers never
+/// represent private, deleted, or otherwise inaccessible activity. One
+/// snapshot always covers both metrics atomically — a refresh that cannot
+/// complete both search queries persists nothing, mirroring the G1
+/// complete-traversal-or-nothing rule.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchSnapshot {
+    /// The validated username the queries were built from (the configured
+    /// spelling, trimmed). The search API names no canonical login for a
+    /// `total_count`-only read, so the integrity filter checks this field
+    /// against the row's cache key instead.
+    pub username: String,
+    pub open_issues: u64,
+    pub pull_requests: u64,
+    pub fetched_at: i64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GithubCacheStatus {
@@ -81,6 +103,18 @@ pub struct GithubViewState {
     pub cache_status: GithubCacheStatus,
     pub cache_age_seconds: Option<i64>,
     pub refreshing: bool,
+    /// The search-index plane (G2), independent of the profile plane above in
+    /// every respect: its own cache row and validity, its own refresh flag,
+    /// and its own command. Only the provider rate-limit backoff is shared —
+    /// whichever plane trips it stops both, so a hot plane cannot hammer a
+    /// provider that just asked for a pause.
+    pub search: Option<SearchSnapshot>,
+    pub search_cache_status: GithubCacheStatus,
+    pub search_cache_age_seconds: Option<i64>,
+    pub search_refreshing: bool,
+    /// The search plane's last-refresh outcome, the `last_refresh` string's
+    /// counterpart (QA evidence, never rendered).
+    pub search_last_refresh: String,
     /// Whether a provider rate-limit backoff is currently in force; refresh
     /// attempts are refused without touching the network until it expires.
     pub rate_limited: bool,
@@ -105,9 +139,10 @@ pub enum GithubError {
     /// `X-RateLimit-Remaining: 0`). Carries the provider's retry hint in
     /// seconds when it offered one; the runtime caps whatever it accepts.
     RateLimited(Option<i64>),
-    /// The repository traversal hit the page budget before the provider
-    /// reported an end. Never persisted: the previous complete snapshot
-    /// survives instead.
+    /// A traversal could not complete within its budget: the repository
+    /// pagination ran out of pages, or a search response declared
+    /// `incomplete_results`. Never persisted, on either plane: the previous
+    /// complete snapshot survives instead.
     Incomplete,
     Network,
     Timeout,
@@ -138,9 +173,16 @@ impl GithubError {
 #[derive(Default)]
 pub struct GithubRuntime {
     refreshing: AtomicBool,
+    /// The search plane's single-flight flag, deliberately separate from
+    /// `refreshing`: the two commands are independent jobs against different
+    /// provider rate budgets, and one plane's in-flight fetch must not make
+    /// the other refuse as `InProgress`.
+    search_refreshing: AtomicBool,
     last_manual_refresh: Mutex<Option<Instant>>,
+    last_manual_search_refresh: Mutex<Option<Instant>>,
     rate_limited_until: Mutex<Option<Instant>>,
     last_refresh: Mutex<String>,
+    last_search_refresh: Mutex<String>,
 }
 
 impl GithubRuntime {
@@ -209,6 +251,54 @@ impl GithubRuntime {
 
     fn finish_refresh(&self) {
         self.refreshing.store(false, Ordering::Release);
+    }
+
+    fn last_search_refresh(&self) -> String {
+        self.last_search_refresh
+            .lock()
+            .map(|value| {
+                if value.is_empty() {
+                    "none".into()
+                } else {
+                    value.clone()
+                }
+            })
+            .unwrap_or_else(|_| "unavailable".into())
+    }
+
+    fn record_search(&self, value: &str) {
+        if let Ok(mut status) = self.last_search_refresh.lock() {
+            *status = value.into();
+        }
+    }
+
+    /// The search plane's refresh gate: the same shape as [`Self::begin_refresh`]
+    /// (rate-limit gate first, then the manual cooldown, then single-flight)
+    /// with its own flag and cooldown clock, and the shared rate-limit backoff.
+    /// The backoff is shared on purpose — whichever plane the provider asked
+    /// to pause, both must pause.
+    fn begin_search_refresh(&self, manual: bool) -> Result<(), GithubError> {
+        if let Some(remaining) = self.rate_limit_remaining() {
+            return Err(GithubError::RateLimited(Some(remaining)));
+        }
+        if manual {
+            let mut last = self
+                .last_manual_search_refresh
+                .lock()
+                .map_err(|_| GithubError::ProviderError)?;
+            if last.is_some_and(|instant| instant.elapsed() < MANUAL_REFRESH_COOLDOWN) {
+                return Err(GithubError::Cooldown);
+            }
+            *last = Some(Instant::now());
+        }
+        if self.search_refreshing.swap(true, Ordering::AcqRel) {
+            return Err(GithubError::InProgress);
+        }
+        Ok(())
+    }
+
+    fn finish_search_refresh(&self) {
+        self.search_refreshing.store(false, Ordering::Release);
     }
 }
 
@@ -434,12 +524,18 @@ fn next_page_url(response: &HttpResponse) -> Result<Option<Url>, GithubError> {
     Ok(None)
 }
 
-/// Maps a refused profile/page status to the pinned error vocabulary:
-/// rate-limit shapes are recognized exactly (429, or 403 with the remaining
-/// budget at zero); everything else non-2xx is the generic provider error.
+/// Maps a refused profile/page/search status to the pinned error vocabulary:
+/// rate-limit shapes are recognized exactly (429; 403 with the remaining
+/// budget at zero; 403 carrying a `Retry-After`, the provider's documented
+/// secondary-rate-limit signature — search responses use that shape, and
+/// pausing on it is the conservative reading of every plane's contract);
+/// everything else non-2xx is the generic provider error.
 fn refused_status_error(response: &HttpResponse, now: i64) -> GithubError {
     let remaining_zero = response.rate_limit_remaining.as_deref() == Some("0");
-    if response.status == 429 || (response.status == 403 && remaining_zero) {
+    let retry_after_present = response.retry_after.is_some();
+    if response.status == 429
+        || (response.status == 403 && (remaining_zero || retry_after_present))
+    {
         GithubError::RateLimited(retry_after_seconds(response, now))
     } else {
         GithubError::ProviderError
@@ -516,6 +612,106 @@ fn fetch_stats_with_transport(
     })
 }
 
+#[derive(Deserialize)]
+struct RawSearchResult {
+    total_count: u64,
+    incomplete_results: bool,
+}
+
+/// The search-index query for one metric (G2). `is:issue is:open` selects
+/// only currently open issues authored by the account — GitHub's issue search
+/// excludes pull requests from `is:issue`, and nothing else narrows the
+/// repository scope, so the count is account-wide across every public
+/// repository the index can see. `is:pr` with no state filter selects every
+/// pull request the account authored — open, merged, or closed unmerged —
+/// each once. `per_page=1` because only `total_count` is ever read; result
+/// items are never fetched, listed, or paged.
+fn search_query(username: &str, pull_requests: bool) -> String {
+    if pull_requests {
+        format!("is:pr author:{username}")
+    } else {
+        format!("is:issue is:open author:{username}")
+    }
+}
+
+fn search_issues_url(username: &str) -> Result<Url, GithubError> {
+    api_url(
+        &["search", "issues"],
+        &[
+            ("q", search_query(username, false).as_str()),
+            ("per_page", "1"),
+        ],
+    )
+}
+
+fn search_pull_requests_url(username: &str) -> Result<Url, GithubError> {
+    api_url(
+        &["search", "issues"],
+        &[
+            ("q", search_query(username, true).as_str()),
+            ("per_page", "1"),
+        ],
+    )
+}
+
+/// One search-index read: the fixed query for `url`'s metric, answered with
+/// only the two aggregate fields. `per_page=1` bounds the body; `items` are
+/// never requested in volume and never read.
+fn fetch_search_query_with_transport(
+    transport: &impl HttpTransport,
+    url: Url,
+    now: i64,
+) -> Result<u64, GithubError> {
+    let response = transport.get(url)?;
+    match response.status {
+        200 => {
+            let result: RawSearchResult = serde_json::from_str(&response.body)
+                .map_err(|_| GithubError::InvalidResponse)?;
+            if result.incomplete_results {
+                // The provider itself says the index shard was incomplete.
+                // The count is unusable by contract: fail the refresh and
+                // keep the previous complete snapshot rather than presenting
+                // a partial index answer as an exact total.
+                return Err(GithubError::Incomplete);
+            }
+            Ok(result.total_count)
+        }
+        // Every non-200 here is a refused request, mapped by the shared
+        // vocabulary. A nonexistent author can answer 422 Validation Failed
+        // ("The listed users cannot be searched…") — a generic provider
+        // error, so the account-existence fact stays with the profile plane's
+        // 404. An existing account with no indexed activity answers 200 with
+        // total_count 0, and that zero is genuine data, never missing.
+        _ => Err(refused_status_error(&response, now)),
+    }
+}
+
+/// The complete search fetch (G2): exactly two Search API requests, serial,
+/// issues first. Both must succeed completely or nothing is persisted — one
+/// snapshot always covers both metrics.
+fn fetch_search_totals_with_transport(
+    transport: &impl HttpTransport,
+    username: &str,
+    fetched_at: i64,
+) -> Result<SearchSnapshot, GithubError> {
+    let open_issues = fetch_search_query_with_transport(
+        transport,
+        search_issues_url(username)?,
+        fetched_at,
+    )?;
+    let pull_requests = fetch_search_query_with_transport(
+        transport,
+        search_pull_requests_url(username)?,
+        fetched_at,
+    )?;
+    Ok(SearchSnapshot {
+        username: username.to_string(),
+        open_issues,
+        pull_requests,
+        fetched_at,
+    })
+}
+
 #[tauri::command]
 pub fn github_state(
     app_state: tauri::State<'_, AppState>,
@@ -576,6 +772,63 @@ pub async fn refresh_github(
     }
 }
 
+/// The search plane's refresh (v1.3.0-G2): the same command shape and the
+/// same gates as `refresh_github`, costing exactly two Search API requests
+/// (the G2 budget ceiling), persisting to its own cache table, and returning
+/// the combined view. A search failure never touches the profile plane's
+/// cache row, and vice versa.
+#[tauri::command]
+pub async fn refresh_github_search(
+    app: tauri::AppHandle,
+    manual: bool,
+) -> Result<GithubViewState, GithubError> {
+    let runtime = app.state::<GithubRuntime>();
+    let settings = app
+        .state::<AppState>()
+        .snapshot()
+        .map_err(|_| GithubError::ProviderError)?;
+    // Both configuration gates run before the refresh gate, exactly as the
+    // profile command does: an unconfigured or invalid username reaches no
+    // search request, flag, or cooldown clock.
+    let username = normalize_username(&settings.github_username)?;
+    runtime.begin_search_refresh(manual)?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let transport = ReqwestTransport::new()?;
+        fetch_search_totals_with_transport(&transport, &username, unix_timestamp())
+    })
+    .await
+    .map_err(|_| GithubError::ProviderError)
+    .and_then(|value| value);
+
+    runtime.finish_search_refresh();
+    match result {
+        Ok(snapshot) => {
+            let payload_json =
+                serde_json::to_string(&snapshot).map_err(|_| GithubError::InvalidResponse)?;
+            app.state::<AppState>()
+                .database
+                .upsert_github_search_cache(&GithubSearchCacheRow {
+                    username: cache_key(&snapshot.username),
+                    payload_json,
+                    fetched_at: snapshot.fetched_at,
+                })
+                .map_err(|_| GithubError::ProviderError)?;
+            runtime.record_search("success");
+            github_view(&app.state::<AppState>(), &runtime, unix_timestamp())
+        }
+        Err(error) => {
+            if let GithubError::RateLimited(seconds) = &error {
+                runtime.note_rate_limit(*seconds);
+            }
+            // The username is deliberately omitted: normal logs expose only
+            // the provider outcome class, never the configured account.
+            eprintln!("[github-search] result={}", error.diagnostic_label());
+            runtime.record_search(error.diagnostic_label());
+            Err(error)
+        }
+    }
+}
+
 /// Opens the configured account's public GitHub profile in the system
 /// browser. The username is re-validated here and the URL is built from the
 /// fixed profile origin only — the frontend supplies the username string,
@@ -614,6 +867,11 @@ fn github_view(
             cache_status: GithubCacheStatus::Missing,
             cache_age_seconds: None,
             refreshing: runtime.refreshing.load(Ordering::Acquire),
+            search: None,
+            search_cache_status: GithubCacheStatus::Missing,
+            search_cache_age_seconds: None,
+            search_refreshing: runtime.search_refreshing.load(Ordering::Acquire),
+            search_last_refresh: runtime.last_search_refresh(),
             rate_limited: false,
             retry_after_seconds: None,
             last_refresh: runtime.last_refresh(),
@@ -634,6 +892,22 @@ fn github_view(
     let age = snapshot
         .as_ref()
         .map(|snapshot| now.saturating_sub(snapshot.fetched_at).max(0));
+    // The search plane reads its own table under the same integrity rule:
+    // the payload must name this account and carry the row's own fetch time.
+    let search_row = state
+        .database
+        .github_search_cache(&key)
+        .map_err(|_| GithubError::ProviderError)?;
+    let search = search_row.as_ref().and_then(|row| {
+        serde_json::from_str::<SearchSnapshot>(&row.payload_json)
+            .ok()
+            .filter(|snapshot| {
+                snapshot.username.to_lowercase() == key && snapshot.fetched_at == row.fetched_at
+            })
+    });
+    let search_age = search
+        .as_ref()
+        .map(|snapshot| now.saturating_sub(snapshot.fetched_at).max(0));
     let retry_after_seconds = runtime.rate_limit_remaining();
     Ok(GithubViewState {
         configured: true,
@@ -642,6 +916,13 @@ fn github_view(
         cache_age_seconds: age,
         snapshot,
         refreshing: runtime.refreshing.load(Ordering::Acquire),
+        search,
+        search_cache_status: search_age
+            .map(cache_status)
+            .unwrap_or(GithubCacheStatus::Missing),
+        search_cache_age_seconds: search_age,
+        search_refreshing: runtime.search_refreshing.load(Ordering::Acquire),
+        search_last_refresh: runtime.last_search_refresh(),
         rate_limited: retry_after_seconds.is_some(),
         retry_after_seconds,
         last_refresh: runtime.last_refresh(),
@@ -1198,5 +1479,373 @@ mod tests {
         let view = github_view(&state, &runtime, unix_timestamp()).expect("view");
         assert!(view.rate_limited);
         assert!(view.retry_after_seconds.is_some());
+    }
+
+    // --- G2: search-index requests ---------------------------------------------
+
+    /// A search-answer fixture: only the two aggregate fields exist for this
+    /// feature; `items` are never read and their absence from the fixture
+    /// proves the parse does not depend on them.
+    fn search_body(total_count: u64, incomplete_results: bool) -> String {
+        format!(
+            r#"{{ "total_count": {total_count}, "incomplete_results": {incomplete_results} }}"#
+        )
+    }
+
+    fn search_response(total_count: u64, incomplete_results: bool) -> HttpResponse {
+        profile_response(200, &search_body(total_count, incomplete_results))
+    }
+
+    fn search_snapshot(username: &str, open_issues: u64, pull_requests: u64, fetched_at: i64) -> SearchSnapshot {
+        SearchSnapshot {
+            username: username.into(),
+            open_issues,
+            pull_requests,
+            fetched_at,
+        }
+    }
+
+    fn seed_search_cache(state: &AppState, snapshot: &SearchSnapshot) {
+        state
+            .database
+            .upsert_github_search_cache(&GithubSearchCacheRow {
+                username: cache_key(&snapshot.username),
+                payload_json: serde_json::to_string(snapshot).expect("json"),
+                fetched_at: snapshot.fetched_at,
+            })
+            .expect("seed search cache");
+    }
+
+    #[test]
+    fn search_urls_encode_the_queries_under_the_fixed_api_origin() {
+        let issues = search_issues_url("octo-cat").expect("issues url");
+        assert_eq!(
+            issues.as_str(),
+            "https://api.github.com/search/issues?q=is%3Aissue+is%3Aopen+author%3Aocto-cat&per_page=1",
+            "the query is a single URL-encoded parameter; per_page=1 bounds the body"
+        );
+        let pull_requests = search_pull_requests_url("octo-cat").expect("pull requests url");
+        assert_eq!(
+            pull_requests.as_str(),
+            "https://api.github.com/search/issues?q=is%3Apr+author%3Aocto-cat&per_page=1"
+        );
+    }
+
+    #[test]
+    fn the_two_search_queries_filter_exactly_as_defined() {
+        // Open issues: the open-state filter is part of the query; `is:issue`
+        // excludes pull requests by GitHub's search grammar.
+        assert_eq!(
+            search_query("octocat", false),
+            "is:issue is:open author:octocat"
+        );
+        // All pull requests, each once: no state filter, so open, merged, and
+        // closed-unmerged states are all included in the total.
+        assert_eq!(search_query("octocat", true), "is:pr author:octocat");
+        assert!(
+            !search_query("octocat", true).contains("is:open"),
+            "the pull-request total must not be narrowed to open states"
+        );
+    }
+
+    #[test]
+    fn search_totals_read_total_count_and_run_serially_within_budget() {
+        // Request order: issues first, then pull requests (pop takes from the
+        // end, so the issues fixture is listed last).
+        let transport = QueueTransport::new(vec![
+            search_response(41, false),
+            search_response(12, false),
+        ]);
+        let snapshot =
+            fetch_search_totals_with_transport(&transport, "octocat", 100).expect("snapshot");
+        assert_eq!(snapshot.open_issues, 12);
+        assert_eq!(snapshot.pull_requests, 41, "total_count is read verbatim");
+        assert_eq!(snapshot.username, "octocat");
+        assert_eq!(snapshot.fetched_at, 100);
+        let urls = transport.urls();
+        assert_eq!(urls.len(), 2, "exactly two Search API requests per refresh");
+        assert!(
+            urls[0].contains("is%3Aissue"),
+            "issues are queried first: {urls:?}"
+        );
+        assert!(
+            urls[1].contains("is%3Apr"),
+            "pull requests are queried second, serially: {urls:?}"
+        );
+        assert_eq!(
+            transport.calls.load(AtomicOrdering::Relaxed),
+            2,
+            "the request budget is exactly two search requests"
+        );
+    }
+
+    #[test]
+    fn zero_counts_are_genuine_data_not_missing_data() {
+        // An existing account with no indexed activity answers 200 with
+        // total_count 0 (a nonexistent author is refused instead, with 422):
+        // the zeros are real results and are stored as such.
+        let transport = QueueTransport::new(vec![
+            search_response(0, false),
+            search_response(0, false),
+        ]);
+        let snapshot =
+            fetch_search_totals_with_transport(&transport, "octocat", 100).expect("snapshot");
+        assert_eq!(snapshot.open_issues, 0);
+        assert_eq!(snapshot.pull_requests, 0);
+    }
+
+    #[test]
+    fn an_incomplete_search_answer_is_refused_never_counted() {
+        let transport = QueueTransport::new(vec![search_response(1000, true)]);
+        assert_eq!(
+            fetch_search_totals_with_transport(&transport, "octocat", 100),
+            Err(GithubError::Incomplete),
+            "incomplete_results=true is never presented as an exact count"
+        );
+        assert_eq!(
+            transport.calls.load(AtomicOrdering::Relaxed),
+            1,
+            "an incomplete first answer stops before the second request"
+        );
+    }
+
+    #[test]
+    fn search_refusals_map_to_the_pinned_vocabulary() {
+        // 429 → RateLimited with the provider's hint.
+        let mut too_many = status_response(429);
+        too_many.retry_after = Some("30".into());
+        let transport = QueueTransport::new(vec![too_many]);
+        assert_eq!(
+            fetch_search_totals_with_transport(&transport, "octocat", 100),
+            Err(GithubError::RateLimited(Some(30)))
+        );
+
+        // 403 with the remaining budget at zero → RateLimited.
+        let mut exhausted = status_response(403);
+        exhausted.rate_limit_remaining = Some("0".into());
+        exhausted.rate_limit_reset = Some("250".into());
+        let transport = QueueTransport::new(vec![exhausted]);
+        assert_eq!(
+            fetch_search_totals_with_transport(&transport, "octocat", 100),
+            Err(GithubError::RateLimited(Some(150))),
+            "reset is an absolute epoch; 250 - now(100) = 150s"
+        );
+
+        // 403 with only a Retry-After — the secondary rate-limit signature
+        // search responses use — is a rate limit, not a generic refusal.
+        let mut secondary = status_response(403);
+        secondary.retry_after = Some("60".into());
+        let transport = QueueTransport::new(vec![secondary]);
+        assert_eq!(
+            fetch_search_totals_with_transport(&transport, "octocat", 100),
+            Err(GithubError::RateLimited(Some(60)))
+        );
+
+        // 403 without any rate-limit shape stays a generic provider error.
+        let transport = QueueTransport::new(vec![status_response(403)]);
+        assert_eq!(
+            fetch_search_totals_with_transport(&transport, "octocat", 100),
+            Err(GithubError::ProviderError)
+        );
+
+        // 422, 404, and 500 are generic provider errors. 422 is reachable
+        // with a valid query: GitHub refuses to search a nonexistent author
+        // (observed live, "Validation Failed"), which stays a provider error
+        // — never the profile plane's NotFound.
+        for status in [422, 404, 500] {
+            let transport = QueueTransport::new(vec![status_response(status)]);
+            assert_eq!(
+                fetch_search_totals_with_transport(&transport, "octocat", 100),
+                Err(GithubError::ProviderError),
+                "status {status} must be a provider error"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_search_answer_is_an_invalid_response() {
+        let transport = QueueTransport::new(vec![profile_response(200, "not json")]);
+        assert_eq!(
+            fetch_search_totals_with_transport(&transport, "octocat", 100),
+            Err(GithubError::InvalidResponse)
+        );
+        // A missing aggregate field is malformed too.
+        let transport = QueueTransport::new(vec![profile_response(200, r#"{ "total_count": 5 }"#)]);
+        assert_eq!(
+            fetch_search_totals_with_transport(&transport, "octocat", 100),
+            Err(GithubError::InvalidResponse)
+        );
+    }
+
+    // --- G2: runtime gates ------------------------------------------------------
+
+    #[test]
+    fn search_refreshes_deduplicate_and_cool_down_independently() {
+        let runtime = GithubRuntime::default();
+        runtime.begin_search_refresh(false).expect("first");
+        assert_eq!(
+            runtime.begin_search_refresh(false),
+            Err(GithubError::InProgress),
+            "a concurrent identical search fetch is deduplicated"
+        );
+        runtime.finish_search_refresh();
+        // The planes' single-flight flags are independent: the search plane's
+        // flight never blocks the profile plane.
+        runtime.begin_refresh(false).expect("profile plane unaffected");
+        runtime.finish_refresh();
+
+        runtime.begin_search_refresh(true).expect("manual");
+        runtime.finish_search_refresh();
+        assert_eq!(
+            runtime.begin_search_refresh(true),
+            Err(GithubError::Cooldown),
+            "a manual search refresh inside the cooldown is refused"
+        );
+        // The cooldown clocks are independent too: the search plane's manual
+        // refresh does not consume the profile plane's.
+        runtime.begin_refresh(true).expect("independent cooldown clocks");
+        runtime.finish_refresh();
+        // Background search refreshes are not cooled down.
+        runtime.begin_search_refresh(false).expect("background");
+        runtime.finish_search_refresh();
+    }
+
+    #[test]
+    fn a_rate_limit_backoff_is_shared_by_both_planes() {
+        let runtime = GithubRuntime::default();
+        runtime.note_rate_limit(Some(120));
+        let remaining = runtime.rate_limit_remaining().expect("backoff in force");
+        assert_eq!(
+            runtime.begin_search_refresh(false),
+            Err(GithubError::RateLimited(Some(remaining))),
+            "the search plane refuses during the shared backoff"
+        );
+        assert_eq!(
+            runtime.begin_refresh(false),
+            Err(GithubError::RateLimited(Some(remaining))),
+            "so does the profile plane"
+        );
+    }
+
+    // --- G2: search cache and view ----------------------------------------------
+
+    #[test]
+    fn search_cache_reports_missing_fresh_and_stale() {
+        let state = configured_state("octocat");
+        let runtime = GithubRuntime::default();
+        assert_eq!(
+            github_view(&state, &runtime, 100)
+                .expect("missing")
+                .search_cache_status,
+            GithubCacheStatus::Missing
+        );
+        for (age, expected) in [
+            (60, GithubCacheStatus::Fresh),
+            (FRESH_AFTER_SECONDS, GithubCacheStatus::Stale),
+            (31 * 60, GithubCacheStatus::Stale),
+        ] {
+            let snapshot = search_snapshot("octocat", 1, 2, 100_000 - age);
+            seed_search_cache(&state, &snapshot);
+            let view = github_view(&state, &runtime, 100_000).expect("view");
+            assert_eq!(view.search_cache_status, expected, "age {age}");
+            assert_eq!(view.search_cache_age_seconds, Some(age));
+            assert_eq!(view.search.as_ref(), Some(&snapshot));
+        }
+    }
+
+    #[test]
+    fn the_two_cache_planes_are_independent() {
+        let state = configured_state("octocat");
+        let runtime = GithubRuntime::default();
+
+        // G1 success + G2 failure/absence: the profile snapshot renders while
+        // the search plane reports missing.
+        let profile = GithubSnapshot {
+            username: "octocat".into(),
+            followers: 1,
+            stars: 2,
+            fetched_at: 90,
+        };
+        state
+            .database
+            .upsert_github_cache(&GithubCacheRow {
+                username: cache_key("octocat"),
+                payload_json: serde_json::to_string(&profile).expect("json"),
+                fetched_at: 90,
+            })
+            .expect("g1 row");
+        let view = github_view(&state, &runtime, 100).expect("view");
+        assert!(view.snapshot.is_some());
+        assert_eq!(view.search_cache_status, GithubCacheStatus::Missing);
+        assert!(view.search.is_none());
+
+        // G2 success + G1 failure/absence: the mirrored case. The search
+        // snapshot renders while the profile plane reports missing.
+        let state = configured_state("octocat");
+        seed_search_cache(&state, &search_snapshot("octocat", 3, 5, 90));
+        let view = github_view(&state, &runtime, 100).expect("view");
+        assert_eq!(view.search.as_ref().map(|s| (s.open_issues, s.pull_requests)), Some((3, 5)));
+        assert_eq!(view.cache_status, GithubCacheStatus::Missing);
+        assert!(view.snapshot.is_none());
+    }
+
+    #[test]
+    fn a_corrupt_or_mismatched_search_row_is_ignored_as_missing() {
+        let state = configured_state("octocat");
+        let runtime = GithubRuntime::default();
+        state
+            .database
+            .upsert_github_search_cache(&GithubSearchCacheRow {
+                username: cache_key("octocat"),
+                payload_json: "corrupt".into(),
+                fetched_at: 90,
+            })
+            .expect("corrupt search cache");
+        assert!(
+            github_view(&state, &runtime, 100).expect("view").search.is_none(),
+            "a corrupt payload renders as missing, never as an error"
+        );
+
+        // A row whose payload names a different account is not this account's
+        // snapshot, exactly like the profile plane's integrity filter.
+        seed_search_cache(&state, &search_snapshot("someone-else", 3, 5, 90));
+        let view = github_view(&state, &runtime, 100).expect("view");
+        assert!(view.search.is_none());
+    }
+
+    #[test]
+    fn a_username_change_starts_the_search_plane_from_an_empty_cache() {
+        let state = configured_state("octocat");
+        let runtime = GithubRuntime::default();
+        seed_search_cache(&state, &search_snapshot("octocat", 3, 5, 90));
+
+        // Same account, different spelling: the lowercase cache key reads the
+        // same row.
+        state
+            .update(|settings| settings.github_username = "OctoCat".into())
+            .expect("change spelling");
+        let view = github_view(&state, &runtime, 100).expect("case-variant");
+        assert!(view.search.is_some(), "case-insensitive search cache key");
+
+        // A genuinely different account has nothing — its search totals must
+        // never be borrowed from the previous account's row.
+        state
+            .update(|settings| settings.github_username = "someone-else".into())
+            .expect("switch account");
+        let view = github_view(&state, &runtime, 100).expect("new account");
+        assert_eq!(view.search_cache_status, GithubCacheStatus::Missing);
+        assert!(view.search.is_none());
+    }
+
+    #[test]
+    fn the_view_exposes_the_search_plane_flags() {
+        let state = configured_state("octocat");
+        let runtime = GithubRuntime::default();
+        let view = github_view(&state, &runtime, 100).expect("view");
+        assert!(!view.search_refreshing);
+        assert_eq!(view.search_last_refresh, "none");
+        runtime.record_search("success");
+        let view = github_view(&state, &runtime, 100).expect("view");
+        assert_eq!(view.search_last_refresh, "success");
     }
 }

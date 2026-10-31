@@ -239,6 +239,22 @@ export interface GithubSnapshot {
   fetchedAt: number;
 }
 
+/**
+ * One complete search-index fetch (v1.3.0-G2), as the Rust backend normalized
+ * it. The two totals come from GitHub's public search index — open issues
+ * authored by the account anywhere, and all pull requests it authored (open,
+ * merged, or closed unmerged, each once). The index only sees public activity:
+ * these numbers never represent private or inaccessible work. The backend
+ * never stores an incomplete search answer, so a snapshot here is complete.
+ */
+export interface GithubSearchSnapshot {
+  /** The validated username the queries were built from. */
+  username: string;
+  openIssues: number;
+  pullRequests: number;
+  fetchedAt: number;
+}
+
 export interface GithubViewState {
   /** Whether a username is configured; false renders the setup state. */
   configured: boolean;
@@ -248,6 +264,16 @@ export interface GithubViewState {
   cacheStatus: GithubCacheStatus;
   cacheAgeSeconds: number | null;
   refreshing: boolean;
+  /**
+   * The search-index plane (G2), independent of the profile plane in every
+   * respect: its own cache validity, its own refresh flag, its own command.
+   * Only the provider rate-limit backoff is shared.
+   */
+  search: GithubSearchSnapshot | null;
+  searchCacheStatus: GithubCacheStatus;
+  searchCacheAgeSeconds: number | null;
+  searchRefreshing: boolean;
+  searchLastRefresh: string;
   /** A provider rate-limit backoff is in force until `retryAfterSeconds`. */
   rateLimited: boolean;
   retryAfterSeconds: number | null;

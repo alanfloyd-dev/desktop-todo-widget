@@ -455,12 +455,12 @@ button {
 }
 
 /*
- * The GitHub statistics card (v1.3.0-G1). The weather card's visual
+ * The GitHub statistics card (v1.3.0-G1/G2). The weather card's visual
  * language at a smaller scale: the same reserved top-right refresh slot,
- * the same two-line metric rhythm, the same age/status typography. The card
- * renders only inside the shared ModuleSection body, so the section header
- * owns the module spacing; nothing here touches the grid or the collapse
- * machinery.
+ * the same two-line metric rhythm (profile plane above search plane), the
+ * same age/status typography. The card renders only inside the shared
+ * ModuleSection body, so the section header owns the module spacing; nothing
+ * here touches the grid or the collapse machinery.
  */
 .github-display {
   position: relative;
@@ -482,6 +482,13 @@ button {
   align-items: baseline;
   gap: 7px 18px;
   color: var(--ink);
+}
+
+/* The search plane's metric row (G2) reuses .github-primary verbatim; the
+   rule only adds the same inter-row rhythm .github-secondary already sets,
+   whether the row renders as metrics or as its unavailable fallback line. */
+.github-search-row {
+  margin-top: 8px !important;
 }
 
 .github-metric {

@@ -101,4 +101,40 @@ describe("GitHub panel source contracts (G1)", () => {
     expect(githubPanelSource).toContain("$emit('configure')");
     expect(githubPanelSource).toContain("$emit('openProfile')");
   });
+
+  it("renders the search plane's two metrics as localized, zero-honest cards (G2)", () => {
+    // Four metrics in two rows: the search row carries the two G2 labels and
+    // is judged independently of the profile row above it.
+    expect(githubPanelSource).toContain('t("github.openIssues")');
+    expect(githubPanelSource).toContain('t("github.pullRequests")');
+    // A genuine zero is data: it renders through the same metric value as
+    // any other count. Only the absence of a complete fetch renders the
+    // distinct fallback states — loading while the fetch is in flight,
+    // unavailable once it has failed or never ran.
+    expect(githubPanelSource).toContain('t("github.searchLoading")');
+    expect(githubPanelSource).toContain('t("github.searchUnavailable")');
+    expect(githubPanelSource).toContain("hasSearch");
+    // The search row renders in the no-profile-snapshot state too (G1/G2
+    // failure independence), and is suppressed only by the account-level
+    // not-found fact.
+    expect(githubPanelSource).toContain('v-if="!notFound"');
+  });
+
+  it("waits for both planes before calling its refresh affordance idle (G2)", () => {
+    // The single button serves both planes: the spinning icon and the
+    // disabled semantics must cover either plane's in-flight fetch.
+    expect(githubPanelSource).toContain(
+      "const refreshing = computed(() => props.github.refreshing || props.github.searchRefreshing);",
+    );
+    expect(githubPanelSource).toContain(':disabled="refreshing"');
+  });
+
+  it("rejects both null and undefined search data as absent (G2)", () => {
+    // A backend from before the search plane omits `search` entirely, so the
+    // view carries `undefined`, not `null`. A strict `!== null` check would
+    // pass that undefined through and crash the row on `search!.openIssues`;
+    // the presence check must reject both shapes as the unavailable state.
+    expect(githubPanelSource).toContain("props.github.search != null");
+    expect(githubPanelSource).not.toContain("props.github.search !== null");
+  });
 });

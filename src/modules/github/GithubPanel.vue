@@ -4,9 +4,12 @@ import { useI18n } from "../../i18n";
 import type { GithubViewState } from "../../types";
 
 /**
- * The GitHub dashboard card (v1.3.0-G1): the two metrics — followers and the
- * total stars across the account's owned public non-fork repositories — plus
- * the account identity, the last-update line, and the refresh affordance.
+ * The GitHub dashboard card (v1.3.0-G1/G2): four metrics in two rows — the
+ * profile plane (followers, and the total stars across the account's owned
+ * public non-fork repositories) above the search plane (open issues authored
+ * by the account, and all pull requests it authored, from GitHub's public
+ * search index) — plus the account identity, the last-update lines, and the
+ * refresh affordance.
  *
  * Presentation only: every state below renders from the one `GithubViewState`
  * the app-level controller owns, and every action is emitted upward — the
@@ -65,23 +68,43 @@ const accountName = computed(
 const hasSnapshot = computed(
   () => props.github.snapshot !== null && props.github.cacheStatus !== "missing",
 );
+
+/**
+ * The search plane's snapshot-bearing state, judged independently of the
+ * profile plane's above (G2): a fresh profile snapshot never masks missing
+ * search data, and vice versa. A genuine zero renders as "0"; only the
+ * absence of a complete search fetch renders the unavailable state. The
+ * presence check rejects both `null` and `undefined` (`!= null`): a backend
+ * from before the search plane omits the field entirely, and treating that
+ * as present data would crash the row on `search!.openIssues`.
+ */
+const hasSearch = computed(
+  () => props.github.search != null && props.github.searchCacheStatus !== "missing",
+);
+
+/**
+ * The refresh affordance serves both planes and waits for both: the icon
+ * spins and the button stays disabled while either plane is in flight, so
+ * the spinning icon and the disabled semantics always agree.
+ */
+const refreshing = computed(() => props.github.refreshing || props.github.searchRefreshing);
 </script>
 
 <template>
   <div class="github-display" aria-live="polite">
     <!--
       The manual refresh affordance: a real button with a localized accessible
-      name, disabled for the duration of the in-flight refresh so the spinning
-      icon and the disabled semantics always agree. It exists only when a
-      username is configured — an unconfigured module has nothing to refresh
-      and, by contract, must not ask the backend for anything.
+      name, disabled for the duration of either plane's in-flight refresh. It
+      exists only when a username is configured — an unconfigured module has
+      nothing to refresh and, by contract, must not ask the backend for
+      anything.
     -->
     <button
       v-if="github.configured"
       type="button"
       class="github-refresh"
-      :class="{ refreshing: github.refreshing }"
-      :disabled="github.refreshing"
+      :class="{ refreshing: refreshing }"
+      :disabled="refreshing"
       :aria-label="t('github.refreshAriaLabel')"
       :title="t('github.refreshAriaLabel')"
       @click="$emit('refresh')"
@@ -102,7 +125,7 @@ const hasSnapshot = computed(
       </button>
     </template>
 
-    <!-- Configured with a complete snapshot: the two metrics. -->
+    <!-- Configured with a complete profile snapshot: the four metrics. -->
     <template v-else-if="hasSnapshot">
       <p class="github-primary">
         <span class="github-metric">
@@ -113,6 +136,29 @@ const hasSnapshot = computed(
           <span class="github-metric-value">{{ count(github.snapshot!.stars) }}</span>
           <span class="github-metric-label">{{ t("github.stars") }}</span>
         </span>
+      </p>
+      <!--
+        The search plane's row (G2), judged independently: valid search data
+        renders its two metrics, a missing search fetch renders its own
+        unavailable line while the profile metrics stay up — one plane's
+        failure never blanks the other's numbers. A zero is data and renders
+        as "0"; only an absent complete fetch renders this fallback.
+      -->
+      <p v-if="hasSearch" class="github-primary github-search-row">
+        <span class="github-metric">
+          <span class="github-metric-value">{{ count(github.search!.openIssues) }}</span>
+          <span class="github-metric-label">{{ t("github.openIssues") }}</span>
+        </span>
+        <span class="github-metric">
+          <span class="github-metric-value">{{ count(github.search!.pullRequests) }}</span>
+          <span class="github-metric-label">{{ t("github.pullRequests") }}</span>
+        </span>
+      </p>
+      <p v-else-if="github.searchRefreshing" class="github-empty github-search-row">
+        {{ t("github.searchLoading") }}
+      </p>
+      <p v-else class="github-empty github-search-row">
+        {{ t("github.searchUnavailable") }}
       </p>
       <p class="github-secondary">
         <!--
@@ -131,14 +177,20 @@ const hasSnapshot = computed(
       <p v-if="github.cacheStatus === 'stale'" class="github-age">
         {{ ageLabel(github.cacheAgeSeconds) }}
       </p>
+      <p v-if="hasSearch && github.searchCacheStatus === 'stale'" class="github-age">
+        {{ ageLabel(github.searchCacheAgeSeconds) }}
+      </p>
     </template>
 
     <!--
-      Configured without a usable snapshot: the honest empty/unavailable
-      states. An explicit not-found report from the backend renders its own
-      localized explanation — never the generic empty placeholder (M2). A
-      rate-limited window names its remaining minutes; anything else stays
-      generic rather than leaking backend vocabulary.
+      Configured without a usable profile snapshot: the honest empty/
+      unavailable states. An explicit not-found report from the backend
+      renders its own localized explanation — never the generic empty
+      placeholder (M2). A rate-limited window names its remaining minutes;
+      anything else stays generic rather than leaking backend vocabulary.
+      The not-found fact describes the account itself, so while it holds,
+      no search totals render beside it; in every other empty state, valid
+      search data still renders (G1/G2 failure independence).
     -->
     <template v-else>
       <p v-if="notFound" class="github-empty">
@@ -152,7 +204,28 @@ const hasSnapshot = computed(
         }}
       </p>
       <p v-else class="github-empty">{{ t("github.empty") }}</p>
+      <template v-if="!notFound">
+        <p v-if="hasSearch" class="github-primary github-search-row">
+          <span class="github-metric">
+            <span class="github-metric-value">{{ count(github.search!.openIssues) }}</span>
+            <span class="github-metric-label">{{ t("github.openIssues") }}</span>
+          </span>
+          <span class="github-metric">
+            <span class="github-metric-value">{{ count(github.search!.pullRequests) }}</span>
+            <span class="github-metric-label">{{ t("github.pullRequests") }}</span>
+          </span>
+        </p>
+        <p v-else-if="github.searchRefreshing" class="github-empty github-search-row">
+          {{ t("github.searchLoading") }}
+        </p>
+        <p v-else class="github-empty github-search-row">
+          {{ t("github.searchUnavailable") }}
+        </p>
+      </template>
       <p v-if="github.snapshot" class="github-age">{{ ageLabel(github.cacheAgeSeconds) }}</p>
+      <p v-if="hasSearch && github.searchCacheStatus === 'stale'" class="github-age">
+        {{ ageLabel(github.searchCacheAgeSeconds) }}
+      </p>
     </template>
 
     <!--
