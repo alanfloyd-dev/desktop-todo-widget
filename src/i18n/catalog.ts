@@ -164,8 +164,8 @@ export const en: Record<string, string> = {
   "category.create": "Create",
   "category.cancel": "Cancel",
   "todo.empty": "Nothing scheduled for this task day.",
-  "month.title": "MONTH",
-  "month.summary": "{month} · {completed} completed · {carried} carried",
+  "month.title": "Month",
+  "month.summary": "{completed} completed · {carried} carried",
 
   // --- Review ---------------------------------------------------------------
   "review.eyebrow": "REVIEW / REPORTS",
@@ -552,7 +552,7 @@ export const zhHans: Record<string, string> = {
   "category.cancel": "取消",
   "todo.empty": "本任务日没有安排。",
   "month.title": "本月",
-  "month.summary": "{month} · 已完成 {completed} · 已顺延 {carried}",
+  "month.summary": "已完成 {completed} · 已顺延 {carried}",
 
   "review.eyebrow": "回顾 / 报告",
   "review.close": "关闭",

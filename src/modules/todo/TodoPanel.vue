@@ -68,15 +68,6 @@ function formatTaskDay(value: string) {
   }).format(new Date(Date.UTC(year, month - 1, day)));
 }
 
-function formatMonth(value: string) {
-  const [year, month] = value.split("-").map(Number);
-  if (!year || !month) return value;
-  return new Intl.DateTimeFormat(intlLocale.value, {
-    year: "numeric",
-    month: "long",
-  }).format(new Date(Date.UTC(year, month - 1, 1)));
-}
-
 function taskStatusLabel(status: TaskStatus) {
   return t(`task.status.${status}`);
 }
@@ -84,11 +75,12 @@ function taskStatusLabel(status: TaskStatus) {
 const state = ref<TodayState>(browserTodayState());
 
 /**
- * Task-day and month labels use `Intl` with the active locale so the same
+ * The task-day label uses `Intl` with the active locale so the same
  * machine-readable `YYYY-MM-DD` value renders naturally in either language.
+ * (UI-P2: the Monthly summary renders counts only — the month name dropped
+ * as redundant beside the 本月/Month title — so there is no month label.)
  */
 const taskDayLabel = computed(() => formatTaskDay(state.value.taskDay));
-const monthLabel = computed(() => formatMonth(state.value.monthSummary.month));
 
 const newTitle = ref("");
 const newCategoryId = ref("");
@@ -649,7 +641,6 @@ onBeforeUnmount(() => {
       <p>
         {{
           t("month.summary", {
-            month: monthLabel,
             completed: state.monthSummary.completed,
             carried: state.monthSummary.carried,
           })

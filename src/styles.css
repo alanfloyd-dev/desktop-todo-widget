@@ -648,6 +648,18 @@ button {
   font-weight: 500;
 }
 
+/*
+ * UI-P2: one heading typography for all four module headings (Todo, Month,
+ * Quick Links, GitHub) — 13px, mineral, medium weight, normal tracking, no
+ * case change. The 0.16em tracking the grouped rule above hands every heading
+ * belongs to the date line's look; the module headings shed it here.
+ */
+.product-section h1,
+.product-section h2,
+.module-section-heading h1 {
+  letter-spacing: normal;
+}
+
 .section-heading {
   display: flex;
   align-items: baseline;
@@ -932,20 +944,22 @@ button {
 }
 
 /*
- * The Monthly summary follows its content (UI-P1): the fixed 176px floor —
- * a leftover from the pre-layout fixed-header geometry — reserved ~28px of
- * dead space under the one-line summary in the empty/compact state, so the
- * section now keeps only the shared .product-section padding. Nothing in the
- * layout depends on this box (the footer rides margin-top:auto and the
- * surface scrolls), so real Monthly/Review content can grow it freely.
+ * The Monthly summary is one compact row (UI-P2): the heading left, the
+ * counts right, height following the content only — no min-height and no
+ * reserved region (the UI-P1 note about the removed 176px floor). Wrapping is
+ * graceful: a long counts line drops below the title instead of clipping.
  * border-bottom stays 0: the next module's border-top owns that boundary.
  */
 .month-section {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px 18px;
   border-bottom: 0;
 }
 
 .month-section p {
-  margin-top: 24px;
   color: #929da2;
   font-size: 13px;
 }
@@ -1198,6 +1212,17 @@ button.profile-identity {
 .mode-desktop .product-section {
   padding-top: 36px;
   padding-bottom: 38px;
+}
+
+/*
+ * UI-P2 compact Monthly: the one-row summary replaces the tall section
+ * padding with a slim band in every window mode. Declared after the per-mode
+ * `.product-section` rules so it wins the cascade at equal specificity —
+ * the padding rides the same 2px side inset the other sections carry.
+ */
+.month-section.product-section {
+  padding-top: 12px;
+  padding-bottom: 12px;
 }
 
 .context-menu {
@@ -2043,18 +2068,15 @@ button.profile-identity {
 /*
  * One auxiliary heading row (UI-P1): the same 2px left inset every module's
  * content shares (Todo's heading carries it per-mode), and the same
- * title-to-body gap, so the two modules' titles and chevrons line up on one
- * left edge.
+ * title-to-body gap, so the modules' titles and chevrons line up on one left
+ * edge. UI-P2: the label typography itself lives on the title rule below —
+ * every module heading now shares the primary 13px mineral look, so this row
+ * carries layout only.
  */
 .quick-links > .section-heading,
 .github-module > .section-heading {
   margin-bottom: 10px;
   padding: 0 2px;
-  color: var(--faint);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 9px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
 }
 
 .quick-links ul {
@@ -2170,20 +2192,20 @@ button.module-section-toggle:disabled {
 }
 
 /*
- * The auxiliary modules' titles (Quick Links, GitHub) share one label
- * treatment (UI-P1): a real section label — one step above the 9px metadata
- * rows, one step below the primary headings (Todo's h1 and the Month h2,
- * 13px mineral, which keep the stronger treatment). Todo renders an h1
- * through the title slot, so this rule never touches the primary headings;
+ * The auxiliary modules' titles (Quick Links, GitHub) share the primary
+ * heading typography (UI-P2): 13px, mineral, medium weight, normal tracking,
+ * no case change — identical to Todo's h1 and the Month h2. Todo renders an
+ * h1 through the title slot, so this rule never touches the primary headings;
  * the two-class selector also out-ranks the generic `.section-heading > span`
- * rule above without touching it.
+ * rule above without touching it. The GitHub mark inherits currentColor, so
+ * it turns mineral with the label.
  */
 .module-section-heading > .module-section-title {
-  color: var(--muted);
+  color: var(--mineral);
   font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
-  font-size: 10px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: normal;
 }
 
 /*
