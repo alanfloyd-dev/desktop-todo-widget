@@ -143,3 +143,27 @@ describe("GitHub panel source contracts (G1)", () => {
     expect(githubPanelSource).not.toContain("props.github.search !== null");
   });
 });
+
+describe("GitHub module title mark (UI-P1)", () => {
+  it("renders the title mark as a decorative local inline svg", () => {
+    // The module mark lives in ProductContent's GitHub title slot: an inline
+    // path like every other icon on the surface — no remote asset, no icon
+    // dependency — and aria-hidden, so the section's accessible name stays
+    // the localized heading text and the icon duplicates nothing.
+    const slotStart = productContentSource.indexOf('class="github-module"');
+    expect(slotStart).toBeGreaterThan(-1);
+    const slot = productContentSource.slice(
+      slotStart,
+      productContentSource.indexOf("</ModuleSection>", slotStart),
+    );
+    expect(slot).toContain('class="module-section-title"');
+    const svg = slot.slice(slot.indexOf("<svg"), slot.indexOf("</svg>"));
+    expect(svg).toContain('class="github-mark"');
+    expect(svg).toContain('aria-hidden="true"');
+    expect(svg).toContain('focusable="false"');
+    expect(svg).toContain('fill="currentColor"');
+    // Local vector only: no remote fetch and no raster asset in the header.
+    expect(svg).not.toMatch(/https?:\/\//);
+    expect(svg).not.toContain("<img");
+  });
+});

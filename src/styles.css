@@ -464,11 +464,26 @@ button {
  */
 .github-display {
   position: relative;
-  /* Reserved refresh slot, so the icon never overlaps the metric line. */
-  padding-right: 30px;
+  /* Reserved refresh slot on the right; the 2px left inset seats the card's
+     content on the same left edge as every module title and body (UI-P1). */
+  padding: 0 30px 0 2px;
   color: var(--muted);
   font-size: 11px;
   letter-spacing: 0.1em;
+}
+
+/*
+ * The GitHub module title's mark (UI-P1): the compact octocat silhouette,
+ * monochrome through currentColor from the title's own color, seated on the
+ * cap height of the 10px label. Decorative: the svg is aria-hidden in the
+ * template, so the section's accessible name stays the localized heading
+ * text and the icon duplicates nothing.
+ */
+.github-mark {
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+  vertical-align: -2px;
 }
 
 .github-display p {
@@ -916,8 +931,16 @@ button {
   text-align: center;
 }
 
+/*
+ * The Monthly summary follows its content (UI-P1): the fixed 176px floor —
+ * a leftover from the pre-layout fixed-header geometry — reserved ~28px of
+ * dead space under the one-line summary in the empty/compact state, so the
+ * section now keeps only the shared .product-section padding. Nothing in the
+ * layout depends on this box (the footer rides margin-top:auto and the
+ * surface scrolls), so real Monthly/Review content can grow it freely.
+ * border-bottom stays 0: the next module's border-top owns that boundary.
+ */
 .month-section {
-  min-height: 176px;
   border-bottom: 0;
 }
 
@@ -2000,14 +2023,33 @@ button.profile-identity {
  * heading + rule + rows rhythm as the sections above it. The section is only
  * rendered when the list is non-empty, so no empty-state styling is needed here.
  */
-.quick-links {
+/*
+ * One shared section boundary (UI-P1): both auxiliary modules carry the same
+ * 1px top rule with the same breathing space, so every collapsible module
+ * after the first reads as its own section. The rule lives on border-top
+ * only — the sections above own border-bottom (weather slot, today section)
+ * or none (month section) — so no two adjacent visible modules ever draw
+ * two rules, whichever modules in between are hidden. A collapsed module
+ * keeps the rule: it sits on the section root, above the header that always
+ * renders.
+ */
+.quick-links,
+.github-module {
   margin-top: 26px;
   padding-top: 14px;
   border-top: 1px solid var(--line);
 }
 
-.quick-links > .section-heading {
+/*
+ * One auxiliary heading row (UI-P1): the same 2px left inset every module's
+ * content shares (Todo's heading carries it per-mode), and the same
+ * title-to-body gap, so the two modules' titles and chevrons line up on one
+ * left edge.
+ */
+.quick-links > .section-heading,
+.github-module > .section-heading {
   margin-bottom: 10px;
+  padding: 0 2px;
   color: var(--faint);
   font-family: "Cascadia Mono", Consolas, monospace;
   font-size: 9px;
@@ -2125,6 +2167,23 @@ button.module-section-toggle:disabled {
 
 .module-section--collapsed .module-section-chevron {
   transform: none;
+}
+
+/*
+ * The auxiliary modules' titles (Quick Links, GitHub) share one label
+ * treatment (UI-P1): a real section label — one step above the 9px metadata
+ * rows, one step below the primary headings (Todo's h1 and the Month h2,
+ * 13px mineral, which keep the stronger treatment). Todo renders an h1
+ * through the title slot, so this rule never touches the primary headings;
+ * the two-class selector also out-ranks the generic `.section-heading > span`
+ * rule above without touching it.
+ */
+.module-section-heading > .module-section-title {
+  color: var(--muted);
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
 /*
