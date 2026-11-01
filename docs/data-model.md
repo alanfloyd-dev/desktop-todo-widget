@@ -9,7 +9,7 @@ desktop-todo-widget is local-first. Tauri resolves the platform app-data directo
 - Migrations are idempotent and preserve existing Phase 2 data.
 - SQLite foreign keys are enabled and WAL journal mode is requested at initialization.
 
-Migration 1 creates the initial product tables. Migration 2 adds the enabled/sort shortcut index without deleting the earlier development seed on upgraded databases. Migration 3 adds the isolated weather cache without altering Todo, category, shortcut, or settings data. Migration 4 adds the isolated GitHub snapshot cache (`github_cache`) on the same additive pattern; it alters no existing table. Migration 5 adds the isolated GitHub search-index cache (`github_search_cache`) as a separate table — deliberately not a wider `github_cache` payload — so the profile plane's and search plane's snapshots can be fetched, aged, and failed independently; it alters no existing table and never reinterprets a stored G1 row. Fresh open-source databases do not create a personal shortcut.
+Migration 1 creates the initial product tables. Migration 2 adds the enabled/sort shortcut index without deleting the earlier development seed on upgraded databases. Migration 3 adds the isolated weather cache without altering Todo, category, shortcut, or settings data. Migration 4 adds the isolated GitHub snapshot cache (`github_cache`) on the same additive pattern; it alters no existing table. Migration 5 adds the isolated GitHub search-index cache (`github_search_cache`) as a separate table — deliberately not a wider `github_cache` payload — so the profile plane's and search plane's snapshots can be fetched, aged, and failed independently; it alters no existing table and never reinterprets a stored G1 row. Migration 6 adds the isolated GitHub commits cache (`github_commits_cache`) as a third table on the same pattern — the today's-commits snapshot carries a validity axis the other planes do not (it answers for one local calendar day in one timezone), so it is kept out of the search plane's row rather than coupled to it; it alters no existing table and never reinterprets a stored G1 or G2 row. Fresh open-source databases do not create a personal shortcut.
 
 ## Tables
 
@@ -74,6 +74,14 @@ The `username` primary key holds the configured GitHub username lowercased (GitH
 - `fetched_at`
 
 Same shape and key rule as `github_cache`, holding the search plane's normalized `SearchSnapshot` (v1.3.0-G2): the account's currently open authored issue count and total authored pull request count as GitHub's public search index reports them (`total_count` of two bounded queries — the index only sees public activity, so these numbers never represent private or inaccessible work; only a complete, non-`incomplete_results` answer is ever written, and a genuine zero is stored as data). The table exists precisely so this plane's validity never implies or erases the profile plane's: each is refreshed by its own command, judged by its own freshness, and rendered independently.
+
+### github_commits_cache
+
+- `username`
+- `payload_json`
+- `fetched_at`
+
+Same shape and key rule as the other two GitHub planes, holding the commits plane's normalized `CommitsSnapshot` (v1.3.0-G3): the count of commits GitHub's public commit-search index attributes to the account as author, on default branches of public repositories, with an author timestamp between this machine's local midnight and the fetch instant. The payload carries the local calendar day (`localDay`) and the exact midnight instant the count's range starts (`localDayStart`): the view recomputes both and refuses a snapshot whose either moved, so yesterday's number is never rendered as today's count and a machine-timezone move invalidates as a date roll does. The metric is an index reading, not an exhaustive unique-SHA total: default branches only, index latency, possible fork-related duplicate occurrences, and GitHub's author-attribution linkage all apply. Validity needs both the shared 30-minute freshness and the day/midnight match; only a complete, non-`incomplete_results` answer is ever written, and a genuine zero is stored as data. The table exists so the day axis never couples to the other planes' pure-age validity: each plane is refreshed by its own command, judged by its own rules, and rendered independently.
 
 ### app_settings
 

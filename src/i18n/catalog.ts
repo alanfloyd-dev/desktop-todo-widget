@@ -102,6 +102,9 @@ export const en: Record<string, string> = {
   "github.stars": "Stars",
   "github.openIssues": "Open issues",
   "github.pullRequests": "Pull requests",
+  "github.todayCommits": "Today's commits (public)",
+  "github.commitsLoading": "Loading commit data…",
+  "github.commitsUnavailable": "Commit data unavailable.",
   "github.searchLoading": "Loading search data…",
   "github.searchUnavailable": "Issue and pull request data unavailable.",
   "github.refreshAriaLabel": "Refresh GitHub statistics",
@@ -120,6 +123,8 @@ export const en: Record<string, string> = {
     "This account has more repositories than the app fetches. The last complete total is shown.",
   "github.error.searchIncomplete":
     "GitHub search results were incomplete. The last complete totals are shown.",
+  "github.error.commitsIncomplete":
+    "GitHub commit search results were incomplete. The last complete count is shown.",
   "github.error.generic": "GitHub is unavailable right now. Saved data is unchanged.",
 
   // --- Today / task lifecycle ----------------------------------------------
@@ -447,6 +452,9 @@ export const zhHans: Record<string, string> = {
   "github.stars": "获星",
   "github.openIssues": "开放 Issue",
   "github.pullRequests": "Pull Request",
+  "github.todayCommits": "今日公开提交",
+  "github.commitsLoading": "正在获取提交数据…",
+  "github.commitsUnavailable": "提交数据暂不可用。",
   "github.searchLoading": "正在获取搜索数据…",
   "github.searchUnavailable": "Issue 与 Pull Request 数据暂不可用。",
   "github.refreshAriaLabel": "刷新 GitHub 统计",
@@ -463,6 +471,7 @@ export const zhHans: Record<string, string> = {
   "github.error.inProgress": "GitHub 统计正在刷新中。",
   "github.error.incomplete": "该账号的仓库数量超出应用的获取范围，显示的是最近一次完整统计。",
   "github.error.searchIncomplete": "GitHub 搜索结果不完整，显示的是最近一次完整统计。",
+  "github.error.commitsIncomplete": "GitHub 提交搜索结果不完整，显示的是最近一次完整统计。",
   "github.error.generic": "GitHub 暂时不可用，已保存的数据未变更。",
 
   "menu.ariaLabel": "窗口菜单",

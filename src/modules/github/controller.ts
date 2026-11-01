@@ -32,6 +32,7 @@ export interface GithubMessage {
  */
 export function browserGithubState(nativeBridgeAvailable: boolean): GithubViewState {
   if (!nativeBridgeAvailable) {
+    const fetchedAt = Math.floor(Date.now() / 1000);
     return {
       configured: true,
       username: "octocat",
@@ -39,7 +40,7 @@ export function browserGithubState(nativeBridgeAvailable: boolean): GithubViewSt
         username: "octocat",
         followers: 12,
         stars: 128,
-        fetchedAt: Math.floor(Date.now() / 1000),
+        fetchedAt,
       },
       cacheStatus: "fresh",
       cacheAgeSeconds: 0,
@@ -48,12 +49,23 @@ export function browserGithubState(nativeBridgeAvailable: boolean): GithubViewSt
         username: "octocat",
         openIssues: 5,
         pullRequests: 42,
-        fetchedAt: Math.floor(Date.now() / 1000),
+        fetchedAt,
       },
       searchCacheStatus: "fresh",
       searchCacheAgeSeconds: 0,
       searchRefreshing: false,
       searchLastRefresh: "browser-preview",
+      commits: {
+        username: "octocat",
+        commits: 3,
+        localDay: todayKey(),
+        localDayStart: fetchedAt - 60,
+        fetchedAt,
+      },
+      commitsCacheStatus: "fresh",
+      commitsCacheAgeSeconds: 0,
+      commitsRefreshing: false,
+      commitsLastRefresh: "browser-preview",
       rateLimited: false,
       retryAfterSeconds: null,
       lastRefresh: "browser-preview",
@@ -71,10 +83,53 @@ export function browserGithubState(nativeBridgeAvailable: boolean): GithubViewSt
     searchCacheAgeSeconds: null,
     searchRefreshing: false,
     searchLastRefresh: "none",
+    commits: null,
+    commitsCacheStatus: "missing",
+    commitsCacheAgeSeconds: null,
+    commitsRefreshing: false,
+    commitsLastRefresh: "none",
     rateLimited: false,
     retryAfterSeconds: null,
     lastRefresh: "none",
   };
+}
+
+/**
+ * The WebView's local calendar day, `YYYY-MM-DD` — the same shape the
+ * backend stores on a commits snapshot. The app-level day watch compares
+ * this key (and the timezone offset beside it) once a minute and triggers a
+ * re-read only when either moved: the local check costs nothing, and no
+ * GitHub request exists until the day or timezone actually changed.
+ */
+function todayKey(): string {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+/**
+ * The one local day watch (G3): runs `onChange` when the WebView's local
+ * calendar date or timezone offset changes, and never otherwise. A commits
+ * snapshot is valid for one local day in one timezone, so a silent date or
+ * timezone move must surface as an invalidated plane; this check is a pure
+ * local comparison (no network, no GitHub polling) and the caller decides
+ * what a change triggers. Global timers keep this controller DOM-free (and
+ * testable in Node); in the browser they are the window's own timers.
+ * Returns the stop function.
+ */
+export function watchLocalDay(onChange: () => void): () => void {
+  let lastDay = todayKey();
+  let lastOffset = new Date().getTimezoneOffset();
+  const timer = setInterval(() => {
+    const day = todayKey();
+    const offset = new Date().getTimezoneOffset();
+    if (day === lastDay && offset === lastOffset) return;
+    lastDay = day;
+    lastOffset = offset;
+    onChange();
+  }, 60_000);
+  return () => clearInterval(timer);
 }
 
 /** Extracts the backend's pinned error kind from a rejected invoke. */
@@ -92,17 +147,18 @@ function errorKind(reason: unknown): string {
  * are distinct situations and get distinct copy (M3).
  *
  * The `plane` names which refresh failed: the profile plane's incomplete
- * error is about the repository traversal, while the search plane's is about
- * the provider declaring its index answer incomplete — different facts, so
+ * error is about the repository traversal, the search plane's is about the
+ * provider declaring its index answer incomplete, and the commits plane's is
+ * the same declaration about the commit index — different facts, so
  * different copy. Not-found is profile-plane vocabulary by construction: the
- * search endpoint cannot prove an account exists — a nonexistent author is
+ * search endpoints cannot prove an account exists — a nonexistent author is
  * refused with a validation error, not an answer — and this mapping keeps
- * its refusals generic so the fact stays with the profile fetch.
+ * their refusals generic so the fact stays with the profile fetch.
  */
 export function githubErrorLabel(
   reason: unknown,
   username: string,
-  plane: "stats" | "search" = "stats",
+  plane: "stats" | "search" | "commits" = "stats",
 ): GithubMessage {
   const kind = errorKind(reason);
   if (kind.includes("RateLimited")) {
@@ -122,9 +178,9 @@ export function githubErrorLabel(
     return { key: "github.error.invalidUsername" };
   }
   if (kind.includes("Incomplete")) {
-    return plane === "search"
-      ? { key: "github.error.searchIncomplete" }
-      : { key: "github.error.incomplete" };
+    if (plane === "search") return { key: "github.error.searchIncomplete" };
+    if (plane === "commits") return { key: "github.error.commitsIncomplete" };
+    return { key: "github.error.incomplete" };
   }
   if (kind.includes("Cooldown")) {
     return { key: "github.error.cooldown" };
@@ -136,18 +192,20 @@ export function githubErrorLabel(
 }
 
 /**
- * The two independent refresh planes. The profile plane (G1) is the
+ * The three independent refresh planes. The profile plane (G1) is the
  * followers/stars fetch; the search plane (G2) is the issues/pull-requests
- * fetch. Each runs its own backend command behind its own queue slot, so a
- * search refresh can neither collide with nor be dropped by an in-flight
- * profile refresh — while the shared identity epoch keeps both of them
- * honest across account switches.
+ * fetch; the commits plane (G3) is the today's-commits fetch. Each runs its
+ * own backend command behind its own queue slot, so one plane's refresh can
+ * neither collide with nor be dropped by another's in-flight fetch — while
+ * the shared identity epoch keeps all of them honest across account
+ * switches.
  */
-type RefreshPlane = "stats" | "search";
+type RefreshPlane = "stats" | "search" | "commits";
 
 const PLANE_COMMAND: Record<RefreshPlane, string> = {
   stats: "refresh_github",
   search: "refresh_github_search",
+  commits: "refresh_github_commits",
 };
 
 /**
@@ -209,6 +267,7 @@ export function createGithubController(bridge: GithubBridge) {
   const planes: Record<RefreshPlane, PlaneQueue> = {
     stats: { inFlight: null, inFlightEpoch: -1, queuedEpoch: -1 },
     search: { inFlight: null, inFlightEpoch: -1, queuedEpoch: -1 },
+    commits: { inFlight: null, inFlightEpoch: -1, queuedEpoch: -1 },
   };
 
   /**
@@ -265,6 +324,11 @@ export function createGithubController(bridge: GithubBridge) {
     await refreshPlane("search", manual);
   }
 
+  /** The commits plane's manual/automatic refresh entry (G3). */
+  async function refreshCommits(manual = false) {
+    await refreshPlane("commits", manual);
+  }
+
   async function refreshPlane(plane: RefreshPlane, manual: boolean) {
     if (!bridge.available || !github.value.configured) return;
     const slot = planes[plane];
@@ -296,10 +360,12 @@ export function createGithubController(bridge: GithubBridge) {
       if (!bridge.available || !github.value.configured) return;
       if (myEpoch !== epoch) return;
       // The transient message line belongs to the profile plane's refresh
-      // cycle: a search refresh starting must not erase a profile failure
-      // notice it cannot replace (search failures surface on their own).
+      // cycle: a search or commits refresh starting must not erase a profile
+      // failure notice it cannot replace (their failures surface on their
+      // own).
       if (plane === "stats") message.value = null;
-      const refreshingField = plane === "stats" ? "refreshing" : "searchRefreshing";
+      const refreshingField =
+        plane === "stats" ? "refreshing" : plane === "search" ? "searchRefreshing" : "commitsRefreshing";
       github.value[refreshingField] = true;
       const run = (async () => {
         try {
@@ -351,19 +417,20 @@ export function createGithubController(bridge: GithubBridge) {
   }
 
   /**
-   * The one automatic refresh trigger, shared by startup and the settings-
-   * save path: a visible, configured module gets one background refresh per
-   * plane whose cache is not fresh. Hidden modules, unconfigured usernames,
-   * fresh caches, and rate-limited windows stay off the network — no retry
-   * storm. The planes are judged independently: a fresh profile snapshot
-   * never masks a stale search cache or vice versa, and the shared
-   * rate-limit backoff pauses both.
+   * The one automatic refresh trigger, shared by startup, the settings-save
+   * path, and the local day watch: a visible, configured module gets one
+   * background refresh per plane whose cache is not fresh. Hidden modules,
+   * unconfigured usernames, fresh caches, and rate-limited windows stay off
+   * the network — no retry storm. The planes are judged independently: a
+   * fresh profile snapshot never masks a stale search or commits cache or
+   * vice versa, and the shared rate-limit backoff pauses all of them.
    */
   function refreshIfStale(visible: boolean) {
     if (!visible || !github.value.configured) return;
     if (github.value.rateLimited) return;
     if (github.value.cacheStatus !== "fresh") void refreshGithub(false);
     if (github.value.searchCacheStatus !== "fresh") void refreshSearch(false);
+    if (github.value.commitsCacheStatus !== "fresh") void refreshCommits(false);
   }
 
   return {
@@ -373,6 +440,7 @@ export function createGithubController(bridge: GithubBridge) {
     loadGithub,
     refreshGithub,
     refreshSearch,
+    refreshCommits,
     refreshIfStale,
     switchIdentity,
     invalidate,

@@ -18,7 +18,7 @@ import {
 } from "./appearance";
 import { createI18n, normalizeLanguage, provideI18n } from "./i18n";
 import { browserWeatherState, createWeatherController, type WeatherMessage } from "./modules/weather/controller";
-import { createGithubController, type GithubMessage } from "./modules/github/controller";
+import { createGithubController, watchLocalDay, type GithubMessage } from "./modules/github/controller";
 import { openQuickLink as openQuickLinkCommand, type ShortcutsBridge } from "./modules/shortcuts/bridge";
 import { isModuleEnabled, resolveModuleVisibility, type ModuleVisibility } from "./modules/registry";
 import {
@@ -88,19 +88,40 @@ const {
   loadGithub,
   refreshGithub,
   refreshSearch,
+  refreshCommits,
   refreshIfStale,
   switchIdentity,
   invalidate,
 } = githubController;
 /**
- * The card's manual refresh affordance (G2): one click refreshes both
- * planes — the profile fetch and the search fetch — each behind its own
- * queue and its own backend single-flight flag, so they run independently
- * and neither can be dropped by the other's in-progress state.
+ * The card's manual refresh affordance (G2/G3): one click refreshes every
+ * plane — the profile fetch, the search fetch, and the commits fetch — each
+ * behind its own queue and its own backend single-flight flag, so they run
+ * independently and none can be dropped by another's in-progress state.
  */
 function refreshGithubCard() {
   void refreshGithub(true);
   void refreshSearch(true);
+  void refreshCommits(true);
+}
+/**
+ * The commits plane (G3) answers for one local calendar day in one
+ * timezone. The app installs the one local day watch: when the WebView's
+ * date or timezone offset changes, the state is re-read (so the backend's
+ * day-mismatch refusal surfaces immediately) and the same one-shot stale
+ * trigger as startup runs — exactly one background refresh per invalidated
+ * plane, never a per-minute poll. A hidden module invalidates instead of
+ * refreshing, mirroring the settings-save path.
+ */
+function onLocalDayChanged() {
+  void (async () => {
+    await loadGithub();
+    if (isModuleEnabled(moduleVisibility.value, "github")) {
+      refreshIfStale(true);
+    } else {
+      invalidate();
+    }
+  })();
 }
 const imageAsset = ref<AssetPayload>(emptyAsset());
 const wallpaperAsset = ref<AssetPayload>(emptyAsset());
@@ -110,6 +131,7 @@ const menu = ref<{ open: boolean; x: number; y: number }>({ open: false, x: 0, y
 let unlistenSettings: UnlistenFn | undefined;
 let unlistenProductState: UnlistenFn | undefined;
 let weatherTimer: number | undefined;
+let stopDayWatch: (() => void) | undefined;
 
 /**
  * The app owns the single i18n instance and provides it to every child, so
@@ -739,6 +761,7 @@ onMounted(async () => {
       }
     });
   }, 60 * 60 * 1000);
+  stopDayWatch = watchLocalDay(onLocalDayChanged);
   window.addEventListener("pointerdown", closeMenu);
   window.addEventListener("blur", closeMenu);
   window.addEventListener("keydown", handleKey);
@@ -783,6 +806,7 @@ onBeforeUnmount(() => {
   unlistenSettings?.();
   unlistenProductState?.();
   if (weatherTimer !== undefined) window.clearInterval(weatherTimer);
+  stopDayWatch?.();
 });
 </script>
 

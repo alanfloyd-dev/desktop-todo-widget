@@ -255,6 +255,29 @@ export interface GithubSearchSnapshot {
   fetchedAt: number;
 }
 
+/**
+ * One complete today's-commits fetch (v1.3.0-G3), as the Rust backend
+ * normalized it. The count is what GitHub's public commit-search index
+ * attributes to the account as author on default branches of public
+ * repositories, with an author timestamp inside the local calendar day named
+ * by `localDay` — it is not GitHub contribution-calendar activity, not an
+ * exhaustive unique-SHA total, and never represents private or
+ * not-yet-indexed work. `localDayStart` is the exact instant (unix seconds)
+ * that day's local midnight began: the backend refuses a snapshot whose day
+ * or midnight no longer matches this machine, so a stored snapshot here is
+ * valid for the day and timezone it names.
+ */
+export interface GithubCommitsSnapshot {
+  /** The validated username the query was built from. */
+  username: string;
+  commits: number;
+  /** The local calendar day the count covers, `YYYY-MM-DD`. */
+  localDay: string;
+  /** The unix second that day's local midnight starts. */
+  localDayStart: number;
+  fetchedAt: number;
+}
+
 export interface GithubViewState {
   /** Whether a username is configured; false renders the setup state. */
   configured: boolean;
@@ -274,6 +297,18 @@ export interface GithubViewState {
   searchCacheAgeSeconds: number | null;
   searchRefreshing: boolean;
   searchLastRefresh: string;
+  /**
+   * The commits plane (G3), independent of both planes above in every
+   * respect — and with one extra validity axis: a snapshot whose local day
+   * or local midnight no longer matches this machine renders as missing,
+   * never as today's count. The rate-limit backoff and the shared
+   * search-request budget are shared with the search plane.
+   */
+  commits: GithubCommitsSnapshot | null;
+  commitsCacheStatus: GithubCacheStatus;
+  commitsCacheAgeSeconds: number | null;
+  commitsRefreshing: boolean;
+  commitsLastRefresh: string;
   /** A provider rate-limit backoff is in force until `retryAfterSeconds`. */
   rateLimited: boolean;
   retryAfterSeconds: number | null;

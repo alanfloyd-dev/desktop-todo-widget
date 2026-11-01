@@ -3,6 +3,7 @@ import {
   browserGithubState,
   createGithubController,
   githubErrorLabel,
+  watchLocalDay,
   type GithubBridge,
 } from "./controller";
 import type { GithubViewState } from "../../types";
@@ -38,6 +39,17 @@ function snapshotState(overrides: Partial<GithubViewState> = {}): GithubViewStat
     searchCacheAgeSeconds: 30,
     searchRefreshing: false,
     searchLastRefresh: "success",
+    commits: {
+      username: "octocat",
+      commits: 4,
+      localDay: "2026-11-01",
+      localDayStart: 1_799_913_600,
+      fetchedAt: 1_800_000_000,
+    },
+    commitsCacheStatus: "fresh",
+    commitsCacheAgeSeconds: 30,
+    commitsRefreshing: false,
+    commitsLastRefresh: "success",
     rateLimited: false,
     retryAfterSeconds: null,
     lastRefresh: "success",
@@ -50,6 +62,13 @@ function accountAState(): GithubViewState {
     username: "alanfloyd-dev",
     snapshot: { username: "alanfloyd-dev", followers: 117, stars: 19, fetchedAt: 1 },
     search: { username: "alanfloyd-dev", openIssues: 3, pullRequests: 7, fetchedAt: 1 },
+    commits: {
+      username: "alanfloyd-dev",
+      commits: 2,
+      localDay: "2026-11-01",
+      localDayStart: 1_799_913_600,
+      fetchedAt: 1,
+    },
   });
 }
 
@@ -85,6 +104,8 @@ function sequenceBridge(stateAnswer: () => GithubViewState | Promise<GithubViewS
   const refreshCount = () => calls.filter((c) => c.command === "refresh_github").length;
   const searchCount = () =>
     calls.filter((c) => c.command === "refresh_github_search").length;
+  const commitsCount = () =>
+    calls.filter((c) => c.command === "refresh_github_commits").length;
   const indexOf = (command: string, occurrence = 0) => {
     let seen = 0;
     for (let index = 0; index < calls.length; index += 1) {
@@ -99,6 +120,7 @@ function sequenceBridge(stateAnswer: () => GithubViewState | Promise<GithubViewS
     calls,
     refreshCount,
     searchCount,
+    commitsCount,
     async settle(command: string, value: unknown, occurrence = 0) {
       const entry = calls[indexOf(command, occurrence)];
       entry.done = true;
@@ -646,5 +668,269 @@ describe("github controller — search plane (G2)", () => {
     expect(native.search).toBeNull();
     expect(native.searchCacheStatus).toBe("missing");
     expect(native.searchLastRefresh).toBe("none");
+  });
+});
+
+describe("github controller — commits plane (G3)", () => {
+  it("a manual commits refresh rides refresh_github_commits once and lands the view", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = snapshotState({ commitsCacheStatus: "stale" });
+
+    const pending = controller.refreshCommits(true);
+    expect(controller.github.value.commitsRefreshing).toBe(true);
+    await harness.settle("refresh_github_commits", snapshotState({ commitsCacheStatus: "fresh" }));
+    await pending;
+
+    expect(harness.commitsCount()).toBe(1);
+    // The other planes are untouched by a commits refresh.
+    expect(harness.refreshCount()).toBe(0);
+    expect(harness.searchCount()).toBe(0);
+    expect(controller.github.value.commitsRefreshing).toBe(false);
+    expect(controller.github.value.commitsCacheStatus).toBe("fresh");
+  });
+
+  it("the commits plane is single-flighted independently of both other planes", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = snapshotState({
+      cacheStatus: "stale",
+      searchCacheStatus: "stale",
+      commitsCacheStatus: "stale",
+    });
+
+    // All three planes trigger at once: none waits behind another's queue.
+    const stats = controller.refreshGithub(false);
+    const search = controller.refreshSearch(false);
+    const commits = controller.refreshCommits(false);
+    await tick();
+    expect(harness.refreshCount()).toBe(1);
+    expect(harness.searchCount()).toBe(1);
+    expect(harness.commitsCount()).toBe(1);
+
+    // A second trigger on the commits plane while its own fetch is in
+    // flight is a no-op.
+    controller.refreshCommits(false);
+    await tick();
+    expect(harness.commitsCount()).toBe(1);
+
+    await harness.settle("refresh_github", snapshotState());
+    await harness.settle("refresh_github_search", snapshotState());
+    await harness.settle("refresh_github_commits", snapshotState());
+    await Promise.all([stats, search, commits]);
+  });
+
+  it("a commits success never clears the profile plane's not-found fact", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = snapshotState({ cacheStatus: "stale" });
+    controller.notFound.value = "octocat"; // the profile plane proved this
+
+    const pending = controller.refreshCommits(true);
+    await harness.settle("refresh_github_commits", snapshotState());
+    await pending;
+
+    expect(controller.notFound.value).toBe("octocat");
+    expect(controller.message.value).toBeNull();
+  });
+
+  it("a commits failure never sets the not-found fact and re-syncs the cache", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = snapshotState({ commitsCacheStatus: "stale" });
+
+    const pending = controller.refreshCommits(true);
+    await harness.fail("refresh_github_commits", { kind: "Network" });
+    await pending;
+
+    expect(controller.notFound.value).toBeNull();
+    expect(controller.message.value).toEqual({ key: "github.error.generic" });
+    // The failure re-syncs from the backend cache instead of blanking.
+    expect(controller.github.value).toEqual(snapshotState());
+  });
+
+  it("a stale commits response never overwrites the switched identity's state", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = accountAState();
+
+    const pending = controller.refreshCommits(true);
+    controller.switchIdentity("octocat");
+    await harness.settle("refresh_github_commits", accountAState());
+    await pending;
+
+    expect(controller.github.value.username).toBe("octocat");
+    expect(controller.github.value.commits).toBeNull();
+    expect(controller.github.value.commitsRefreshing).toBe(false);
+  });
+
+  it("switching identity invalidates the queued commits refresh", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = accountAState();
+
+    const stats = controller.refreshGithub(false); // A's profile fetch in flight
+    controller.switchIdentity("octocat");
+    const commits = controller.refreshCommits(false); // B's commits refresh
+    await tick();
+    controller.switchIdentity("carol"); // B superseded before A settles
+
+    await harness.settle("refresh_github", accountAState());
+    await stats;
+    await harness.settle("refresh_github_commits", accountAState());
+    await commits;
+    await tick();
+
+    // B's commits fetch was abandoned: the late answer is discarded whole
+    // and C's card carries no numbers at all.
+    expect(harness.commitsCount()).toBe(1);
+    expect(controller.github.value.username).toBe("carol");
+    expect(controller.github.value.commits).toBeNull();
+    expect(controller.github.value.snapshot).toBeNull();
+  });
+
+  it("hiding the module invalidates the pending commits refresh intent", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = snapshotState({ commitsCacheStatus: "stale" });
+
+    const pending = controller.refreshCommits(false);
+    controller.invalidate(); // module hidden while the fetch is in flight
+    await harness.settle("refresh_github_commits", snapshotState());
+    await pending;
+
+    // The stale response was discarded whole — the card keeps its previous
+    // (stale) honesty; a re-show must schedule fresh work.
+    expect(harness.commitsCount()).toBe(1);
+    expect(controller.github.value.commitsCacheStatus).toBe("stale");
+  });
+
+  it("refreshIfStale judges all three planes independently", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+
+    // Stale commits only → only the commits refresh.
+    controller.github.value = snapshotState({ commitsCacheStatus: "stale" });
+    controller.refreshIfStale(true);
+    await tick();
+    expect(harness.refreshCount()).toBe(0);
+    expect(harness.searchCount()).toBe(0);
+    expect(harness.commitsCount()).toBe(1);
+    await harness.settle("refresh_github_commits", snapshotState());
+    await tick(); // the settled fetch releases the plane's queue slot
+
+    // Missing commits (a backend day-mismatch refusal included) refresh
+    // too: the plane is judged by its own validity, not the others'.
+    controller.github.value = snapshotState({
+      commits: null,
+      commitsCacheStatus: "missing",
+      commitsCacheAgeSeconds: null,
+    });
+    controller.refreshIfStale(true);
+    await tick();
+    expect(harness.refreshCount()).toBe(0);
+    expect(harness.searchCount()).toBe(0);
+    expect(harness.commitsCount()).toBe(2);
+    await harness.settle("refresh_github_commits", snapshotState());
+
+    // Fresh everywhere → nothing.
+    controller.refreshIfStale(true);
+    await tick();
+    expect(harness.refreshCount()).toBe(0);
+    expect(harness.searchCount()).toBe(0);
+    expect(harness.commitsCount()).toBe(2);
+  });
+
+  it("the shared rate-limit backoff pauses all three planes and none retries", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = snapshotState({
+      cacheStatus: "stale",
+      searchCacheStatus: "stale",
+      commitsCacheStatus: "stale",
+      rateLimited: true,
+      retryAfterSeconds: 120,
+    });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      controller.refreshIfStale(true);
+    }
+    await tick();
+
+    // No plane may touch the network during a backoff.
+    expect(harness.calls.length).toBe(0);
+  });
+
+  it("an unconfigured module keeps all three planes off the network", async () => {
+    const harness = sequenceBridge();
+    const controller = createGithubController(harness.bridge);
+    controller.github.value = snapshotState({ configured: false, username: "" });
+
+    await controller.refreshGithub(true);
+    await controller.refreshSearch(true);
+    await controller.refreshCommits(true);
+    controller.refreshIfStale(true);
+    await tick();
+
+    expect(harness.calls.length).toBe(0);
+  });
+
+  it("the error label maps the commits plane's incomplete kind to its own copy", () => {
+    expect(githubErrorLabel({ kind: "Incomplete" }, "x", "commits")).toEqual({
+      key: "github.error.commitsIncomplete",
+    });
+    // Every other kind maps identically on all planes.
+    expect(githubErrorLabel({ kind: "RateLimited", message: 300 }, "x", "commits")).toEqual({
+      key: "github.rateLimited",
+      params: { minutes: 5 },
+    });
+    expect(githubErrorLabel({ kind: "Network" }, "x", "commits").key).toBe(
+      "github.error.generic",
+    );
+  });
+
+  it("the preview fallback carries a commits sample and the native fallback starts empty", () => {
+    const preview = browserGithubState(false);
+    expect(preview.commits?.commits).toBeGreaterThan(0);
+    expect(preview.commitsCacheStatus).toBe("fresh");
+    // The sample's snapshot names the WebView's own local day, so the
+    // preview card never renders a number the backend would refuse.
+    const now = new Date();
+    const expectedDay = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    expect(preview.commits?.localDay).toBe(expectedDay);
+
+    const native = browserGithubState(true);
+    expect(native.commits).toBeNull();
+    expect(native.commitsCacheStatus).toBe("missing");
+    expect(native.commitsLastRefresh).toBe("none");
+  });
+
+  it("the day watch fires once when the local date changes and never otherwise", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(2026, 10, 1, 23, 55, 0));
+      const changes = vi.fn();
+      const stop = watchLocalDay(changes);
+
+      // The same day ticking by costs nothing.
+      vi.advanceTimersByTime(61_000);
+      expect(changes).not.toHaveBeenCalled();
+
+      // The day rolls: exactly one change event, from the next tick.
+      vi.setSystemTime(new Date(2026, 10, 2, 0, 0, 30));
+      vi.advanceTimersByTime(61_000);
+      expect(changes).toHaveBeenCalledTimes(1);
+
+      // No repeated firing: the watch compares, it never polls the network.
+      vi.advanceTimersByTime(5 * 61_000);
+      expect(changes).toHaveBeenCalledTimes(1);
+
+      stop();
+      // A stopped watch stays silent.
+      vi.advanceTimersByTime(61_000);
+      expect(changes).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

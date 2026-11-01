@@ -491,6 +491,12 @@ button {
   margin-top: 8px !important;
 }
 
+/* The commits plane's row (G3) is the same rhythm again: one metric (or its
+   unavailable fallback line) on its own row. */
+.github-commits-row {
+  margin-top: 8px !important;
+}
+
 .github-metric {
   display: flex;
   min-width: 0;

@@ -4,12 +4,13 @@ import { useI18n } from "../../i18n";
 import type { GithubViewState } from "../../types";
 
 /**
- * The GitHub dashboard card (v1.3.0-G1/G2): four metrics in two rows — the
- * profile plane (followers, and the total stars across the account's owned
- * public non-fork repositories) above the search plane (open issues authored
- * by the account, and all pull requests it authored, from GitHub's public
- * search index) — plus the account identity, the last-update lines, and the
- * refresh affordance.
+ * The GitHub dashboard card (v1.3.0-G1/G2/G3): five metrics in three rows —
+ * the profile plane (followers, and the total stars across the account's
+ * owned public non-fork repositories), the search plane (open issues
+ * authored by the account, and all pull requests it authored, from GitHub's
+ * public search index), and the commits plane (today's commits attributed to
+ * the account in GitHub's public commit-search index) — plus the account
+ * identity, the last-update lines, and the refresh affordance.
  *
  * Presentation only: every state below renders from the one `GithubViewState`
  * the app-level controller owns, and every action is emitted upward — the
@@ -83,11 +84,30 @@ const hasSearch = computed(
 );
 
 /**
- * The refresh affordance serves both planes and waits for both: the icon
- * spins and the button stays disabled while either plane is in flight, so
+ * The commits plane's snapshot-bearing state (G3), judged independently of
+ * both planes above: a "missing" backend state — including a snapshot the
+ * backend refused because its local day or midnight no longer matches this
+ * machine — renders the unavailable line, never yesterday's number as
+ * today's count. The presence check rejects both `null` and `undefined`
+ * (`!= null`): a backend from before the commits plane omits the field
+ * entirely, and treating that as present data would crash the row on
+ * `commits!.commits`.
+ */
+const hasCommits = computed(
+  () => props.github.commits != null && props.github.commitsCacheStatus !== "missing",
+);
+
+/**
+ * The refresh affordance serves all three planes and waits for all: the icon
+ * spins and the button stays disabled while any plane is in flight, so
  * the spinning icon and the disabled semantics always agree.
  */
-const refreshing = computed(() => props.github.refreshing || props.github.searchRefreshing);
+const refreshing = computed(
+  () =>
+    props.github.refreshing ||
+    props.github.searchRefreshing ||
+    props.github.commitsRefreshing,
+);
 </script>
 
 <template>
@@ -160,6 +180,27 @@ const refreshing = computed(() => props.github.refreshing || props.github.search
       <p v-else class="github-empty github-search-row">
         {{ t("github.searchUnavailable") }}
       </p>
+      <!--
+        The commits plane's row (G3), judged independently like the search
+        row above: valid commits data renders its one metric with the honest
+        "(public)" label, a missing fetch (a snapshot the backend refused
+        because the local day or midnight moved included) renders its own
+        unavailable line while every other plane's numbers stay up. A zero is
+        data and renders as "0"; only an absent complete fetch renders this
+        fallback.
+      -->
+      <p v-if="hasCommits" class="github-primary github-commits-row">
+        <span class="github-metric">
+          <span class="github-metric-value">{{ count(github.commits!.commits) }}</span>
+          <span class="github-metric-label">{{ t("github.todayCommits") }}</span>
+        </span>
+      </p>
+      <p v-else-if="github.commitsRefreshing" class="github-empty github-commits-row">
+        {{ t("github.commitsLoading") }}
+      </p>
+      <p v-else class="github-empty github-commits-row">
+        {{ t("github.commitsUnavailable") }}
+      </p>
       <p class="github-secondary">
         <!--
           The safe profile link: a labeled control that hands the username to
@@ -179,6 +220,9 @@ const refreshing = computed(() => props.github.refreshing || props.github.search
       </p>
       <p v-if="hasSearch && github.searchCacheStatus === 'stale'" class="github-age">
         {{ ageLabel(github.searchCacheAgeSeconds) }}
+      </p>
+      <p v-if="hasCommits && github.commitsCacheStatus === 'stale'" class="github-age">
+        {{ ageLabel(github.commitsCacheAgeSeconds) }}
       </p>
     </template>
 
@@ -221,10 +265,25 @@ const refreshing = computed(() => props.github.refreshing || props.github.search
         <p v-else class="github-empty github-search-row">
           {{ t("github.searchUnavailable") }}
         </p>
+        <p v-if="hasCommits" class="github-primary github-commits-row">
+          <span class="github-metric">
+            <span class="github-metric-value">{{ count(github.commits!.commits) }}</span>
+            <span class="github-metric-label">{{ t("github.todayCommits") }}</span>
+          </span>
+        </p>
+        <p v-else-if="github.commitsRefreshing" class="github-empty github-commits-row">
+          {{ t("github.commitsLoading") }}
+        </p>
+        <p v-else class="github-empty github-commits-row">
+          {{ t("github.commitsUnavailable") }}
+        </p>
       </template>
       <p v-if="github.snapshot" class="github-age">{{ ageLabel(github.cacheAgeSeconds) }}</p>
       <p v-if="hasSearch && github.searchCacheStatus === 'stale'" class="github-age">
         {{ ageLabel(github.searchCacheAgeSeconds) }}
+      </p>
+      <p v-if="hasCommits && github.commitsCacheStatus === 'stale'" class="github-age">
+        {{ ageLabel(github.commitsCacheAgeSeconds) }}
       </p>
     </template>
 

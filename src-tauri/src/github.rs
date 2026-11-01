@@ -1,9 +1,11 @@
 use crate::{
-    database::{GithubCacheRow, GithubSearchCacheRow},
+    database::{GithubCacheRow, GithubCommitsCacheRow, GithubSearchCacheRow},
     settings::AppState,
 };
+use chrono::{DateTime, Local, LocalResult, Offset, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::VecDeque,
     io::Read,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -82,6 +84,36 @@ pub struct SearchSnapshot {
     pub fetched_at: i64,
 }
 
+/// The today's-commits snapshot (v1.3.0-G3): the count of commits GitHub's
+/// public commit-search index attributes to the configured account as author,
+/// on default branches of public repositories, with an author timestamp
+/// between this machine's local midnight and the fetch instant. The data
+/// source is the searchable PUBLIC index by definition: the number never
+/// represents private, non-default-branch, or not-yet-indexed work, and it is
+/// a count of index occurrences, not an exhaustive unique-SHA total. The
+/// snapshot is valid for one local calendar day in one timezone: both the day
+/// string and the exact midnight instant below are part of the identity, and
+/// the view refuses a snapshot whose either has moved.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitsSnapshot {
+    /// The validated username the query was built from (the configured
+    /// spelling, trimmed). The search API names no canonical login for a
+    /// `total_count`-only read, so the integrity filter checks this field
+    /// against the row's cache key instead.
+    pub username: String,
+    pub commits: u64,
+    /// The local calendar day the count covers, `YYYY-MM-DD` in the runtime's
+    /// local timezone at fetch time.
+    pub local_day: String,
+    /// The exact instant (unix seconds) the count's author-date range starts:
+    /// this machine's local midnight. Recomputed by every view read; a
+    /// snapshot computed for a different midnight — a date roll or a machine
+    /// timezone change — is refused even when its day string still matches.
+    pub local_day_start: i64,
+    pub fetched_at: i64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GithubCacheStatus {
@@ -115,6 +147,18 @@ pub struct GithubViewState {
     /// The search plane's last-refresh outcome, the `last_refresh` string's
     /// counterpart (QA evidence, never rendered).
     pub search_last_refresh: String,
+    /// The commits plane (G3), independent of both planes above in every
+    /// respect — its own cache row and validity, its own refresh flag, and its
+    /// own command. Its validity adds the local-day axis: a snapshot computed
+    /// for a previous calendar day (or a moved machine-timezone midnight)
+    /// renders as missing, never as today's count. The provider rate-limit
+    /// backoff and the search-request budget guard are shared with the search
+    /// plane.
+    pub commits: Option<CommitsSnapshot>,
+    pub commits_cache_status: GithubCacheStatus,
+    pub commits_cache_age_seconds: Option<i64>,
+    pub commits_refreshing: bool,
+    pub commits_last_refresh: String,
     /// Whether a provider rate-limit backoff is currently in force; refresh
     /// attempts are refused without touching the network until it expires.
     pub rate_limited: bool,
@@ -170,6 +214,84 @@ impl GithubError {
     }
 }
 
+/// The two Search-API planes (G2, G3) draw on the provider's per-minute
+/// search budget — 10 requests per minute unauthenticated, a separate
+/// resource from the core budget G1 uses. Independent single-flight flags
+/// keep each plane from colliding with itself; they say nothing about the
+/// shared budget. This coordinator adds the two smallest safe facts:
+///
+/// 1. Search requests never fly concurrently — a per-request lock serializes
+///    G2's two requests and G3's one against each other (each plane's own
+///    fetches are already single-flighted, and one request at a time inside
+///    a fetch keeps G2's two-request sequence intact).
+/// 2. Every attempted dispatch is counted in a sliding 60-second window that
+///    refuses further search requests once the documented budget is reached —
+///    before the provider has to. Attempts are counted, not successes: a
+///    network failure spends nothing at the provider, but counting it is the
+///    conservative reading of a budget this small. A refusal carries the
+///    window's real remaining seconds as the retry hint, so it feeds the same
+///    shared rate-limit backoff the provider's own refusals do.
+struct SearchCoordinator {
+    /// Held for the duration of each single search request.
+    serial: Mutex<()>,
+    /// Dispatch instants of attempted search requests inside the window.
+    window: Mutex<VecDeque<Instant>>,
+}
+
+/// The documented unauthenticated search budget the window never exceeds.
+const SEARCH_REQUESTS_PER_WINDOW: usize = 10;
+/// The window's length; a dispatch leaves the guard one full window later.
+const SEARCH_WINDOW: Duration = Duration::from_secs(60);
+
+impl Default for SearchCoordinator {
+    fn default() -> Self {
+        Self {
+            serial: Mutex::new(()),
+            window: Mutex::new(VecDeque::new()),
+        }
+    }
+}
+
+impl SearchCoordinator {
+    /// One guarded search request: serialized against the other plane's
+    /// current request, admitted by the sliding budget window, then fetched
+    /// through the caller's transport unchanged.
+    fn guarded_get(
+        &self,
+        transport: &impl HttpTransport,
+        url: Url,
+    ) -> Result<HttpResponse, GithubError> {
+        let _serial = self.serial.lock().map_err(|_| GithubError::ProviderError)?;
+        self.request_permit(Instant::now())?;
+        transport.get(url)
+    }
+
+    /// The sliding-window admission decision, split out so tests can drive
+    /// it with chosen clock readings. Prunes expired dispatches, refuses a
+    /// full window with the time its oldest entry still holds, otherwise
+    /// records this dispatch and admits it.
+    fn request_permit(&self, now: Instant) -> Result<(), GithubError> {
+        let mut window = self.window.lock().map_err(|_| GithubError::ProviderError)?;
+        while window
+            .front()
+            .is_some_and(|dispatched| now.duration_since(*dispatched) >= SEARCH_WINDOW)
+        {
+            window.pop_front();
+        }
+        if window.len() >= SEARCH_REQUESTS_PER_WINDOW {
+            let oldest = window.front().expect("a full window is nonempty");
+            let wait = SEARCH_WINDOW
+                .checked_sub(now.duration_since(*oldest))
+                .unwrap_or_default();
+            return Err(GithubError::RateLimited(Some(
+                wait.as_secs().max(1) as i64
+            )));
+        }
+        window.push_back(now);
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 pub struct GithubRuntime {
     refreshing: AtomicBool,
@@ -178,11 +300,19 @@ pub struct GithubRuntime {
     /// provider rate budgets, and one plane's in-flight fetch must not make
     /// the other refuse as `InProgress`.
     search_refreshing: AtomicBool,
+    /// The commits plane's single-flight flag (G3), separate for the same
+    /// reason: three independent jobs, three independent flags.
+    commits_refreshing: AtomicBool,
     last_manual_refresh: Mutex<Option<Instant>>,
     last_manual_search_refresh: Mutex<Option<Instant>>,
+    last_manual_commits_refresh: Mutex<Option<Instant>>,
     rate_limited_until: Mutex<Option<Instant>>,
     last_refresh: Mutex<String>,
     last_search_refresh: Mutex<String>,
+    last_commits_refresh: Mutex<String>,
+    /// The shared search-request coordinator: both Search-API planes'
+    /// requests serialize through it and are counted against one window.
+    search_coordinator: SearchCoordinator,
 }
 
 impl GithubRuntime {
@@ -299,6 +429,53 @@ impl GithubRuntime {
 
     fn finish_search_refresh(&self) {
         self.search_refreshing.store(false, Ordering::Release);
+    }
+
+    fn last_commits_refresh(&self) -> String {
+        self.last_commits_refresh
+            .lock()
+            .map(|value| {
+                if value.is_empty() {
+                    "none".into()
+                } else {
+                    value.clone()
+                }
+            })
+            .unwrap_or_else(|_| "unavailable".into())
+    }
+
+    fn record_commits(&self, value: &str) {
+        if let Ok(mut status) = self.last_commits_refresh.lock() {
+            *status = value.into();
+        }
+    }
+
+    /// The commits plane's refresh gate: the same shape as the other two
+    /// planes (rate-limit gate first, then the manual cooldown, then
+    /// single-flight) with its own flag and cooldown clock, and the shared
+    /// rate-limit backoff.
+    fn begin_commits_refresh(&self, manual: bool) -> Result<(), GithubError> {
+        if let Some(remaining) = self.rate_limit_remaining() {
+            return Err(GithubError::RateLimited(Some(remaining)));
+        }
+        if manual {
+            let mut last = self
+                .last_manual_commits_refresh
+                .lock()
+                .map_err(|_| GithubError::ProviderError)?;
+            if last.is_some_and(|instant| instant.elapsed() < MANUAL_REFRESH_COOLDOWN) {
+                return Err(GithubError::Cooldown);
+            }
+            *last = Some(Instant::now());
+        }
+        if self.commits_refreshing.swap(true, Ordering::AcqRel) {
+            return Err(GithubError::InProgress);
+        }
+        Ok(())
+    }
+
+    fn finish_commits_refresh(&self) {
+        self.commits_refreshing.store(false, Ordering::Release);
     }
 }
 
@@ -656,13 +833,16 @@ fn search_pull_requests_url(username: &str) -> Result<Url, GithubError> {
 
 /// One search-index read: the fixed query for `url`'s metric, answered with
 /// only the two aggregate fields. `per_page=1` bounds the body; `items` are
-/// never requested in volume and never read.
+/// never requested in volume and never read. The request flies through the
+/// shared search coordinator (serialized, budget-guarded) like every other
+/// Search-API request.
 fn fetch_search_query_with_transport(
+    coordinator: &SearchCoordinator,
     transport: &impl HttpTransport,
     url: Url,
     now: i64,
 ) -> Result<u64, GithubError> {
-    let response = transport.get(url)?;
+    let response = coordinator.guarded_get(transport, url)?;
     match response.status {
         200 => {
             let result: RawSearchResult = serde_json::from_str(&response.body)
@@ -690,16 +870,19 @@ fn fetch_search_query_with_transport(
 /// issues first. Both must succeed completely or nothing is persisted — one
 /// snapshot always covers both metrics.
 fn fetch_search_totals_with_transport(
+    coordinator: &SearchCoordinator,
     transport: &impl HttpTransport,
     username: &str,
     fetched_at: i64,
 ) -> Result<SearchSnapshot, GithubError> {
     let open_issues = fetch_search_query_with_transport(
+        coordinator,
         transport,
         search_issues_url(username)?,
         fetched_at,
     )?;
     let pull_requests = fetch_search_query_with_transport(
+        coordinator,
         transport,
         search_pull_requests_url(username)?,
         fetched_at,
@@ -708,6 +891,158 @@ fn fetch_search_totals_with_transport(
         username: username.to_string(),
         open_issues,
         pull_requests,
+        fetched_at,
+    })
+}
+
+/// The ISO-8601 shape the Search API's date qualifiers accept, including the
+/// explicit UTC offset the local-day boundaries travel with.
+const COMMITS_TIME_FORMAT: &str = "%Y-%m-%dT%H:%M:%S%:z";
+
+/// Resolves the instant the local calendar day of `local_now` begins, for
+/// any timezone. The runtime's local timezone is the authority for this
+/// desktop installation; the resolver is generic so the DST branches are
+/// testable without controlling the process timezone.
+///
+/// - A normal midnight resolves directly.
+/// - A fall-back transition landing exactly on midnight makes the wall-clock
+///   00:00:00 happen twice: the local day begins at its first occurrence
+///   (the earliest instant), which is what "00:00 today" names.
+/// - A spring-forward transition skipping midnight makes the wall-clock
+///   00:00:00 nonexistent. The earliest instant of that local day is the
+///   transition instant itself, and it is found by probing: the instant
+///   wall midnight would be at the offset in force now sits one shift gap
+///   BEFORE the transition, still inside the previous day, so the probe
+///   re-aims at the pre-shift offset it observes and lands on the
+///   transition instant, whose own local wall time is midnight plus the gap
+///   — inside the requested day. Two probes converge for any gap shorter
+///   than a day; the iteration cap is purely defensive.
+fn resolve_day_start<Tz: TimeZone>(tz: &Tz, local_now: &DateTime<Tz>) -> DateTime<Tz> {
+    let naive_midnight = local_now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .expect("00:00:00 is a valid wall-clock time");
+    match tz.from_local_datetime(&naive_midnight) {
+        LocalResult::Single(day_start) => day_start,
+        LocalResult::Ambiguous(first_occurrence, _) => first_occurrence,
+        LocalResult::None => {
+            let today = local_now.date_naive();
+            let mut probe = naive_midnight - local_now.offset().fix();
+            for _ in 0..4 {
+                let offset = tz.offset_from_utc_datetime(&probe).fix();
+                if (probe + offset).date() == today {
+                    return tz.from_utc_datetime(&probe);
+                }
+                probe = naive_midnight - offset;
+            }
+            tz.from_utc_datetime(&probe)
+        }
+    }
+}
+
+/// The local-day context an instant belongs to, in the runtime's local
+/// timezone: the `YYYY-MM-DD` day key and the unix second that day's
+/// midnight starts. The two are a deterministic pair — the same calendar day
+/// resolves to the same midnight instant no matter when during the day it is
+/// asked — and together they are the snapshot-validity identity the view
+/// checks. An unresolvable instant (never reachable for a real clock
+/// reading) degrades to a day key no snapshot can match, which renders the
+/// plane as missing instead of failing the view.
+fn local_day_context(now: i64) -> (String, i64) {
+    let local_now = match Local.timestamp_opt(now, 0).single() {
+        Some(local_now) => local_now,
+        None => return (String::new(), now),
+    };
+    let day_key = local_now.date_naive().format("%Y-%m-%d").to_string();
+    let day_start = resolve_day_start(&Local, &local_now)
+        .with_timezone(&Utc)
+        .timestamp();
+    (day_key, day_start)
+}
+
+/// The local wall-clock form of a unix instant, for the query's range
+/// endpoints. `None` is unreachable for real clock readings; callers refuse
+/// rather than build a query from a degraded value.
+fn local_datetime_at(now: i64) -> Option<DateTime<Local>> {
+    Local.timestamp_opt(now, 0).single()
+}
+
+/// The commit-search query (G3): one account-wide author-date range, from
+/// this machine's local midnight to the fetch instant. `author:` carries the
+/// attribution (GitHub's own email-to-account linkage, the same mechanism
+/// the contribution graph uses), `is:public` pins the visible scope, and the
+/// `author-date` range — supported as ISO-8601 timestamps with explicit
+/// offsets — bounds the count to commits authored on this local calendar day
+/// so far. The upper bound is the fetch instant, so a commit whose author
+/// timestamp falls after the fetch time is never counted; a backdated or
+/// re-pushed commit follows its recorded author date, matching what the
+/// qualifier filters on.
+///
+/// Endpoint inclusivity is a documented approximation, never claimed exact:
+/// GitHub documents `..` for numbers as covering both endpoints and shows
+/// time+offset range examples for dates, but does not separately document
+/// per-second endpoint behavior for date ranges — a commit authored exactly
+/// at a boundary second may fall either way.
+fn commits_query(username: &str, day_start: &DateTime<Local>, fetched_at: i64) -> String {
+    let fetch_instant = local_datetime_at(fetched_at)
+        .unwrap_or_else(|| day_start.with_timezone(&Local))
+        .fixed_offset();
+    format!(
+        "author:{username} is:public author-date:{}..{}",
+        resolve_day_start(&Local, day_start).format(COMMITS_TIME_FORMAT),
+        fetch_instant.format(COMMITS_TIME_FORMAT),
+    )
+}
+
+fn commits_search_url(username: &str, fetched_at: i64) -> Result<Url, GithubError> {
+    let day_start = local_datetime_at(fetched_at).ok_or(GithubError::ProviderError)?;
+    let query = commits_query(username, &day_start, fetched_at);
+    api_url(
+        &["search", "commits"],
+        &[("q", query.as_str()), ("per_page", "1")],
+    )
+}
+
+/// The complete commits fetch (G3): exactly one Search API request through
+/// the shared coordinator, `per_page=1`, only `total_count` and
+/// `incomplete_results` read. A genuine zero is data; an incomplete answer
+/// is refused and persists nothing, so a stored snapshot is always a
+/// complete answer for the day and midnight it names.
+fn fetch_commits_with_transport(
+    coordinator: &SearchCoordinator,
+    transport: &impl HttpTransport,
+    username: &str,
+    fetched_at: i64,
+) -> Result<CommitsSnapshot, GithubError> {
+    let (local_day, local_day_start) = local_day_context(fetched_at);
+    if local_day.is_empty() {
+        return Err(GithubError::ProviderError);
+    }
+    let response = coordinator.guarded_get(transport, commits_search_url(username, fetched_at)?)?;
+    let commits = match response.status {
+        200 => {
+            let result: RawSearchResult = serde_json::from_str(&response.body)
+                .map_err(|_| GithubError::InvalidResponse)?;
+            if result.incomplete_results {
+                // The provider itself says the index shard was incomplete.
+                // The count is unusable by contract: fail the refresh and
+                // keep the previous complete snapshot rather than presenting
+                // a partial index answer as an exact total.
+                return Err(GithubError::Incomplete);
+            }
+            result.total_count
+        }
+        // Every non-200 here is a refused request, mapped by the shared
+        // vocabulary (429 and the 403 rate-limit shapes included). A
+        // nonexistent author cannot prove itself here — that fact stays with
+        // the profile plane's 404, exactly as on the search plane.
+        _ => return Err(refused_status_error(&response, fetched_at)),
+    };
+    Ok(CommitsSnapshot {
+        username: username.to_string(),
+        commits,
+        local_day,
+        local_day_start,
         fetched_at,
     })
 }
@@ -792,9 +1127,14 @@ pub async fn refresh_github_search(
     // search request, flag, or cooldown clock.
     let username = normalize_username(&settings.github_username)?;
     runtime.begin_search_refresh(manual)?;
+    // The fetch thread reaches the shared search coordinator through its own
+    // handle: the command's `app` stays with this task for the persistence
+    // and view half.
+    let task_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let transport = ReqwestTransport::new()?;
-        fetch_search_totals_with_transport(&transport, &username, unix_timestamp())
+        let coordinator = &task_app.state::<GithubRuntime>().search_coordinator;
+        fetch_search_totals_with_transport(coordinator, &transport, &username, unix_timestamp())
     })
     .await
     .map_err(|_| GithubError::ProviderError)
@@ -824,6 +1164,68 @@ pub async fn refresh_github_search(
             // the provider outcome class, never the configured account.
             eprintln!("[github-search] result={}", error.diagnostic_label());
             runtime.record_search(error.diagnostic_label());
+            Err(error)
+        }
+    }
+}
+
+/// The commits plane's refresh (v1.3.0-G3): the same command shape and the
+/// same gates as the other two planes, costing exactly one Search API request
+/// (the G3 budget ceiling) through the shared search coordinator, persisting
+/// to its own cache table, and returning the combined view. A commits failure
+/// never touches the profile or search planes' cache rows, and vice versa.
+#[tauri::command]
+pub async fn refresh_github_commits(
+    app: tauri::AppHandle,
+    manual: bool,
+) -> Result<GithubViewState, GithubError> {
+    let runtime = app.state::<GithubRuntime>();
+    let settings = app
+        .state::<AppState>()
+        .snapshot()
+        .map_err(|_| GithubError::ProviderError)?;
+    // Both configuration gates run before the refresh gate, exactly as the
+    // other two commands do: an unconfigured or invalid username reaches no
+    // commits request, flag, or cooldown clock.
+    let username = normalize_username(&settings.github_username)?;
+    runtime.begin_commits_refresh(manual)?;
+    // The fetch thread reaches the shared search coordinator through its own
+    // handle: the command's `app` stays with this task for the persistence
+    // and view half.
+    let task_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let transport = ReqwestTransport::new()?;
+        let coordinator = &task_app.state::<GithubRuntime>().search_coordinator;
+        fetch_commits_with_transport(coordinator, &transport, &username, unix_timestamp())
+    })
+    .await
+    .map_err(|_| GithubError::ProviderError)
+    .and_then(|value| value);
+
+    runtime.finish_commits_refresh();
+    match result {
+        Ok(snapshot) => {
+            let payload_json =
+                serde_json::to_string(&snapshot).map_err(|_| GithubError::InvalidResponse)?;
+            app.state::<AppState>()
+                .database
+                .upsert_github_commits_cache(&GithubCommitsCacheRow {
+                    username: cache_key(&snapshot.username),
+                    payload_json,
+                    fetched_at: snapshot.fetched_at,
+                })
+                .map_err(|_| GithubError::ProviderError)?;
+            runtime.record_commits("success");
+            github_view(&app.state::<AppState>(), &runtime, unix_timestamp())
+        }
+        Err(error) => {
+            if let GithubError::RateLimited(seconds) = &error {
+                runtime.note_rate_limit(*seconds);
+            }
+            // The username is deliberately omitted: normal logs expose only
+            // the provider outcome class, never the configured account.
+            eprintln!("[github-commits] result={}", error.diagnostic_label());
+            runtime.record_commits(error.diagnostic_label());
             Err(error)
         }
     }
@@ -872,6 +1274,11 @@ fn github_view(
             search_cache_age_seconds: None,
             search_refreshing: runtime.search_refreshing.load(Ordering::Acquire),
             search_last_refresh: runtime.last_search_refresh(),
+            commits: None,
+            commits_cache_status: GithubCacheStatus::Missing,
+            commits_cache_age_seconds: None,
+            commits_refreshing: runtime.commits_refreshing.load(Ordering::Acquire),
+            commits_last_refresh: runtime.last_commits_refresh(),
             rate_limited: false,
             retry_after_seconds: None,
             last_refresh: runtime.last_refresh(),
@@ -908,6 +1315,31 @@ fn github_view(
     let search_age = search
         .as_ref()
         .map(|snapshot| now.saturating_sub(snapshot.fetched_at).max(0));
+    // The commits plane reads its own table under the same integrity rule as
+    // the search plane, plus the local-day axis: the payload must name this
+    // account, carry the row's own fetch time, AND name the calendar day and
+    // midnight instant the current local timezone computes for `now`. A
+    // snapshot from yesterday — or from a moved machine-timezone midnight
+    // that still spells the same date — is refused whole and renders as
+    // missing: yesterday's number is never presented as today's count.
+    let (today_key, today_start) = local_day_context(now);
+    let commits_row = state
+        .database
+        .github_commits_cache(&key)
+        .map_err(|_| GithubError::ProviderError)?;
+    let commits = commits_row.as_ref().and_then(|row| {
+        serde_json::from_str::<CommitsSnapshot>(&row.payload_json)
+            .ok()
+            .filter(|snapshot| {
+                snapshot.username.to_lowercase() == key
+                    && snapshot.fetched_at == row.fetched_at
+                    && snapshot.local_day == today_key
+                    && snapshot.local_day_start == today_start
+            })
+    });
+    let commits_age = commits
+        .as_ref()
+        .map(|snapshot| now.saturating_sub(snapshot.fetched_at).max(0));
     let retry_after_seconds = runtime.rate_limit_remaining();
     Ok(GithubViewState {
         configured: true,
@@ -923,6 +1355,13 @@ fn github_view(
         search_cache_age_seconds: search_age,
         search_refreshing: runtime.search_refreshing.load(Ordering::Acquire),
         search_last_refresh: runtime.last_search_refresh(),
+        commits,
+        commits_cache_status: commits_age
+            .map(cache_status)
+            .unwrap_or(GithubCacheStatus::Missing),
+        commits_cache_age_seconds: commits_age,
+        commits_refreshing: runtime.commits_refreshing.load(Ordering::Acquire),
+        commits_last_refresh: runtime.last_commits_refresh(),
         rate_limited: retry_after_seconds.is_some(),
         retry_after_seconds,
         last_refresh: runtime.last_refresh(),
@@ -1557,7 +1996,7 @@ mod tests {
             search_response(12, false),
         ]);
         let snapshot =
-            fetch_search_totals_with_transport(&transport, "octocat", 100).expect("snapshot");
+            fetch_search_totals_with_transport(&SearchCoordinator::default(), &transport, "octocat", 100).expect("snapshot");
         assert_eq!(snapshot.open_issues, 12);
         assert_eq!(snapshot.pull_requests, 41, "total_count is read verbatim");
         assert_eq!(snapshot.username, "octocat");
@@ -1589,7 +2028,7 @@ mod tests {
             search_response(0, false),
         ]);
         let snapshot =
-            fetch_search_totals_with_transport(&transport, "octocat", 100).expect("snapshot");
+            fetch_search_totals_with_transport(&SearchCoordinator::default(), &transport, "octocat", 100).expect("snapshot");
         assert_eq!(snapshot.open_issues, 0);
         assert_eq!(snapshot.pull_requests, 0);
     }
@@ -1598,7 +2037,7 @@ mod tests {
     fn an_incomplete_search_answer_is_refused_never_counted() {
         let transport = QueueTransport::new(vec![search_response(1000, true)]);
         assert_eq!(
-            fetch_search_totals_with_transport(&transport, "octocat", 100),
+            fetch_search_totals_with_transport(&SearchCoordinator::default(), &transport, "octocat", 100),
             Err(GithubError::Incomplete),
             "incomplete_results=true is never presented as an exact count"
         );
@@ -1616,7 +2055,7 @@ mod tests {
         too_many.retry_after = Some("30".into());
         let transport = QueueTransport::new(vec![too_many]);
         assert_eq!(
-            fetch_search_totals_with_transport(&transport, "octocat", 100),
+            fetch_search_totals_with_transport(&SearchCoordinator::default(), &transport, "octocat", 100),
             Err(GithubError::RateLimited(Some(30)))
         );
 
@@ -1626,7 +2065,7 @@ mod tests {
         exhausted.rate_limit_reset = Some("250".into());
         let transport = QueueTransport::new(vec![exhausted]);
         assert_eq!(
-            fetch_search_totals_with_transport(&transport, "octocat", 100),
+            fetch_search_totals_with_transport(&SearchCoordinator::default(), &transport, "octocat", 100),
             Err(GithubError::RateLimited(Some(150))),
             "reset is an absolute epoch; 250 - now(100) = 150s"
         );
@@ -1637,14 +2076,14 @@ mod tests {
         secondary.retry_after = Some("60".into());
         let transport = QueueTransport::new(vec![secondary]);
         assert_eq!(
-            fetch_search_totals_with_transport(&transport, "octocat", 100),
+            fetch_search_totals_with_transport(&SearchCoordinator::default(), &transport, "octocat", 100),
             Err(GithubError::RateLimited(Some(60)))
         );
 
         // 403 without any rate-limit shape stays a generic provider error.
         let transport = QueueTransport::new(vec![status_response(403)]);
         assert_eq!(
-            fetch_search_totals_with_transport(&transport, "octocat", 100),
+            fetch_search_totals_with_transport(&SearchCoordinator::default(), &transport, "octocat", 100),
             Err(GithubError::ProviderError)
         );
 
@@ -1655,7 +2094,7 @@ mod tests {
         for status in [422, 404, 500] {
             let transport = QueueTransport::new(vec![status_response(status)]);
             assert_eq!(
-                fetch_search_totals_with_transport(&transport, "octocat", 100),
+                fetch_search_totals_with_transport(&SearchCoordinator::default(), &transport, "octocat", 100),
                 Err(GithubError::ProviderError),
                 "status {status} must be a provider error"
             );
@@ -1666,13 +2105,13 @@ mod tests {
     fn a_malformed_search_answer_is_an_invalid_response() {
         let transport = QueueTransport::new(vec![profile_response(200, "not json")]);
         assert_eq!(
-            fetch_search_totals_with_transport(&transport, "octocat", 100),
+            fetch_search_totals_with_transport(&SearchCoordinator::default(), &transport, "octocat", 100),
             Err(GithubError::InvalidResponse)
         );
         // A missing aggregate field is malformed too.
         let transport = QueueTransport::new(vec![profile_response(200, r#"{ "total_count": 5 }"#)]);
         assert_eq!(
-            fetch_search_totals_with_transport(&transport, "octocat", 100),
+            fetch_search_totals_with_transport(&SearchCoordinator::default(), &transport, "octocat", 100),
             Err(GithubError::InvalidResponse)
         );
     }
@@ -1847,5 +2286,819 @@ mod tests {
         runtime.record_search("success");
         let view = github_view(&state, &runtime, 100).expect("view");
         assert_eq!(view.search_last_refresh, "success");
+    }
+
+    // --- G3: local-day boundaries ----------------------------------------------
+
+    /// A timezone double that models a REAL transition landing on the
+    /// wall-clock midnight of 2026-11-01, so the resolver's branches are
+    /// driven on both the local→UTC and the UTC→local side without
+    /// controlling the process timezone. `pre_seconds` is the offset before
+    /// the transition and `gap_seconds` its signed shift (positive:
+    /// spring-forward, which can skip midnight; negative: fall-back, which
+    /// can repeat it). Every instant's offset is looked up against the
+    /// modeled switch point, so a probe on the wrong side of the transition
+    /// sees the wrong offset — the property a vacuous fixed-offset mock
+    /// hides.
+    #[derive(Clone)]
+    struct EdgeTz {
+        pre_seconds: i32,
+        gap_seconds: i32,
+        ambiguous_midnight: bool,
+        skipped_midnight: bool,
+    }
+
+    impl EdgeTz {
+        fn offset(&self, seconds: i32) -> chrono::FixedOffset {
+            chrono::FixedOffset::east_opt(seconds).expect("valid offset")
+        }
+        fn pre(&self) -> chrono::FixedOffset {
+            self.offset(self.pre_seconds)
+        }
+        fn post(&self) -> chrono::FixedOffset {
+            self.offset(self.pre_seconds + self.gap_seconds)
+        }
+        fn midnight(&self) -> chrono::NaiveDateTime {
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 1)
+                .expect("date")
+                .and_hms_opt(0, 0, 0)
+                .expect("midnight")
+        }
+        /// The UTC instant the offset switches at, when this mock models a
+        /// midnight transition at all. A spring-forward's last pre-shift
+        /// instant and a fall-back's repeated 00:00:00 sit one gap away from
+        /// wall midnight on opposite sides, so each shape carries its own
+        /// anchor.
+        fn switch_utc(&self) -> Option<chrono::NaiveDateTime> {
+            if self.skipped_midnight {
+                Some(self.midnight() - self.pre())
+            } else if self.ambiguous_midnight {
+                Some(self.midnight() - self.post())
+            } else {
+                None
+            }
+        }
+        fn offset_at_utc(&self, utc: &chrono::NaiveDateTime) -> chrono::FixedOffset {
+            match self.switch_utc() {
+                Some(switch) if *utc >= switch => self.post(),
+                _ => self.pre(),
+            }
+        }
+        /// The shared local→UTC branch: the edge behavior lives at exactly
+        /// one wall-clock datetime; everything else resolves single at the
+        /// pre-shift offset.
+        fn from_local(&self, local: &chrono::NaiveDateTime) -> LocalResult<chrono::FixedOffset> {
+            if *local == self.midnight() {
+                if self.skipped_midnight {
+                    return LocalResult::None;
+                }
+                if self.ambiguous_midnight {
+                    // A fall-back: 00:00:00 exists twice — first at the
+                    // pre-shift offset (the earlier instant), then again at
+                    // the post-shift offset. chrono orders Ambiguous
+                    // (earlier, later).
+                    return LocalResult::Ambiguous(self.pre(), self.post());
+                }
+            }
+            LocalResult::Single(self.pre())
+        }
+    }
+
+    impl TimeZone for EdgeTz {
+        type Offset = chrono::FixedOffset;
+
+        fn from_offset(offset: &Self::Offset) -> Self {
+            Self {
+                pre_seconds: offset.local_minus_utc(),
+                gap_seconds: 0,
+                ambiguous_midnight: false,
+                skipped_midnight: false,
+            }
+        }
+
+        fn offset_from_utc_date(&self, utc: &chrono::NaiveDate) -> Self::Offset {
+            self.offset_at_utc(&utc.and_hms_opt(0, 0, 0).expect("midnight"))
+        }
+
+        fn offset_from_utc_datetime(&self, utc: &chrono::NaiveDateTime) -> Self::Offset {
+            self.offset_at_utc(utc)
+        }
+
+        fn offset_from_local_date(
+            &self,
+            local: &chrono::NaiveDate,
+        ) -> LocalResult<Self::Offset> {
+            self.from_local(&local.and_hms_opt(0, 0, 0).expect("midnight"))
+        }
+
+        fn offset_from_local_datetime(
+            &self,
+            local: &chrono::NaiveDateTime,
+        ) -> LocalResult<Self::Offset> {
+            self.from_local(local)
+        }
+    }
+
+    /// Mid-day "now" inside the requested local day, fourteen UTC hours
+    /// after the day's first pre-shift midnight occurrence — comfortably
+    /// past any midnight transition, so the offset in force is the
+    /// post-shift one whenever a transition was modeled.
+    fn edge_now(tz: &EdgeTz) -> chrono::DateTime<EdgeTz> {
+        let anchor = tz.midnight() - tz.pre() + chrono::Duration::hours(14);
+        tz.from_utc_datetime(&anchor)
+    }
+
+    #[test]
+    fn a_single_local_midnight_resolves_to_itself() {
+        let tz = EdgeTz {
+            pre_seconds: 8 * 3600,
+            gap_seconds: 0,
+            ambiguous_midnight: false,
+            skipped_midnight: false,
+        };
+        let day_start = resolve_day_start(&tz, &edge_now(&tz));
+        assert_eq!(day_start.naive_local(), tz.midnight());
+        assert_eq!(day_start.offset().fix(), tz.pre().fix());
+    }
+
+    #[test]
+    fn an_ambiguous_midnight_uses_the_first_occurrence() {
+        // A fall-back: +03:00 becomes +02:00 at midnight, so 00:00:00
+        // happens twice.
+        let tz = EdgeTz {
+            pre_seconds: 3 * 3600,
+            gap_seconds: -3600,
+            ambiguous_midnight: true,
+            skipped_midnight: false,
+        };
+        let day_start = resolve_day_start(&tz, &edge_now(&tz));
+        // The day begins at the FIRST 00:00:00: the pre-shift occurrence,
+        // one pre-shift hour before wall midnight, a real instant of the
+        // requested day.
+        assert_eq!(
+            day_start.with_timezone(&Utc).naive_utc(),
+            tz.midnight() - tz.pre()
+        );
+        assert_eq!(day_start.naive_local(), tz.midnight());
+        assert_eq!(day_start.offset().fix(), tz.pre().fix());
+    }
+
+    #[test]
+    fn a_skipped_midnight_resolves_to_the_transition_instant() {
+        // A spring-forward: +02:00 becomes +03:00 at midnight, so the
+        // wall-clock 00:00:00 does not exist and the day's earliest instant
+        // is the transition itself.
+        let tz = EdgeTz {
+            pre_seconds: 2 * 3600,
+            gap_seconds: 3600,
+            ambiguous_midnight: false,
+            skipped_midnight: true,
+        };
+        let day_start = resolve_day_start(&tz, &edge_now(&tz));
+        // The resolved instant IS the switch point, and its local wall time
+        // is midnight plus the gap (01:00:00) — genuinely inside the
+        // requested local day. A resolver that merely reinterprets wall
+        // midnight at the offset in force now lands one gap-hour early, in
+        // the previous local day, and fails both assertions.
+        assert_eq!(
+            day_start.with_timezone(&Utc).naive_utc(),
+            tz.midnight() - tz.pre()
+        );
+        assert_eq!(
+            day_start.naive_local(),
+            tz.midnight() + chrono::Duration::seconds(tz.gap_seconds as i64)
+        );
+        assert_eq!(day_start.offset().fix(), tz.post().fix());
+    }
+
+    #[test]
+    fn the_local_day_context_names_the_day_and_its_midnight_stably() {
+        let now = 1_800_000_000;
+        let (day, day_start) = local_day_context(now);
+        // The day key is the midnight's own calendar date, and the midnight is
+        // a real local 00:00:00.
+        assert_eq!(day, {
+            let midnight = Local
+                .timestamp_opt(day_start, 0)
+                .single()
+                .expect("the day start is a real instant");
+            assert_eq!(midnight.format("%H:%M:%S").to_string(), "00:00:00");
+            midnight.date_naive().format("%Y-%m-%d").to_string()
+        });
+        // The midnight precedes the instant, on the same local day (a DST day
+        // can be 23 or 25 hours, so the bound is loose).
+        assert!(day_start <= now);
+        assert!(now - day_start < 25 * 3600);
+        // The pair is a deterministic function of the calendar day: asked
+        // again later the same day, both answers agree.
+        let (later_day, later_start) = local_day_context(now + 600);
+        assert_eq!((day, day_start), (later_day, later_start));
+    }
+
+    // --- G3: query construction --------------------------------------------------
+
+    #[test]
+    fn the_commits_query_bounds_local_midnight_and_the_fetch_instant() {
+        let fetched_at = 1_800_000_000;
+        let day_start = local_datetime_at(fetched_at).expect("local datetime");
+        let query = commits_query("octo-cat", &day_start, fetched_at);
+        let start_text = resolve_day_start(&Local, &day_start)
+            .format(COMMITS_TIME_FORMAT)
+            .to_string();
+        let end_text = day_start
+            .fixed_offset()
+            .format(COMMITS_TIME_FORMAT)
+            .to_string();
+        assert_eq!(
+            query,
+            format!("author:octo-cat is:public author-date:{start_text}..{end_text}"),
+            "the range starts at local midnight (with that boundary's own offset) and ends exactly at the fetch instant"
+        );
+        // The upper bound is the fetch instant: a commit whose author
+        // timestamp falls after the fetch time is outside the range and can
+        // never be counted by this query.
+        assert!(end_text.contains(&Local
+            .timestamp_opt(fetched_at, 0)
+            .single()
+            .expect("real instant")
+            .format("%Y-%m-%dT%H:%M:%S")
+            .to_string()));
+    }
+
+    #[test]
+    fn the_commits_url_encodes_the_query_under_the_fixed_api_origin() {
+        let url = commits_search_url("octo-cat", 1_800_000_000).expect("commits url");
+        let text = url.as_str();
+        assert!(text.starts_with("https://api.github.com/search/commits?q="), "{text}");
+        assert!(text.contains("author%3Aocto-cat"), "{text}");
+        assert!(text.contains("is%3Apublic"), "{text}");
+        assert!(text.contains("author-date%3A"), "{text}");
+        assert!(text.contains("%2B"), "the offset's plus sign is URL-encoded: {text}");
+        assert!(text.contains(".."), "the range separator survives encoding: {text}");
+        assert!(text.ends_with("&per_page=1"), "{text}");
+    }
+
+    // --- G3: fetch ---------------------------------------------------------------
+
+    fn commits_response(total_count: u64, incomplete_results: bool) -> HttpResponse {
+        profile_response(200, &search_body(total_count, incomplete_results))
+    }
+
+    #[test]
+    fn the_commits_fetch_reads_one_bounded_search_request() {
+        let (day, day_start) = local_day_context(100);
+        let transport = QueueTransport::new(vec![commits_response(7, false)]);
+        let snapshot = fetch_commits_with_transport(
+            &SearchCoordinator::default(),
+            &transport,
+            "octocat",
+            100,
+        )
+        .expect("snapshot");
+        assert_eq!(snapshot.commits, 7, "total_count is read verbatim");
+        assert_eq!(snapshot.username, "octocat");
+        assert_eq!(snapshot.local_day, day);
+        assert_eq!(snapshot.local_day_start, day_start);
+        assert_eq!(snapshot.fetched_at, 100);
+        assert_eq!(
+            transport.calls.load(AtomicOrdering::Relaxed),
+            1,
+            "the request budget is exactly one search request"
+        );
+        assert!(transport.urls()[0].contains("/search/commits"), "{:?}", transport.urls());
+    }
+
+    #[test]
+    fn a_zero_commit_day_is_genuine_data_not_missing_data() {
+        let transport = QueueTransport::new(vec![commits_response(0, false)]);
+        let snapshot = fetch_commits_with_transport(
+            &SearchCoordinator::default(),
+            &transport,
+            "octocat",
+            100,
+        )
+        .expect("snapshot");
+        assert_eq!(snapshot.commits, 0);
+    }
+
+    #[test]
+    fn an_incomplete_commits_answer_is_refused_never_counted() {
+        let transport = QueueTransport::new(vec![commits_response(1000, true)]);
+        assert_eq!(
+            fetch_commits_with_transport(
+                &SearchCoordinator::default(),
+                &transport,
+                "octocat",
+                100
+            ),
+            Err(GithubError::Incomplete),
+            "incomplete_results=true is never presented as an exact count"
+        );
+        assert_eq!(
+            transport.calls.load(AtomicOrdering::Relaxed),
+            1,
+            "the refusal happens on the one request; no second request exists"
+        );
+    }
+
+    #[test]
+    fn commits_refusals_map_to_the_pinned_vocabulary() {
+        // 429 → RateLimited with the provider's hint.
+        let mut too_many = status_response(429);
+        too_many.retry_after = Some("30".into());
+        let transport = QueueTransport::new(vec![too_many]);
+        assert_eq!(
+            fetch_commits_with_transport(
+                &SearchCoordinator::default(),
+                &transport,
+                "octocat",
+                100
+            ),
+            Err(GithubError::RateLimited(Some(30)))
+        );
+
+        // 403 with the remaining budget at zero → RateLimited.
+        let mut exhausted = status_response(403);
+        exhausted.rate_limit_remaining = Some("0".into());
+        exhausted.rate_limit_reset = Some("250".into());
+        let transport = QueueTransport::new(vec![exhausted]);
+        assert_eq!(
+            fetch_commits_with_transport(
+                &SearchCoordinator::default(),
+                &transport,
+                "octocat",
+                100
+            ),
+            Err(GithubError::RateLimited(Some(150)))
+        );
+
+        // 403 with only a Retry-After — the secondary rate-limit signature —
+        // is a rate limit, not a generic refusal.
+        let mut secondary = status_response(403);
+        secondary.retry_after = Some("60".into());
+        let transport = QueueTransport::new(vec![secondary]);
+        assert_eq!(
+            fetch_commits_with_transport(
+                &SearchCoordinator::default(),
+                &transport,
+                "octocat",
+                100
+            ),
+            Err(GithubError::RateLimited(Some(60)))
+        );
+
+        // 403 without any rate-limit shape, and 422/404/500, stay generic
+        // provider errors — the account-existence fact belongs to the profile
+        // plane, never to a search plane.
+        for status in [403, 422, 404, 500] {
+            let transport = QueueTransport::new(vec![status_response(status)]);
+            assert_eq!(
+                fetch_commits_with_transport(
+                    &SearchCoordinator::default(),
+                    &transport,
+                    "octocat",
+                    100
+                ),
+                Err(GithubError::ProviderError),
+                "status {status} must be a provider error"
+            );
+        }
+    }
+
+    #[test]
+    fn a_malformed_commits_answer_is_an_invalid_response() {
+        let transport = QueueTransport::new(vec![profile_response(200, "not json")]);
+        assert_eq!(
+            fetch_commits_with_transport(
+                &SearchCoordinator::default(),
+                &transport,
+                "octocat",
+                100
+            ),
+            Err(GithubError::InvalidResponse)
+        );
+        // A missing aggregate field is malformed too.
+        let transport = QueueTransport::new(vec![profile_response(200, r#"{ "total_count": 5 }"#)]);
+        assert_eq!(
+            fetch_commits_with_transport(
+                &SearchCoordinator::default(),
+                &transport,
+                "octocat",
+                100
+            ),
+            Err(GithubError::InvalidResponse)
+        );
+    }
+
+    // --- G3: shared search-request coordination ----------------------------------
+
+    #[test]
+    fn the_search_window_admits_the_documented_budget_then_refuses() {
+        let coordinator = SearchCoordinator::default();
+        let now = Instant::now();
+        for _ in 0..SEARCH_REQUESTS_PER_WINDOW {
+            coordinator.request_permit(now).expect("within budget");
+        }
+        let refused = coordinator.request_permit(now).expect_err("over budget");
+        match refused {
+            GithubError::RateLimited(Some(seconds)) => {
+                assert!(
+                    (1..=60).contains(&seconds),
+                    "the hint is the real window remainder, got {seconds}s"
+                );
+            }
+            other => panic!("a full window must refuse as RateLimited, got {other:?}"),
+        }
+        // Sliding the window forward frees every slot again.
+        let later = now + SEARCH_WINDOW;
+        coordinator.request_permit(later).expect("window slid");
+    }
+
+    #[test]
+    fn a_refused_search_request_records_nothing_new() {
+        let coordinator = SearchCoordinator::default();
+        let now = Instant::now();
+        for _ in 0..SEARCH_REQUESTS_PER_WINDOW {
+            coordinator.request_permit(now).expect("within budget");
+        }
+        assert!(coordinator.request_permit(now).is_err());
+        // The refusal consumed no slot: the window still holds exactly the
+        // ten admitted dispatches.
+        assert_eq!(
+            coordinator.window.lock().expect("window").len(),
+            SEARCH_REQUESTS_PER_WINDOW
+        );
+    }
+
+    /// A transport that records its peak in-flight request count — the
+    /// serialization witness for the shared search coordinator.
+    struct ConcurrencyTransport {
+        current: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    impl ConcurrencyTransport {
+        fn new() -> Self {
+            Self {
+                current: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+            }
+        }
+
+        fn peak(&self) -> usize {
+            self.peak.load(AtomicOrdering::Relaxed)
+        }
+    }
+
+    impl HttpTransport for ConcurrencyTransport {
+        fn get(&self, _url: Url) -> Result<HttpResponse, GithubError> {
+            let current = self.current.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+            self.peak.fetch_max(current, AtomicOrdering::Relaxed);
+            std::thread::sleep(Duration::from_millis(20));
+            self.current.fetch_sub(1, AtomicOrdering::Relaxed);
+            Ok(commits_response(1, false))
+        }
+    }
+
+    #[test]
+    fn guarded_search_requests_never_fly_concurrently() {
+        let coordinator = std::sync::Arc::new(SearchCoordinator::default());
+        let transport = std::sync::Arc::new(ConcurrencyTransport::new());
+        let url = search_issues_url("octocat").expect("url");
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                let coordinator = std::sync::Arc::clone(&coordinator);
+                let transport = std::sync::Arc::clone(&transport);
+                let url = url.clone();
+                std::thread::spawn(move || coordinator.guarded_get(transport.as_ref(), url))
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("thread").expect("request");
+        }
+        assert_eq!(
+            transport.peak(),
+            1,
+            "search requests serialize: at most one is in flight at any time"
+        );
+    }
+
+    #[test]
+    fn the_search_budget_is_shared_across_both_search_planes() {
+        let coordinator = SearchCoordinator::default();
+        // Five G2 fetches spend exactly ten search requests (two each).
+        for _ in 0..(SEARCH_REQUESTS_PER_WINDOW / 2) {
+            let transport = QueueTransport::new(vec![
+                search_response(1, false),
+                search_response(1, false),
+            ]);
+            fetch_search_totals_with_transport(&coordinator, &transport, "octocat", 100)
+                .expect("within budget");
+        }
+        // The commits plane draws on the same window: one more request is
+        // refused before the transport is touched.
+        let transport = QueueTransport::new(vec![commits_response(1, false)]);
+        let refused = fetch_commits_with_transport(&coordinator, &transport, "octocat", 100)
+            .expect_err("over budget");
+        assert!(
+            matches!(refused, GithubError::RateLimited(Some(_))),
+            "the shared window refuses cross-plane too, got {refused:?}"
+        );
+        assert_eq!(
+            transport.calls.load(AtomicOrdering::Relaxed),
+            0,
+            "a locally refused search request never reaches the network"
+        );
+    }
+
+    #[test]
+    fn a_refused_second_g2_request_fails_the_whole_search_refresh() {
+        // Nine dispatches already in the window: G2's first request is
+        // admitted, its second is refused — and the fetch fails whole, so
+        // nothing partial is ever presented as a snapshot.
+        let coordinator = SearchCoordinator::default();
+        let now = Instant::now();
+        for _ in 0..(SEARCH_REQUESTS_PER_WINDOW - 1) {
+            coordinator.request_permit(now).expect("within budget");
+        }
+        let transport = QueueTransport::new(vec![
+            search_response(1, false),
+            search_response(1, false),
+        ]);
+        let error =
+            fetch_search_totals_with_transport(&coordinator, &transport, "octocat", 100)
+                .expect_err("over budget");
+        assert!(
+            matches!(error, GithubError::RateLimited(Some(_))),
+            "the mid-fetch refusal is a rate limit, got {error:?}"
+        );
+        assert_eq!(
+            transport.calls.load(AtomicOrdering::Relaxed),
+            1,
+            "the first request flew, the second was refused locally"
+        );
+    }
+
+    // --- G3: runtime gates -------------------------------------------------------
+
+    #[test]
+    fn commits_refreshes_deduplicate_and_cool_down_independently() {
+        let runtime = GithubRuntime::default();
+        runtime.begin_commits_refresh(false).expect("first");
+        assert_eq!(
+            runtime.begin_commits_refresh(false),
+            Err(GithubError::InProgress),
+            "a concurrent identical commits fetch is deduplicated"
+        );
+        runtime.finish_commits_refresh();
+        // The planes' single-flight flags are independent: the commits
+        // plane's flight never blocks either other plane.
+        runtime.begin_refresh(false).expect("profile plane unaffected");
+        runtime.finish_refresh();
+        runtime.begin_search_refresh(false).expect("search plane unaffected");
+        runtime.finish_search_refresh();
+
+        runtime.begin_commits_refresh(true).expect("manual");
+        runtime.finish_commits_refresh();
+        assert_eq!(
+            runtime.begin_commits_refresh(true),
+            Err(GithubError::Cooldown),
+            "a manual commits refresh inside the cooldown is refused"
+        );
+        // The cooldown clocks are independent too.
+        runtime.begin_refresh(true).expect("profile cooldown independent");
+        runtime.finish_refresh();
+        runtime.begin_search_refresh(true).expect("search cooldown independent");
+        runtime.finish_search_refresh();
+        // Background commits refreshes are not cooled down.
+        runtime.begin_commits_refresh(false).expect("background");
+        runtime.finish_commits_refresh();
+    }
+
+    #[test]
+    fn a_rate_limit_backoff_is_shared_by_all_three_planes() {
+        let runtime = GithubRuntime::default();
+        runtime.note_rate_limit(Some(120));
+        let remaining = runtime.rate_limit_remaining().expect("backoff in force");
+        assert_eq!(
+            runtime.begin_commits_refresh(false),
+            Err(GithubError::RateLimited(Some(remaining))),
+            "the commits plane refuses during the shared backoff"
+        );
+        assert_eq!(
+            runtime.begin_search_refresh(false),
+            Err(GithubError::RateLimited(Some(remaining))),
+            "so does the search plane"
+        );
+        assert_eq!(
+            runtime.begin_refresh(false),
+            Err(GithubError::RateLimited(Some(remaining))),
+            "so does the profile plane"
+        );
+    }
+
+    // --- G3: commits cache and view ----------------------------------------------
+
+    /// Seeds a commits row valid for `view_now`'s local day and midnight, so
+    /// the test's expectation and the view's recomputation share one clock
+    /// reading and cannot drift across a real midnight.
+    fn seed_commits_cache(state: &AppState, username: &str, commits: u64, view_now: i64, age: i64) {
+        let (local_day, local_day_start) = local_day_context(view_now);
+        let snapshot = CommitsSnapshot {
+            username: username.into(),
+            commits,
+            local_day,
+            local_day_start,
+            fetched_at: view_now - age,
+        };
+        state
+            .database
+            .upsert_github_commits_cache(&GithubCommitsCacheRow {
+                username: cache_key(username),
+                payload_json: serde_json::to_string(&snapshot).expect("json"),
+                fetched_at: snapshot.fetched_at,
+            })
+            .expect("seed commits cache");
+    }
+
+    #[test]
+    fn commits_cache_reports_missing_fresh_and_stale() {
+        let state = configured_state("octocat");
+        let runtime = GithubRuntime::default();
+        assert_eq!(
+            github_view(&state, &runtime, 100_000)
+                .expect("missing")
+                .commits_cache_status,
+            GithubCacheStatus::Missing
+        );
+        for (age, expected) in [
+            (60, GithubCacheStatus::Fresh),
+            (FRESH_AFTER_SECONDS, GithubCacheStatus::Stale),
+            (31 * 60, GithubCacheStatus::Stale),
+        ] {
+            seed_commits_cache(&state, "octocat", 4, 100_000, age);
+            let view = github_view(&state, &runtime, 100_000).expect("view");
+            assert_eq!(view.commits_cache_status, expected, "age {age}");
+            assert_eq!(view.commits_cache_age_seconds, Some(age));
+            assert_eq!(view.commits.as_ref().map(|s| s.commits), Some(4));
+        }
+    }
+
+    #[test]
+    fn a_snapshot_from_another_day_or_moved_midnight_renders_missing() {
+        let state = configured_state("octocat");
+        let runtime = GithubRuntime::default();
+        let (today, today_start) = local_day_context(100_000);
+
+        // Yesterday's snapshot: fresh by age, but it answers the wrong
+        // question. It is refused whole — yesterday's number is never
+        // rendered as today's count.
+        let yesterday = CommitsSnapshot {
+            username: "octocat".into(),
+            commits: 9,
+            local_day: "2000-01-01".into(),
+            local_day_start: 0,
+            fetched_at: 100_000 - 60,
+        };
+        state
+            .database
+            .upsert_github_commits_cache(&GithubCommitsCacheRow {
+                username: cache_key("octocat"),
+                payload_json: serde_json::to_string(&yesterday).expect("json"),
+                fetched_at: yesterday.fetched_at,
+            })
+            .expect("seed yesterday");
+        let view = github_view(&state, &runtime, 100_000).expect("view");
+        assert_eq!(view.commits_cache_status, GithubCacheStatus::Missing);
+        assert!(view.commits.is_none());
+
+        // The timezone-move case: the same calendar date spelled the same
+        // way, but computed against a different midnight. The day string
+        // alone cannot distinguish the two contexts, so the exact midnight
+        // instant is part of the identity too.
+        let moved = CommitsSnapshot {
+            username: "octocat".into(),
+            commits: 9,
+            local_day: today,
+            local_day_start: today_start + 1,
+            fetched_at: 100_000 - 60,
+        };
+        state
+            .database
+            .upsert_github_commits_cache(&GithubCommitsCacheRow {
+                username: cache_key("octocat"),
+                payload_json: serde_json::to_string(&moved).expect("json"),
+                fetched_at: moved.fetched_at,
+            })
+            .expect("seed moved");
+        let view = github_view(&state, &runtime, 100_000).expect("view");
+        assert_eq!(view.commits_cache_status, GithubCacheStatus::Missing);
+        assert!(view.commits.is_none());
+    }
+
+    #[test]
+    fn a_corrupt_or_mismatched_commits_row_is_ignored_as_missing() {
+        let state = configured_state("octocat");
+        let runtime = GithubRuntime::default();
+        state
+            .database
+            .upsert_github_commits_cache(&GithubCommitsCacheRow {
+                username: cache_key("octocat"),
+                payload_json: "corrupt".into(),
+                fetched_at: 90,
+            })
+            .expect("corrupt commits cache");
+        assert!(
+            github_view(&state, &runtime, 100_000)
+                .expect("view")
+                .commits
+                .is_none(),
+            "a corrupt payload renders as missing, never as an error"
+        );
+
+        // A row whose payload names a different account is not this
+        // account's snapshot, exactly like the other planes' integrity
+        // filters.
+        seed_commits_cache(&state, "someone-else", 4, 100_000, 60);
+        let view = github_view(&state, &runtime, 100_000).expect("view");
+        assert!(view.commits.is_none());
+    }
+
+    #[test]
+    fn the_three_cache_planes_are_independent() {
+        let state = configured_state("octocat");
+        let runtime = GithubRuntime::default();
+
+        // A fresh commits snapshot renders while both other planes report
+        // missing.
+        seed_commits_cache(&state, "octocat", 4, 100_000, 60);
+        let view = github_view(&state, &runtime, 100_000).expect("view");
+        assert_eq!(view.commits.as_ref().map(|s| s.commits), Some(4));
+        assert_eq!(view.commits_cache_status, GithubCacheStatus::Fresh);
+        assert_eq!(view.cache_status, GithubCacheStatus::Missing);
+        assert!(view.snapshot.is_none());
+        assert_eq!(view.search_cache_status, GithubCacheStatus::Missing);
+        assert!(view.search.is_none());
+
+        // The mirrored case: valid profile and search data with no commits
+        // row at all — the commits plane reports missing and the others stay
+        // untouched.
+        let state = configured_state("octocat");
+        let profile = GithubSnapshot {
+            username: "octocat".into(),
+            followers: 1,
+            stars: 2,
+            fetched_at: 90,
+        };
+        state
+            .database
+            .upsert_github_cache(&GithubCacheRow {
+                username: cache_key("octocat"),
+                payload_json: serde_json::to_string(&profile).expect("json"),
+                fetched_at: 90,
+            })
+            .expect("g1 row");
+        seed_search_cache(&state, &search_snapshot("octocat", 3, 5, 90));
+        let view = github_view(&state, &runtime, 100_000).expect("view");
+        assert!(view.snapshot.is_some());
+        assert!(view.search.is_some());
+        assert_eq!(view.commits_cache_status, GithubCacheStatus::Missing);
+        assert!(view.commits.is_none());
+    }
+
+    #[test]
+    fn a_username_change_starts_the_commits_plane_from_an_empty_cache() {
+        let state = configured_state("octocat");
+        let runtime = GithubRuntime::default();
+        seed_commits_cache(&state, "octocat", 4, 100_000, 60);
+
+        // Same account, different spelling: the lowercase cache key reads
+        // the same row.
+        state
+            .update(|settings| settings.github_username = "OctoCat".into())
+            .expect("change spelling");
+        let view = github_view(&state, &runtime, 100_000).expect("case-variant");
+        assert!(view.commits.is_some(), "case-insensitive commits cache key");
+
+        // A genuinely different account has nothing — its commits must never
+        // be borrowed from the previous account's row.
+        state
+            .update(|settings| settings.github_username = "someone-else".into())
+            .expect("switch account");
+        let view = github_view(&state, &runtime, 100_000).expect("new account");
+        assert_eq!(view.commits_cache_status, GithubCacheStatus::Missing);
+        assert!(view.commits.is_none());
+    }
+
+    #[test]
+    fn the_view_exposes_the_commits_plane_flags() {
+        let state = configured_state("octocat");
+        let runtime = GithubRuntime::default();
+        let view = github_view(&state, &runtime, 100_000).expect("view");
+        assert!(!view.commits_refreshing);
+        assert_eq!(view.commits_last_refresh, "none");
+        runtime.record_commits("success");
+        let view = github_view(&state, &runtime, 100_000).expect("view");
+        assert_eq!(view.commits_last_refresh, "success");
     }
 }

@@ -120,12 +120,17 @@ describe("GitHub panel source contracts (G1)", () => {
     expect(githubPanelSource).toContain('v-if="!notFound"');
   });
 
-  it("waits for both planes before calling its refresh affordance idle (G2)", () => {
-    // The single button serves both planes: the spinning icon and the
-    // disabled semantics must cover either plane's in-flight fetch.
-    expect(githubPanelSource).toContain(
-      "const refreshing = computed(() => props.github.refreshing || props.github.searchRefreshing);",
+  it("waits for all three planes before calling its refresh affordance idle (G2/G3)", () => {
+    // The single button serves all three planes: the spinning icon and the
+    // disabled semantics must cover any plane's in-flight fetch. The three
+    // flags appear in the one computed, in plane order.
+    const refreshingBody = githubPanelSource.slice(
+      githubPanelSource.indexOf("const refreshing = computed("),
+      githubPanelSource.indexOf("</script>"),
     );
+    expect(refreshingBody).toContain("props.github.refreshing ||");
+    expect(refreshingBody).toContain("props.github.searchRefreshing ||");
+    expect(refreshingBody).toContain("props.github.commitsRefreshing,");
     expect(githubPanelSource).toContain(':disabled="refreshing"');
   });
 
