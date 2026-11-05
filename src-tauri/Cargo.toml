@@ -115,7 +115,7 @@ ed25519-dalek = { version = "2", default-features = false, features = ["fast"] }
 base64 = "0.22"
 # Test-only ZIP fixtures for the package allowlist/staging matrix (the
 # production ZIP validation lives in the maintenance core).
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [profile.dev]
 incremental = true
