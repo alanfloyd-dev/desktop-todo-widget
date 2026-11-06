@@ -31,15 +31,27 @@
  *
  * The Settings overlay draws on its own opaque graphite surface and is where the
  * color is chosen, so it keeps the fixed graphite palette instead of inheriting
- * one — a dark custom color would otherwise make the picker itself unreadable,
- * with no way back. (The Review overlay already declares its own palette for the
- * same reason.) Accent, warning/error, task-state, and status-mark colors are
- * never part of the custom palette, so meaning survives any text color.
+ * one — and that isolation is not only about Custom: when the shell resolves to
+ * `contrast-dark` (a light material behind it), the panel would otherwise
+ * inherit near-black ink, dark muted text, the deep contrast-dark mineral, and
+ * the dark danger red onto its still-dark surface, where none of them read
+ * (labels measured 1.04:1, headings 2.33:1 — review finding R-2). Declaring
+ * the palette on `.settings-panel` itself beats every inherited shell value
+ * for the panel subtree, so the panel is identical over Glass, Gradient,
+ * light or dark solids, and in Custom text mode. (The Review overlay already
+ * declares its own palette for the same reason.) Accent, warning/error,
+ * task-state, and status-mark colors are never part of the custom palette, so
+ * meaning survives any text color. Values are the `:root` graphite defaults,
+ * reused verbatim — no second palette exists.
  */
-.text-custom .settings-panel {
+.settings-panel {
   --ink: #d3dade;
   --muted: #849198;
   --faint: #59676f;
+  --mineral: #81b9df;
+  --danger: #d9a4a4;
+  --line: rgba(145, 164, 174, 0.22);
+  --line-strong: rgba(145, 164, 174, 0.38);
 }
 
 * {
@@ -313,8 +325,7 @@ button {
 .product-section h2,
 .module-section-heading h1,
 .signature > span,
-.menu-heading,
-.settings-panel header p {
+.menu-heading {
   font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
   letter-spacing: 0.16em;
 }
@@ -1292,8 +1303,8 @@ button.profile-identity {
   position: fixed;
   z-index: 70;
   inset: 0;
-  padding: 34px 38px;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
   background: rgba(17, 25, 30, 0.94);
   backdrop-filter: blur(18px);
 }
@@ -1528,28 +1539,109 @@ button.profile-identity {
 
 .settings-panel > header {
   display: flex;
-  align-items: flex-start;
+  flex: none;
+  align-items: center;
   justify-content: space-between;
   gap: 20px;
-  padding-bottom: 28px;
+  padding: 18px 24px 12px;
   border-bottom: 1px solid var(--line);
 }
 
-.settings-panel header p,
 .settings-panel header h2 {
   margin: 0;
-}
-
-.settings-panel header p {
-  color: var(--mineral);
-  font-size: 10px;
-}
-
-.settings-panel header h2 {
-  margin-top: 7px;
   color: var(--ink);
-  font-size: 20px;
-  font-weight: 480;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+/* The header Close control: text-styled, but with a comfortable hit area. */
+.settings-panel > header button {
+  padding: 8px 10px;
+}
+
+/*
+ * Category navigation (S1-B). Two renderings of one shared `activeCategory`:
+ * the horizontal tablist for windows wide enough to hold five labels, and a
+ * category `<select>` below the breakpoint. The panel spans the whole window,
+ * so the viewport media query at the bottom of this section is exactly "the
+ * Settings panel's own width".
+ */
+.settings-nav--tabs {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+  /* A future longer translation scrolls instead of compressing or clipping. */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.settings-panel .settings-nav--tabs button {
+  flex: none;
+  padding: 9px 10px;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.settings-panel .settings-nav--tabs button:hover {
+  color: var(--ink);
+}
+
+.settings-panel .settings-nav--tabs button.active {
+  border-bottom-color: var(--mineral);
+  color: var(--ink);
+}
+
+.settings-panel .settings-nav--tabs button:focus-visible {
+  outline: 1px solid var(--mineral);
+  outline-offset: -1px;
+}
+
+.settings-nav--select {
+  display: none;
+}
+
+.settings-category-field {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-category-field > span {
+  flex: none;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.settings-category-field select {
+  min-width: 0;
+  flex: 1;
+  padding: 8px 4px;
+  border: 0;
+  border-bottom: 1px solid var(--line-strong);
+  border-radius: 0;
+  color: var(--ink);
+  background: transparent;
+  outline: none;
+  font-size: 11px;
+}
+
+.settings-category-field select:focus {
+  border-bottom-color: var(--mineral);
+}
+
+/* Only the active category's content scrolls; header, nav and footer stay. */
+.settings-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 24px 24px;
 }
 
 .settings-panel button {
@@ -1558,10 +1650,6 @@ button.profile-identity {
   background: transparent;
   cursor: pointer;
   font-size: 11px;
-}
-
-.settings-group {
-  margin-top: 18px;
 }
 
 .weather-settings {
@@ -1578,16 +1666,23 @@ button.profile-identity {
   display: block;
 }
 
+/*
+ * Settings subsection headings share the dashboard's `.module-section-heading`
+ * tokens exactly (UI-P2): 13px, mineral, 500, normal tracking, monospace —
+ * one heading system across both surfaces (S1-C).
+ */
 .settings-section-heading strong {
-  color: var(--ink);
-  font-size: 12px;
+  color: var(--mineral);
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+  font-size: 13px;
   font-weight: 500;
+  letter-spacing: normal;
 }
 
 .settings-section-heading small {
   margin-top: 5px;
-  color: var(--faint);
-  font-size: 10px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .weather-search-row {
@@ -1641,8 +1736,8 @@ button.profile-identity {
 .selected-location small,
 .weather-refresh-row small {
   margin-top: 4px;
-  color: var(--faint);
-  font-size: 9px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .selected-location {
@@ -1681,8 +1776,8 @@ button.profile-identity {
 }
 
 .update-status-row small {
-  color: var(--faint);
-  font-size: 9px;
+  color: var(--muted);
+  font-size: 11px;
   letter-spacing: 0.06em;
 }
 
@@ -1702,7 +1797,7 @@ button.profile-identity {
 .settings-row {
   display: grid;
   min-height: 68px;
-  grid-template-columns: minmax(0, 1fr) minmax(130px, 190px);
+  grid-template-columns: minmax(0, 1fr) minmax(140px, 200px);
   align-items: center;
   gap: 22px;
   border-bottom: 1px solid var(--line);
@@ -1721,8 +1816,8 @@ button.profile-identity {
 
 .settings-row small {
   margin-top: 5px;
-  color: var(--faint);
-  font-size: 10px;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .settings-row input,
@@ -1743,9 +1838,149 @@ button.profile-identity {
   border-bottom-color: var(--mineral);
 }
 
-.save-settings {
-  margin-top: 22px;
-  padding: 8px 0 !important;
+/*
+ * The sticky footer (S1-B): Save and Cancel are always visible, so the
+ * primary action never sits screens below the fold. A failed save reports in
+ * the footer's own line, above the overlay the old banner hid behind.
+ */
+.settings-footer {
+  flex: none;
+  padding: 10px 24px 14px;
+  border-top: 1px solid var(--line);
+}
+
+.settings-footer-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.settings-footer-row p {
+  margin: 0;
+}
+
+.settings-save-error {
+  flex-basis: 100%;
+  margin: 0 0 8px !important;
+  overflow-wrap: anywhere;
+}
+
+.settings-dirty {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.settings-footer-spacer {
+  flex: 1;
+}
+
+.settings-panel .settings-cancel {
+  padding: 8px 10px;
+}
+
+.settings-panel .save-settings {
+  flex: none;
+  padding: 8px 18px !important;
+  border: 1px solid var(--line-strong);
+  color: var(--ink) !important;
+  background: rgba(81, 127, 153, 0.22);
+  font-weight: 500;
+}
+
+.settings-panel .save-settings:hover:not(:disabled) {
+  background: rgba(81, 127, 153, 0.34);
+}
+
+/* --- Modules category (S1-B) ------------------------------------------------ */
+
+.settings-intro {
+  margin: 2px 0 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/*
+ * One row per registry module: name + one-line explanation on the left, a
+ * real `role="switch"` control on the right. The switch communicates state
+ * through the filled track and the knob position; `aria-checked` carries the
+ * same fact to assistive technology.
+ */
+.module-switch-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.module-switch-row {
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.module-switch-text {
+  min-width: 0;
+}
+
+.module-switch-text strong {
+  display: block;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.module-switch-text small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.settings-panel .module-switch {
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 20px;
+  padding: 0 !important;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: transparent;
+}
+
+.module-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.settings-panel .module-switch.on {
+  border-color: var(--mineral);
+  background: rgba(81, 127, 153, 0.28);
+}
+
+.settings-panel .module-switch.on .module-switch-knob {
+  left: 16px;
+  background: var(--mineral);
+}
+
+.settings-panel .module-switch:focus-visible {
+  outline: 1px solid var(--mineral);
+  outline-offset: 2px;
+}
+
+.settings-module-reset {
+  padding: 10px 0 4px;
+}
+
+.settings-module-reset button {
+  padding: 6px 0 !important;
 }
 
 /* --- Quick Links (settings manager) --------------------------------------- */
@@ -1758,7 +1993,7 @@ button.profile-identity {
  */
 .quick-links-empty {
   padding: 4px 0 12px;
-  color: var(--faint);
+  color: var(--muted);
   font-size: 11px;
 }
 
@@ -1793,8 +2028,8 @@ button.profile-identity {
   display: block;
   margin-top: 5px;
   overflow: hidden;
-  color: var(--faint);
-  font-size: 10px;
+  color: var(--muted);
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1831,20 +2066,6 @@ button.profile-identity {
   padding: 4px 0 !important;
 }
 
-.settings-major-heading {
-  padding-top: 30px;
-  border-bottom: 1px solid var(--line-strong);
-}
-
-.settings-major-heading > strong,
-.settings-major-heading > span > strong {
-  color: var(--mineral);
-  font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 10px;
-  font-weight: 500;
-  letter-spacing: 0.16em;
-}
-
 .avatar-settings-control {
   display: flex;
   flex-wrap: wrap;
@@ -1864,13 +2085,15 @@ button.profile-identity {
   min-width: 0;
   flex-wrap: wrap;
   justify-content: flex-end;
-  gap: 3px;
+  gap: 4px 6px;
 }
 
 .appearance-options button {
+  flex: none;
   padding: 6px 8px;
   border: 1px solid transparent;
   color: var(--muted);
+  white-space: nowrap;
 }
 
 .appearance-options button:hover,
@@ -1903,11 +2126,11 @@ button.profile-identity {
 .asset-status {
   color: var(--muted);
   font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .range-control input[type="range"] {
-  width: min(125px, 100%);
+  width: min(150px, 100%);
   padding: 0;
   accent-color: var(--mineral);
 }
@@ -1997,9 +2220,9 @@ button.profile-identity {
 .database-path {
   margin: 0 0 14px;
   overflow-wrap: anywhere;
-  color: var(--faint);
+  color: var(--muted);
   font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .developer-heading {
@@ -2016,11 +2239,11 @@ button.profile-identity {
   gap: 14px;
   padding: 5px 0;
   font-family: "Cascadia Mono", Consolas, monospace;
-  font-size: 9px;
+  font-size: 10px;
 }
 
 .developer-diagnostics dt {
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .developer-diagnostics dd {
@@ -2032,7 +2255,7 @@ button.profile-identity {
 
 .settings-error {
   color: var(--danger);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .copy-status {
@@ -2230,13 +2453,46 @@ button.module-section-toggle:disabled {
   padding-top: 36px;
 }
 
+/*
+ * Responsive category navigation (S1-B, decision D5; boundary fixed S1-C).
+ * The Settings panel is `position: fixed; inset: 0`, so the viewport width IS
+ * the panel's width. The threshold is 420px because the widest tab row
+ * (English) measures ~308px and the panel loses 48px of padding: at 420px the
+ * row has ~72px of slack. The negated min-width form is deliberate: under a
+ * fractional devicePixelRatio a plain max-width query stops matching one
+ * pixel early (the DPR-multiplied viewport lands just above the query bound),
+ * while `not all and (min-width: 420px)` keeps the exact intended boundary. Below
+ * it the five labels render as a `<select>`; above, as tabs. Both bind the
+ * same `activeCategory`, so crossing the line changes presentation only.
+ */
+@media not all and (min-width: 420px) {
+  .settings-nav--tabs {
+    display: none;
+  }
+
+  .settings-nav--select {
+    display: flex;
+    flex: none;
+    padding: 8px 20px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+}
+
 @media (max-width: 440px) {
   .product-content {
     padding: 30px 24px 24px;
   }
 
-  .settings-panel {
-    padding: 28px 24px;
+  .settings-panel > header {
+    padding: 16px 20px 10px;
+  }
+
+  .settings-content {
+    padding: 4px 20px 20px;
+  }
+
+  .settings-footer {
+    padding: 10px 20px 14px;
   }
 
   .review-panel {

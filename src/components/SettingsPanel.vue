@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, computed } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import {
@@ -18,6 +18,18 @@ import {
   type ModuleId,
   type ModuleVisibility,
 } from "../modules/registry";
+import {
+  SETTINGS_CATEGORIES,
+  initialCategory,
+  isSettingsCategoryId,
+  nextTabCategory,
+  type SettingsCategoryId,
+} from "./settings/categories";
+import {
+  settingsDraftIsDirty,
+  settingsSnapshot,
+  type SettingsDraftSnapshot,
+} from "./settings/dirty";
 import { createUpdateChecker, previewUpdateBridge, updateSurface } from "../updateCheck";
 import type {
   AppearanceProfiles,
@@ -44,6 +56,13 @@ const props = defineProps<{
   wallpaperAvailable: boolean;
   avatarUrl: string;
   avatarAvailable: boolean;
+  /**
+   * The parent's reply to the last save attempt: empty while idle or after a
+   * successful save, the failure text after a failed one. Rendered in this
+   * panel's footer — the App-level error banner sits underneath this fixed
+   * overlay and can never be seen while Settings is open.
+   */
+  saveError: string;
 }>();
 const emit = defineEmits<{
   close: [];
@@ -105,8 +124,9 @@ const githubUsernameError = computed(() => {
   }
   return "";
 });
-const githubSection = ref<HTMLElement | null>(null);
 const githubInput = ref<HTMLInputElement | null>(null);
+/** The username row, for the GitHub card deep-link's scrollIntoView. */
+const githubRow = ref<HTMLElement | null>(null);
 const weatherLocationLabel = ref(props.settings.weatherLocationLabel);
 const weatherLatitude = ref(props.settings.weatherLatitude);
 const weatherLongitude = ref(props.settings.weatherLongitude);
@@ -249,7 +269,7 @@ function deleteLink(id: string) {
  * on this panel: toggles and the reset below change this copy only, Save
  * emits it, and closing without Save discards it. The registry is the single
  * source of the ids and labels; the resolved shape guarantees exactly the
- * four known keys even if the stored document arrived in an unexpected form.
+ * five known keys even if the stored document arrived in an unexpected form.
  */
 const moduleVisibilityDraft = ref<ModuleVisibility>(
   resolveModuleVisibility(props.settings.moduleVisibility),
@@ -265,6 +285,93 @@ function toggleModule(id: ModuleId) {
 function resetModules() {
   moduleVisibilityDraft.value = { ...DEFAULT_MODULE_VISIBILITY };
 }
+
+/**
+ * The GitHub username row's hint (decision D2): the field is always rendered,
+ * and while the GitHub module is switched off the hint says what enabling it
+ * does instead of describing a card that is not on the dashboard.
+ */
+const githubUsernameHint = computed(() =>
+  moduleVisibilityDraft.value.github
+    ? t("settings.githubUsernameHint")
+    : t("settings.githubUsernameHintDisabled"),
+);
+
+/**
+ * --- Category navigation (S1-B) -------------------------------------------
+ *
+ * One `activeCategory` drives both responsive navigation modes: the wide
+ * horizontal tablist and the narrow category `<select>`. Which of the two is
+ * *rendered* is a pure CSS decision (the same fixed panel spans the whole
+ * window, so the viewport media query is the panel's width); the state and
+ * the drafts are shared, so crossing the breakpoint cannot lose anything.
+ */
+const activeCategory = ref<SettingsCategoryId>(
+  initialCategory(props.focusWeather, props.focusGithub),
+);
+const settingsNav = ref<HTMLElement | null>(null);
+const settingsContent = ref<HTMLElement | null>(null);
+
+function selectCategory(id: SettingsCategoryId) {
+  activeCategory.value = id;
+}
+
+function onSelectCategory(event: Event) {
+  const value = (event.target as HTMLSelectElement).value;
+  if (isSettingsCategoryId(value)) activeCategory.value = value;
+}
+
+/** Changing category begins that category's content at the top. */
+watch(activeCategory, () => {
+  void nextTick(() => {
+    settingsContent.value?.scrollTo({ top: 0 });
+  });
+});
+
+/**
+ * The tablist's arrow-key model (WAI-ARIA tabs): Left/Right wrap, Home/End
+ * jump, and every other key is left alone. The reducer is pure —
+ * `nextTabCategory` in `settings/categories.ts` — and unit-tested there.
+ */
+function onTablistKeydown(event: KeyboardEvent) {
+  const next = nextTabCategory(activeCategory.value, event.key);
+  if (!next) return;
+  event.preventDefault();
+  activeCategory.value = next;
+  void nextTick(() => {
+    settingsNav.value?.querySelector<HTMLButtonElement>(`#settings-tab-${next}`)?.focus();
+  });
+}
+
+/**
+ * --- Unsaved-change detection ----------------------------------------------
+ *
+ * `dirtyDraft` mirrors the Save payload exactly, so "dirty" and "would write"
+ * are the same question by construction. UI-only state — the active category,
+ * which appearance profile is being edited, weather search results, update
+ * phases — is not part of the snapshot and never makes the panel dirty.
+ */
+const dirtyDraft = computed<SettingsDraftSnapshot>(() => ({
+  dayRollover: dayRollover.value,
+  weatherLocationLabel: weatherLocationLabel.value,
+  weatherLatitude: weatherLatitude.value,
+  weatherLongitude: weatherLongitude.value,
+  weatherTimezone: weatherTimezone.value,
+  weatherCountry: weatherCountry.value,
+  weatherAdmin1: weatherAdmin1.value,
+  temperatureUnit: temperatureUnit.value,
+  language: language.value,
+  appearance: appearance.value,
+  appearanceProfiles: appearanceProfiles.value,
+  displayName: displayName.value,
+  avatarAssetId: avatarAssetId.value,
+  quickLinks: quickLinks.value,
+  moduleVisibility: moduleVisibilityDraft.value,
+  githubUsername: githubUsername.value,
+}));
+const isDirty = computed(() =>
+  settingsDraftIsDirty(dirtyDraft.value, settingsSnapshot(props.settings)),
+);
 
 const developerOpen = ref(false);
 
@@ -428,7 +535,20 @@ function selectLanguage(value: Language) {
   i18n.setLanguage(value);
 }
 
+/**
+ * --- Save -------------------------------------------------------------------
+ *
+ * One save in flight at a time: the click sets `savePending`, which disables
+ * the button, and the parent's failure reply (the `saveError` prop) re-arms
+ * it. A successful save closes the panel, so a stuck pending state cannot
+ * outlive a real save. The failure text itself is rendered in the footer,
+ * above this fixed overlay, where the user can actually see it.
+ */
+const savePending = ref(false);
+
 function save() {
+  if (savePending.value) return;
+  savePending.value = true;
   languageSaved = true;
   emit("save", {
     dayRollover: dayRollover.value,
@@ -459,6 +579,13 @@ function save() {
     // layout editor arrives it sends a fresh raw-document patch instead.
   });
 }
+
+watch(
+  () => props.saveError,
+  (error) => {
+    if (error) savePending.value = false;
+  },
+);
 
 async function discard(assetId: string) {
   if (!("__TAURI_INTERNALS__" in window)) return;
@@ -600,6 +727,10 @@ async function openAttribution() {
 }
 
 onMounted(async () => {
+  // Deep links (the weather card's "Set location", the GitHub card's setup
+  // entry) opened this panel on their own category — `initialCategory` chose
+  // it before first render, so the target is visible and `scrollIntoView`
+  // below never runs against a hidden panel.
   if (props.focusWeather) {
     await nextTick();
     weatherSection.value?.scrollIntoView({ block: "start" });
@@ -608,7 +739,7 @@ onMounted(async () => {
   }
   if (props.focusGithub) {
     await nextTick();
-    githubSection.value?.scrollIntoView({ block: "start" });
+    githubRow.value?.scrollIntoView({ block: "start" });
     githubInput.value?.focus();
   }
 });
@@ -643,11 +774,8 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
 
 <template>
   <aside class="settings-panel" :aria-label="t('settings.panelAriaLabel')">
-    <header>
-      <div>
-        <p>{{ t("settings.title") }}</p>
-        <h2>{{ t("app.name") }}</h2>
-      </div>
+    <header class="settings-header">
+      <h2>{{ t("app.name") }}</h2>
       <button
         type="button"
         :aria-label="t('settings.closeAriaLabel')"
@@ -655,270 +783,55 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
       >{{ t("settings.close") }}</button>
     </header>
 
-    <div class="settings-group">
-      <div class="settings-section-heading settings-major-heading">
-        <strong>{{ t("settings.languageHeading") }}</strong>
-      </div>
-      <div class="settings-row">
-        <span>
-          <strong>{{ t("settings.language.label") }}</strong>
-          <small>
-            {{ t("settings.language.hint") }}<template v-if="language === 'system'"> · {{ t("settings.language.effective", { language: effectiveLanguage }) }}</template>
-            · {{ t("settings.language.restartHint") }}
-          </small>
-        </span>
-        <div class="appearance-options" role="group" :aria-label="t('settings.language.label')">
-          <button
-            v-for="option in (['system', 'en', 'zh-Hans'] as const)"
-            :key="option"
-            type="button"
-            :class="{ active: language === option }"
-            :aria-pressed="language === option"
-            @click="selectLanguage(option)"
-          >
-            {{ languageOptionLabel(option, t) }}
-          </button>
-        </div>
-      </div>
-
-      <div class="settings-section-heading settings-major-heading">
-        <strong>{{ t("settings.modulesHeading") }}</strong>
-      </div>
-      <!--
-        The module switches are pressed-toggle buttons, the panel's established
-        multi-state control (same group styling and aria-pressed semantics as
-        the language picker): pressed = the module is enabled. They edit the
-        draft only — the dashboard updates on Save, and closing without Save
-        discards them. Ids and labels come from the module registry.
-      -->
-      <div class="settings-row">
-        <span>
-          <strong>{{ t("settings.modulesDescription") }}</strong>
-        </span>
-        <div
-          class="appearance-options"
-          role="group"
-          :aria-label="t('settings.modulesHeading')"
-        >
-          <button
-            v-for="module in MODULE_REGISTRY"
-            :key="module.id"
-            type="button"
-            :class="{ active: moduleVisibilityDraft[module.id] }"
-            :aria-pressed="moduleVisibilityDraft[module.id]"
-            @click="toggleModule(module.id)"
-          >
-            {{ t(module.labelKey) }}
-          </button>
-        </div>
-      </div>
-      <div class="settings-row">
-        <span>
-          <strong>{{ t("settings.modulesReset") }}</strong>
-        </span>
-        <button type="button" @click="resetModules">
-          {{ t("settings.modulesReset") }}
-        </button>
-      </div>
-
-      <div class="settings-section-heading settings-major-heading"><strong>{{ t("settings.profileHeading") }}</strong></div>
-      <label class="settings-row">
-        <span><strong>{{ t("settings.displayName") }}</strong><small>{{ t("settings.displayNameHint") }}</small></span>
-        <input v-model="displayName" type="text" :placeholder="t('settings.displayNamePlaceholder')" />
+    <!--
+      One shared `activeCategory`, two renderings of the same navigation
+      (decision D5): the wide tablist below and, in windows too narrow for
+      five tabs, the category select. CSS decides which one renders; both
+      bind the same state, so crossing the breakpoint preserves the active
+      category and every draft.
+    -->
+    <nav
+      ref="settingsNav"
+      class="settings-nav settings-nav--tabs"
+      role="tablist"
+      :aria-label="t('settings.category.label')"
+      @keydown="onTablistKeydown"
+    >
+      <button
+        v-for="category in SETTINGS_CATEGORIES"
+        :id="`settings-tab-${category.id}`"
+        :key="category.id"
+        type="button"
+        role="tab"
+        :aria-selected="activeCategory === category.id"
+        :aria-controls="`settings-panel-${category.id}`"
+        :class="{ active: activeCategory === category.id }"
+        :tabindex="activeCategory === category.id ? 0 : -1"
+        @click="selectCategory(category.id)"
+      >{{ t(category.labelKey) }}</button>
+    </nav>
+    <div class="settings-nav settings-nav--select">
+      <label class="settings-category-field">
+        <span>{{ t("settings.category.label") }}</span>
+        <select :value="activeCategory" @change="onSelectCategory">
+          <option
+            v-for="category in SETTINGS_CATEGORIES"
+            :key="category.id"
+            :value="category.id"
+          >{{ t(category.labelKey) }}</option>
+        </select>
       </label>
-      <div class="settings-row avatar-settings-row">
-        <span><strong>{{ t("settings.avatar") }}</strong><small>{{ t("settings.avatarHint") }}</small></span>
-        <div class="avatar-settings-control">
-          <span class="settings-avatar-preview" :aria-label="t('settings.avatarAriaLabel')">
-            <img v-if="avatarPreviewAvailable" :src="avatarPreviewUrl" alt="" />
-            <span v-else>{{ profileInitials(displayName) }}</span>
-          </span>
-          <button type="button" @click="chooseAsset('avatar')">{{ t("settings.chooseImage") }}</button>
-          <button type="button" :disabled="!avatarAssetId" @click="removeAvatar">{{ t("settings.removeAvatar") }}</button>
-          <!--
-            The failure is shown here, under the button that caused it, instead of
-            at the bottom of the panel: the picker is a native dialog whose
-            rejections are otherwise invisible, and "the click did nothing" is the
-            worst possible answer.
-          -->
-          <small v-if="assetError?.kind === 'avatar'" class="settings-error asset-error" role="status">{{ assetError.message }}</small>
-        </div>
-      </div>
-      <label class="settings-row">
-        <span><strong>{{ t("settings.dayRollover") }}</strong><small>{{ t("settings.dayRolloverHint") }}</small></span>
-        <input v-model="dayRollover" type="time" />
-      </label>
+    </div>
 
-      <div class="settings-section-heading settings-major-heading">
-        <strong>{{ t("quickLinks.heading") }}</strong>
-      </div>
-      <section class="quick-links-settings" :aria-label="t('quickLinks.heading')">
-        <p v-if="!quickLinks.length" class="quick-links-empty">{{ t("quickLinks.empty") }}</p>
-        <ul v-else class="quick-links-rows">
-          <li v-for="(link, index) in quickLinks" :key="link.id" class="quick-link-row">
-            <span class="quick-link-fields">
-              <strong>{{ link.name }}</strong>
-              <small>{{ link.url }}</small>
-            </span>
-            <span class="quick-link-actions">
-              <button
-                type="button"
-                :disabled="index === 0"
-                :title="t('quickLinks.moveUp')"
-                :aria-label="t('quickLinks.moveUpAriaLabel', { name: link.name })"
-                @click="moveLink(quickLinks, link.id, -1)"
-              >↑</button>
-              <button
-                type="button"
-                :disabled="index === quickLinks.length - 1"
-                :title="t('quickLinks.moveDown')"
-                :aria-label="t('quickLinks.moveDownAriaLabel', { name: link.name })"
-                @click="moveLink(quickLinks, link.id, 1)"
-              >↓</button>
-              <button
-                type="button"
-                :aria-label="t('quickLinks.editAriaLabel', { name: link.name })"
-                @click="editLink(link)"
-              >{{ t("quickLinks.edit") }}</button>
-              <button
-                type="button"
-                :aria-label="t('quickLinks.deleteAriaLabel', { name: link.name })"
-                @click="deleteLink(link.id)"
-              >{{ t("quickLinks.delete") }}</button>
-            </span>
-          </li>
-        </ul>
-
-        <!--
-          One inline editor for both Add and Edit: the same two fields and the same
-          validation, so there is no second code path to keep in step.
-        -->
-        <div v-if="editingLinkId !== null" class="quick-link-editor">
-          <label class="settings-row">
-            <span><strong>{{ t("quickLinks.name") }}</strong></span>
-            <input
-              v-model="draftName"
-              type="text"
-              :placeholder="t('quickLinks.namePlaceholder')"
-              @keydown.enter.prevent="commitEditor"
-            />
-          </label>
-          <label class="settings-row">
-            <span><strong>{{ t("quickLinks.url") }}</strong></span>
-            <input
-              v-model="draftUrl"
-              type="url"
-              :placeholder="t('quickLinks.urlPlaceholder')"
-              @keydown.enter.prevent="commitEditor"
-            />
-          </label>
-          <p v-if="quickLinkError" class="settings-error" role="alert">{{ quickLinkError }}</p>
-          <div class="quick-link-editor-actions">
-            <button type="button" @click="commitEditor">{{ t("quickLinks.save") }}</button>
-            <button type="button" @click="resetEditor">{{ t("quickLinks.cancel") }}</button>
-          </div>
-        </div>
-        <button v-else type="button" class="quick-link-add" @click="addLink">
-          {{ t("quickLinks.add") }}
-        </button>
-      </section>
-      <div class="settings-section-heading settings-major-heading"><strong>{{ t("settings.weatherHeading") }}</strong></div>
-      <section ref="weatherSection" class="weather-settings" aria-labelledby="weather-settings-heading">
-        <div class="settings-section-heading">
-          <span>
-            <strong id="weather-settings-heading">{{ t("settings.weatherLocation") }}</strong>
-            <small>{{ t("settings.weatherLocationHint") }}</small>
-          </span>
-        </div>
-        <div class="weather-search-row">
-          <input
-            ref="locationInput"
-            v-model="locationQuery"
-            type="search"
-            :placeholder="t('settings.weatherSearchPlaceholder')"
-            autocomplete="off"
-            @keydown.enter.prevent="searchLocation"
-          />
-          <button type="button" :disabled="locationSearching" @click="searchLocation">
-            {{ locationSearching ? t("settings.weatherSearching") : t("settings.weatherSearch") }}
-          </button>
-        </div>
-        <p v-if="locationError" class="settings-error" role="status">{{ locationError }}</p>
-        <div v-if="candidates.length" class="weather-candidates" :aria-label="t('settings.weatherResultsAriaLabel')">
-          <button
-            v-for="candidate in candidates"
-            :key="`${candidate.latitude}:${candidate.longitude}:${candidate.timezone}`"
-            type="button"
-            @click="selectLocation(candidate)"
-          >
-            <strong>{{ candidate.label }}</strong>
-            <small>{{ candidateDetail(candidate) || candidate.timezone }}</small>
-          </button>
-        </div>
-        <div class="settings-row weather-selected">
-          <span><strong>{{ t("settings.weatherSelected") }}</strong><small>{{ t("settings.weatherSelectedHint") }}</small></span>
-          <span class="selected-location">
-            <strong>{{ weatherLocationLabel || t("settings.weatherNotConfigured") }}</strong>
-            <small v-if="weatherLocationLabel">
-              {{ [weatherAdmin1, weatherCountry].filter(Boolean).join(", ") || weatherTimezone }}
-            </small>
-          </span>
-        </div>
-        <label class="settings-row">
-          <span><strong>{{ t("settings.temperature") }}</strong><small>{{ t("settings.temperatureHint") }}</small></span>
-          <select v-model="temperatureUnit">
-            <option value="celsius">{{ t("settings.celsius") }}</option>
-            <option value="fahrenheit">{{ t("settings.fahrenheit") }}</option>
-          </select>
-        </label>
-        <div class="settings-row weather-provider-row">
-          <span><strong>{{ t("settings.weatherData") }}</strong><small>{{ t("settings.weatherAttributionHint") }}</small></span>
-          <button type="button" @click="openAttribution">Open-Meteo ↗</button>
-        </div>
-        <div class="weather-refresh-row">
-          <button
-            type="button"
-            :disabled="!weather.configured || weather.refreshing"
-            @click="$emit('refreshWeather')"
-          >
-            {{ weather.refreshing ? t("settings.refreshing") : t("settings.refreshNow") }}
-          </button>
-          <small v-if="weatherMessage" role="status">{{ weatherMessage }}</small>
-        </div>
-      </section>
-
-      <!--
-        The GitHub section (v1.3.0-G1): the module's whole configuration is
-        one optional username — no login, no token, no account link of any
-        kind. Empty means unconfigured, which keeps the module (default
-        hidden) entirely offline. The inline error mirrors the backend's
-        username grammar; the backend re-validates inside its transaction.
-      -->
-      <div class="settings-section-heading settings-major-heading">
-        <strong>{{ t("settings.githubHeading") }}</strong>
-      </div>
-      <section ref="githubSection" class="github-settings" aria-labelledby="github-settings-heading">
-        <label class="settings-row">
-          <span>
-            <strong id="github-settings-heading">{{ t("settings.githubUsername") }}</strong>
-            <small>{{ t("settings.githubUsernameHint") }}</small>
-          </span>
-          <input
-            ref="githubInput"
-            v-model="githubUsername"
-            type="text"
-            :placeholder="t('settings.githubUsernamePlaceholder')"
-            autocomplete="off"
-            spellcheck="false"
-          />
-        </label>
-        <p v-if="githubUsernameError" class="settings-error" role="alert">{{ githubUsernameError }}</p>
-      </section>
-      <section class="appearance-settings" aria-labelledby="appearance-settings-heading">
-        <div class="settings-section-heading settings-major-heading">
-          <strong id="appearance-settings-heading">{{ t("settings.appearanceHeading") }}</strong>
-          <small>{{ t("settings.appearanceMaterial") }}</small>
-        </div>
+    <div ref="settingsContent" class="settings-content">
+      <!-- ======================= Appearance / 外观 ======================= -->
+      <section
+        v-show="activeCategory === 'appearance'"
+        id="settings-panel-appearance"
+        class="settings-category-panel"
+        role="tabpanel"
+        aria-labelledby="settings-tab-appearance"
+      >
         <!--
           Which profile the controls below edit. This is Settings UI state only:
           it never changes the window mode the product runs in, and it is not
@@ -1046,121 +959,415 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
         <button type="button" class="reset-appearance" @click="resetAppearance">{{ t("settings.resetAppearance") }}</button>
       </section>
 
-      <!--
-        Environment rule (see `updateSurface` in updateCheck.ts): rendered
-        for a managed production install, the browser preview, and `tauri
-        dev`; live only for the managed production install — the same rule
-        as the Application section, extended by an inert development view.
-        Outside it the controls are disabled, the installed-only hint shows,
-        and the inert bridge makes every updater command unreachable. The
-        states below are the check state machine's phases — a click is never
-        a silent no-op: checking shows in the button, the outcome shows in
-        the status line, and a failure shows as an error with the failed
-        action retryable.
-      -->
-      <template v-if="updateSectionVisible">
-        <div class="settings-section-heading settings-major-heading">
-          <strong>{{ t("settings.update.heading") }}</strong>
-        </div>
-        <section class="update-settings" :aria-label="t('settings.update.heading')">
-          <div class="settings-row">
-            <span>
-              <strong>{{ t("settings.update.currentVersion") }}</strong>
-              <small>{{ t("settings.update.currentVersionHint") }}</small>
-            </span>
-            <span class="update-version">{{ currentVersion || "—" }}</span>
-          </div>
-          <div class="settings-row">
-            <span>
-              <strong>{{ t("settings.update.check") }}</strong>
-              <small>{{ t("settings.update.checkHint") }}</small>
-            </span>
+      <!-- ======================== General / 常规 ======================== -->
+      <section
+        v-show="activeCategory === 'general'"
+        id="settings-panel-general"
+        class="settings-category-panel"
+        role="tabpanel"
+        aria-labelledby="settings-tab-general"
+      >
+        <div class="settings-row">
+          <span>
+            <strong>{{ t("settings.language.label") }}</strong>
+            <small>
+              {{ t("settings.language.hint") }}<template v-if="language === 'system'"> · {{ t("settings.language.effective", { language: effectiveLanguage }) }}</template>
+              · {{ t("settings.language.restartHint") }}
+            </small>
+          </span>
+          <div class="appearance-options" role="group" :aria-label="t('settings.language.label')">
             <button
+              v-for="option in (['system', 'en', 'zh-Hans'] as const)"
+              :key="option"
               type="button"
-              :disabled="updateControlsDisabled"
-              @click="updateChecker.check()"
-            >{{ updateCheckLabel }}</button>
+              :class="{ active: language === option }"
+              :aria-pressed="language === option"
+              @click="selectLanguage(option)"
+            >
+              {{ languageOptionLabel(option, t) }}
+            </button>
           </div>
-          <div class="update-status-row">
+        </div>
+        <label class="settings-row">
+          <span><strong>{{ t("settings.displayName") }}</strong><small>{{ t("settings.displayNameHint") }}</small></span>
+          <input v-model="displayName" type="text" :placeholder="t('settings.displayNamePlaceholder')" />
+        </label>
+        <div class="settings-row avatar-settings-row">
+          <span><strong>{{ t("settings.avatar") }}</strong><small>{{ t("settings.avatarHint") }}</small></span>
+          <div class="avatar-settings-control">
+            <span class="settings-avatar-preview" :aria-label="t('settings.avatarAriaLabel')">
+              <img v-if="avatarPreviewAvailable" :src="avatarPreviewUrl" alt="" />
+              <span v-else>{{ profileInitials(displayName) }}</span>
+            </span>
+            <button type="button" @click="chooseAsset('avatar')">{{ t("settings.chooseImage") }}</button>
+            <button type="button" :disabled="!avatarAssetId" @click="removeAvatar">{{ t("settings.removeAvatar") }}</button>
             <!--
-              Outside a managed production install the explanation is
-              persistent, not click-triggered: a disabled control that
-              explains itself beats a dead one.
+              The failure is shown here, under the button that caused it, instead of
+              at the bottom of the panel: the picker is a native dialog whose
+              rejections are otherwise invisible, and "the click did nothing" is the
+              worst possible answer.
             -->
-            <small v-if="!updateBackendLive" role="note">{{ t("settings.update.previewOnly") }}</small>
-            <small v-else-if="updatePhase === 'upToDate'" role="status">{{ t("settings.update.upToDate") }}</small>
-            <template v-else-if="updatePhase === 'available'">
-              <small role="status">{{ t("settings.update.available", { version: updateAvailableVersion ?? "" }) }}</small>
-              <button
-                type="button"
-                class="update-install"
-                :disabled="updateControlsDisabled"
-                @click="updateChecker.install()"
-              >{{ updateInstallLabel }}</button>
-              <small class="update-install-hint">{{ t("settings.update.installHint") }}</small>
-            </template>
-            <small v-else-if="updatePhase === 'downloading'" role="status">{{ t("settings.update.downloading") }}</small>
-            <small
-              v-else-if="updatePhase === 'error' && updateErrorKey"
-              class="settings-error"
-              role="alert"
-            >{{ t(updateErrorKey) }}</small>
+            <small v-if="assetError?.kind === 'avatar'" class="settings-error asset-error" role="status">{{ assetError.message }}</small>
           </div>
-        </section>
-      </template>
-
-      <!--
-        Managed installations only: an unmanaged or development copy does not
-        own the maintenance uninstaller, so the entry is absent instead of
-        disabled. The lightweight confirm only announces the handoff — the
-        keep/delete choice and every destructive step live in the native
-        maintenance tool, never duplicated here.
-      -->
-      <template v-if="admissionMode === 'managed'">
-        <div class="settings-section-heading settings-major-heading">
-          <strong>{{ t("settings.application.heading") }}</strong>
         </div>
-        <section class="application-settings" :aria-label="t('settings.application.heading')">
-          <div class="settings-row">
-            <span>
-              <strong>{{ t("settings.application.uninstall") }}</strong>
-              <small>{{ t("settings.application.uninstallHint") }}</small>
+        <label class="settings-row">
+          <span><strong>{{ t("settings.dayRollover") }}</strong><small>{{ t("settings.dayRolloverHint") }}</small></span>
+          <input v-model="dayRollover" type="time" />
+        </label>
+      </section>
+
+      <!-- ======================== Modules / 模块 ======================== -->
+      <section
+        v-show="activeCategory === 'modules'"
+        id="settings-panel-modules"
+        class="settings-category-panel"
+        role="tabpanel"
+        aria-labelledby="settings-tab-modules"
+      >
+        <p class="settings-intro">{{ t("settings.modulesDescription") }}</p>
+        <!--
+          The module switches (decision D1): one row per registry module, a
+          real `role="switch"` control each, and one localized line saying
+          what the module does. They edit the draft only — the dashboard
+          updates on Save, and closing without Save discards them. Ids and
+          labels come from the module registry; GitHub ships disabled there
+          (ADR-DG-001 Amendment ①) and the registry default is untouched.
+        -->
+        <ul class="module-switch-list">
+          <li v-for="module in MODULE_REGISTRY" :key="module.id" class="module-switch-row">
+            <span class="module-switch-text">
+              <strong :id="`module-switch-label-${module.id}`">{{ t(module.labelKey) }}</strong>
+              <small :id="`module-switch-desc-${module.id}`">{{ t(`settings.moduleDesc.${module.id}`) }}</small>
             </span>
             <button
               type="button"
-              :disabled="uninstallStarting"
-              @click="beginUninstall"
-            >{{ t("settings.application.uninstall") }}</button>
-          </div>
-          <div v-if="uninstallConfirming" class="quick-link-editor">
-            <p class="uninstall-confirm-body">
-              <strong>{{ t("settings.application.confirmTitle") }}</strong>
-              {{ t("settings.application.confirmBody") }}
-            </p>
+              role="switch"
+              :aria-checked="moduleVisibilityDraft[module.id]"
+              :aria-labelledby="`module-switch-label-${module.id}`"
+              :aria-describedby="`module-switch-desc-${module.id}`"
+              class="module-switch"
+              :class="{ on: moduleVisibilityDraft[module.id] }"
+              @click="toggleModule(module.id)"
+            ><span class="module-switch-knob" aria-hidden="true"></span></button>
+          </li>
+        </ul>
+        <div class="settings-module-reset">
+          <button type="button" @click="resetModules">{{ t("settings.modulesReset") }}</button>
+        </div>
+
+        <!--
+          GitHub username (decision D2): always rendered and reachable, with a
+          hint that explains the enabling step while the module is off. The
+          inline error mirrors the backend's username grammar; the backend
+          re-validates inside its transaction.
+        -->
+        <label ref="githubRow" class="settings-row">
+          <span>
+            <strong>{{ t("settings.githubUsername") }}</strong>
+            <small>{{ githubUsernameHint }}</small>
+          </span>
+          <input
+            ref="githubInput"
+            v-model="githubUsername"
+            type="text"
+            :placeholder="t('settings.githubUsernamePlaceholder')"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+        <p v-if="githubUsernameError" class="settings-error" role="alert">{{ githubUsernameError }}</p>
+
+        <div class="settings-section-heading"><strong>{{ t("quickLinks.heading") }}</strong></div>
+        <section class="quick-links-settings" :aria-label="t('quickLinks.heading')">
+          <p v-if="!quickLinks.length" class="quick-links-empty">{{ t("quickLinks.empty") }}</p>
+          <ul v-else class="quick-links-rows">
+            <li v-for="(link, index) in quickLinks" :key="link.id" class="quick-link-row">
+              <span class="quick-link-fields">
+                <strong>{{ link.name }}</strong>
+                <small>{{ link.url }}</small>
+              </span>
+              <span class="quick-link-actions">
+                <button
+                  type="button"
+                  :disabled="index === 0"
+                  :title="t('quickLinks.moveUp')"
+                  :aria-label="t('quickLinks.moveUpAriaLabel', { name: link.name })"
+                  @click="moveLink(quickLinks, link.id, -1)"
+                >↑</button>
+                <button
+                  type="button"
+                  :disabled="index === quickLinks.length - 1"
+                  :title="t('quickLinks.moveDown')"
+                  :aria-label="t('quickLinks.moveDownAriaLabel', { name: link.name })"
+                  @click="moveLink(quickLinks, link.id, 1)"
+                >↓</button>
+                <button
+                  type="button"
+                  :aria-label="t('quickLinks.editAriaLabel', { name: link.name })"
+                  @click="editLink(link)"
+                >{{ t("quickLinks.edit") }}</button>
+                <button
+                  type="button"
+                  :aria-label="t('quickLinks.deleteAriaLabel', { name: link.name })"
+                  @click="deleteLink(link.id)"
+                >{{ t("quickLinks.delete") }}</button>
+              </span>
+            </li>
+          </ul>
+
+          <!--
+            One inline editor for both Add and Edit: the same two fields and the same
+            validation, so there is no second code path to keep in step.
+          -->
+          <div v-if="editingLinkId !== null" class="quick-link-editor">
+            <label class="settings-row">
+              <span><strong>{{ t("quickLinks.name") }}</strong></span>
+              <input
+                v-model="draftName"
+                type="text"
+                :placeholder="t('quickLinks.namePlaceholder')"
+                @keydown.enter.prevent="commitEditor"
+              />
+            </label>
+            <label class="settings-row">
+              <span><strong>{{ t("quickLinks.url") }}</strong></span>
+              <input
+                v-model="draftUrl"
+                type="url"
+                :placeholder="t('quickLinks.urlPlaceholder')"
+                @keydown.enter.prevent="commitEditor"
+              />
+            </label>
+            <p v-if="quickLinkError" class="settings-error" role="alert">{{ quickLinkError }}</p>
             <div class="quick-link-editor-actions">
-              <button type="button" :disabled="uninstallStarting" @click="confirmUninstall">
-                {{ uninstallStarting ? t("settings.application.starting") : t("settings.application.confirmContinue") }}
-              </button>
-              <button type="button" :disabled="uninstallStarting" @click="cancelUninstall">
-                {{ t("quickLinks.cancel") }}
-              </button>
+              <button type="button" @click="commitEditor">{{ t("quickLinks.save") }}</button>
+              <button type="button" @click="resetEditor">{{ t("quickLinks.cancel") }}</button>
             </div>
           </div>
-          <p v-if="uninstallError" class="settings-error" role="alert">{{ uninstallError }}</p>
+          <button v-else type="button" class="quick-link-add" @click="addLink">
+            {{ t("quickLinks.add") }}
+          </button>
         </section>
-      </template>
+      </section>
+
+      <!-- ======================== Weather / 天气 ======================== -->
+      <section
+        v-show="activeCategory === 'weather'"
+        id="settings-panel-weather"
+        class="settings-category-panel"
+        role="tabpanel"
+        aria-labelledby="settings-tab-weather"
+      >
+        <section ref="weatherSection" class="weather-settings" aria-labelledby="weather-settings-heading">
+          <div class="settings-section-heading">
+          <span>
+            <strong id="weather-settings-heading">{{ t("settings.weatherLocation") }}</strong>
+            <small>{{ t("settings.weatherLocationHint") }}</small>
+          </span>
+          </div>
+          <div class="weather-search-row">
+            <input
+              ref="locationInput"
+              v-model="locationQuery"
+              type="search"
+              :placeholder="t('settings.weatherSearchPlaceholder')"
+              autocomplete="off"
+              @keydown.enter.prevent="searchLocation"
+            />
+            <button type="button" :disabled="locationSearching" @click="searchLocation">
+              {{ locationSearching ? t("settings.weatherSearching") : t("settings.weatherSearch") }}
+            </button>
+          </div>
+          <p v-if="locationError" class="settings-error" role="status">{{ locationError }}</p>
+          <div v-if="candidates.length" class="weather-candidates" :aria-label="t('settings.weatherResultsAriaLabel')">
+            <button
+              v-for="candidate in candidates"
+              :key="`${candidate.latitude}:${candidate.longitude}:${candidate.timezone}`"
+              type="button"
+              @click="selectLocation(candidate)"
+            >
+              <strong>{{ candidate.label }}</strong>
+              <small>{{ candidateDetail(candidate) || candidate.timezone }}</small>
+            </button>
+          </div>
+          <div class="settings-row weather-selected">
+            <span><strong>{{ t("settings.weatherSelected") }}</strong><small>{{ t("settings.weatherSelectedHint") }}</small></span>
+            <span class="selected-location">
+              <strong>{{ weatherLocationLabel || t("settings.weatherNotConfigured") }}</strong>
+              <small v-if="weatherLocationLabel">
+                {{ [weatherAdmin1, weatherCountry].filter(Boolean).join(", ") || weatherTimezone }}
+              </small>
+            </span>
+          </div>
+          <label class="settings-row">
+            <span><strong>{{ t("settings.temperature") }}</strong><small>{{ t("settings.temperatureHint") }}</small></span>
+            <select v-model="temperatureUnit">
+              <option value="celsius">{{ t("settings.celsius") }}</option>
+              <option value="fahrenheit">{{ t("settings.fahrenheit") }}</option>
+            </select>
+          </label>
+          <div class="settings-row weather-provider-row">
+            <span><strong>{{ t("settings.weatherData") }}</strong><small>{{ t("settings.weatherAttributionHint") }}</small></span>
+            <button type="button" @click="openAttribution">Open-Meteo ↗</button>
+          </div>
+          <div class="weather-refresh-row">
+            <button
+              type="button"
+              :disabled="!weather.configured || weather.refreshing"
+              @click="$emit('refreshWeather')"
+            >
+              {{ weather.refreshing ? t("settings.refreshing") : t("settings.refreshNow") }}
+            </button>
+            <small v-if="weatherMessage" role="status">{{ weatherMessage }}</small>
+          </div>
+        </section>
+      </section>
+
+      <!-- ========================= About / 关于 ========================= -->
+      <section
+        v-show="activeCategory === 'about'"
+        id="settings-panel-about"
+        class="settings-category-panel"
+        role="tabpanel"
+        aria-labelledby="settings-tab-about"
+      >
+        <!--
+          Environment rule (see `updateSurface` in updateCheck.ts): rendered
+          for a managed production install, the browser preview, and `tauri
+          dev`; live only for the managed production install — the same rule
+          as the Application section, extended by an inert development view.
+          Outside it the controls are disabled, the installed-only hint shows,
+          and the inert bridge makes every updater command unreachable. The
+          states below are the check state machine's phases — a click is never
+          a silent no-op: checking shows in the button, the outcome shows in
+          the status line, and a failure shows as an error with the failed
+          action retryable.
+        -->
+        <template v-if="updateSectionVisible">
+          <div class="settings-section-heading">
+            <strong id="settings-update-heading">{{ t("settings.update.heading") }}</strong>
+          </div>
+          <section class="update-settings" :aria-label="t('settings.update.heading')">
+            <div class="settings-row">
+              <span>
+                <strong>{{ t("settings.update.currentVersion") }}</strong>
+                <small>{{ t("settings.update.currentVersionHint") }}</small>
+              </span>
+              <span class="update-version">{{ currentVersion || "—" }}</span>
+            </div>
+            <div class="settings-row">
+              <span>
+                <strong>{{ t("settings.update.check") }}</strong>
+                <small>{{ t("settings.update.checkHint") }}</small>
+              </span>
+              <button
+                type="button"
+                :disabled="updateControlsDisabled"
+                @click="updateChecker.check()"
+              >{{ updateCheckLabel }}</button>
+            </div>
+            <div class="update-status-row">
+              <!--
+                Outside a managed production install the explanation is
+                persistent, not click-triggered: a disabled control that
+                explains itself beats a dead one.
+              -->
+              <small v-if="!updateBackendLive" role="note">{{ t("settings.update.previewOnly") }}</small>
+              <small v-else-if="updatePhase === 'upToDate'" role="status">{{ t("settings.update.upToDate") }}</small>
+              <template v-else-if="updatePhase === 'available'">
+                <small role="status">{{ t("settings.update.available", { version: updateAvailableVersion ?? "" }) }}</small>
+                <button
+                  type="button"
+                  class="update-install"
+                  :disabled="updateControlsDisabled"
+                  @click="updateChecker.install()"
+                >{{ updateInstallLabel }}</button>
+                <small class="update-install-hint">{{ t("settings.update.installHint") }}</small>
+              </template>
+              <small v-else-if="updatePhase === 'downloading'" role="status">{{ t("settings.update.downloading") }}</small>
+              <small
+                v-else-if="updatePhase === 'error' && updateErrorKey"
+                class="settings-error"
+                role="alert"
+              >{{ t(updateErrorKey) }}</small>
+            </div>
+          </section>
+        </template>
+
+        <!--
+          Managed installations only: an unmanaged or development copy does not
+          own the maintenance uninstaller, so the entry is absent instead of
+          disabled. The lightweight confirm only announces the handoff — the
+          keep/delete choice and every destructive step live in the native
+          maintenance tool, never duplicated here.
+        -->
+        <template v-if="admissionMode === 'managed'">
+          <div class="settings-section-heading">
+            <strong>{{ t("settings.application.heading") }}</strong>
+          </div>
+          <section class="application-settings" :aria-label="t('settings.application.heading')">
+            <div class="settings-row">
+              <span>
+                <strong>{{ t("settings.application.uninstall") }}</strong>
+                <small>{{ t("settings.application.uninstallHint") }}</small>
+              </span>
+              <button
+                type="button"
+                :disabled="uninstallStarting"
+                @click="beginUninstall"
+              >{{ t("settings.application.uninstall") }}</button>
+            </div>
+            <div v-if="uninstallConfirming" class="quick-link-editor">
+              <p class="uninstall-confirm-body">
+                <strong>{{ t("settings.application.confirmTitle") }}</strong>
+                {{ t("settings.application.confirmBody") }}
+              </p>
+              <div class="quick-link-editor-actions">
+                <button type="button" :disabled="uninstallStarting" @click="confirmUninstall">
+                  {{ uninstallStarting ? t("settings.application.starting") : t("settings.application.confirmContinue") }}
+                </button>
+                <button type="button" :disabled="uninstallStarting" @click="cancelUninstall">
+                  {{ t("quickLinks.cancel") }}
+                </button>
+              </div>
+            </div>
+            <p v-if="uninstallError" class="settings-error" role="alert">{{ uninstallError }}</p>
+          </section>
+        </template>
+
+        <section class="developer-section">
+          <button type="button" class="developer-toggle" @click="developerOpen = !developerOpen">
+            <span>{{ t("settings.developer") }}</span><span>{{ developerOpen ? "−" : "+" }}</span>
+          </button>
+          <div v-if="developerOpen" class="developer-content">
+            <p class="database-path">{{ t("settings.developer.databasePath", { path: databasePath }) }}</p>
+            <DeveloperDiagnostics />
+          </div>
+        </section>
+      </section>
     </div>
 
-    <button type="button" class="save-settings" @click="save">{{ t("settings.save") }}</button>
-
-    <section class="developer-section">
-      <button type="button" class="developer-toggle" @click="developerOpen = !developerOpen">
-        <span>{{ t("settings.developer") }}</span><span>{{ developerOpen ? "−" : "+" }}</span>
-      </button>
-      <div v-if="developerOpen" class="developer-content">
-        <p class="database-path">{{ t("settings.developer.databasePath", { path: databasePath }) }}</p>
-        <DeveloperDiagnostics />
+    <footer class="settings-footer">
+      <!--
+        A failed save keeps the panel open and reports here, above the
+        overlay: the App-level error banner renders underneath this fixed
+        panel and can never be seen while Settings is open (S1-A finding
+        F-1). The draft is untouched on failure, the language preview stays
+        (its established failed-save rule), and the Save button re-arms via
+        the same prop.
+      -->
+      <p v-if="saveError" class="settings-error settings-save-error" role="alert">
+        <strong>{{ t("settings.saveFailed") }}</strong>
+        {{ saveError }}
+      </p>
+      <div class="settings-footer-row">
+        <p v-if="isDirty" class="settings-dirty" role="status">{{ t("settings.unsavedChanges") }}</p>
+        <span class="settings-footer-spacer" aria-hidden="true"></span>
+        <button type="button" class="settings-cancel" @click="$emit('close')">{{ t("settings.cancel") }}</button>
+        <button type="button" class="save-settings" :disabled="savePending" @click="save">
+          {{ savePending ? t("settings.saving") : t("settings.save") }}
+        </button>
       </div>
-    </section>
+    </footer>
   </aside>
 </template>

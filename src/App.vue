@@ -47,9 +47,31 @@ const nativeBridgeAvailable = "__TAURI_INTERNALS__" in window;
 const state = ref<ProductViewState>(browserState());
 const error = ref("");
 const settingsOpen = ref(false);
+/**
+ * The last Settings save failure, as text, for the panel's own footer. The
+ * app-level `error` banner renders underneath the fixed Settings overlay, so a
+ * failed save that only set `error` was invisible (S1-A finding F-1). Cleared
+ * at every save attempt and whenever Settings opens, so a stale failure never
+ * greets a freshly opened panel.
+ */
+const settingsSaveError = ref("");
 const reviewOpen = ref(false);
 const weatherSettingsRequested = ref(false);
 const githubSettingsRequested = ref(false);
+
+/**
+ * The one Settings close path (S1-C, review finding F-4): clearing the
+ * deep-link flags here means a deep link that was closed without saving can
+ * never steer a later, unrelated open — "weather deep link, close, GitHub
+ * deep link" now lands on Modules with the username focused, not on the
+ * stale Weather target. Used by the header Close/Cancel, Escape, and the
+ * save-success path alike.
+ */
+function closeSettings() {
+  settingsOpen.value = false;
+  weatherSettingsRequested.value = false;
+  githubSettingsRequested.value = false;
+}
 /**
  * The single weather state owner (see `modules/weather/controller.ts`). The app resolves its
  * message keys through this component's i18n instance, so a status re-renders
@@ -150,6 +172,11 @@ watch(
   () => state.value.systemLocale,
   (systemLocale) => i18n.setSystemLocale(systemLocale ?? ""),
 );
+// A stale save failure must never greet a freshly opened panel: clearing on
+// open keeps the footer's error region honest about the current attempt only.
+watch(settingsOpen, (open) => {
+  if (open) settingsSaveError.value = "";
+});
 watch(
   i18n.locale,
   (locale) => {
@@ -509,7 +536,9 @@ async function openGithubProfile() {
  */
 function openReview() {
   if (!isModuleEnabled(moduleVisibility.value, "review")) return;
-  settingsOpen.value = false;
+  // Opening Review is a Settings close for F-4 purposes too: the deep-link
+  // flags must not outlive the panel here either.
+  closeSettings();
   reviewOpen.value = true;
 }
 
@@ -674,45 +703,53 @@ async function saveSettings(patch: {
   moduleVisibility: ModuleVisibility;
   githubUsername: string;
 }) {
-  const active = state.value.settings;
-  const weatherIdentityChanged =
-    active.weatherLatitude !== patch.weatherLatitude ||
-    active.weatherLongitude !== patch.weatherLongitude ||
-    active.weatherTimezone !== patch.weatherTimezone ||
-    active.temperatureUnit !== patch.temperatureUnit;
-  if (weatherIdentityChanged) {
-    // Never let a previous location/unit snapshot survive the instant at
-    // which the active settings identity changes. Matching SQLite cache will
-    // be loaded immediately after persistence, otherwise the UI stays empty
-    // while the new identity refreshes.
-    weather.value = {
-      ...browserWeatherState(nativeBridgeAvailable),
-      configured: patch.weatherLatitude !== null && patch.weatherLongitude !== null,
-      refreshRecommended: patch.weatherLatitude !== null && patch.weatherLongitude !== null,
-    };
-  }
-  if (active.githubUsername.trim() !== patch.githubUsername.trim()) {
-    // Same rule for the GitHub identity: a changed username must never keep
-    // rendering the previous account's numbers. The controller's
-    // `switchIdentity` resets the card to the new account's honest state,
-    // clears the previous account's message and not-found fact (M4), and
-    // invalidates every pending refresh intent of the old account (M1) —
-    // `github_state` re-reads the cache for the new username (cache keys are
-    // per-account) right after the save lands.
-    switchIdentity(patch.githubUsername);
-  }
-  if (!nativeBridgeAvailable) {
-    Object.assign(state.value.settings, patch);
-    settingsOpen.value = false;
-    reviewOpen.value = false;
-    await loadAppearanceRuntime();
-    return;
-  }
+  // Every attempt starts from a clean slate: the panel's footer reports this
+  // attempt's outcome, and an old refusal must not survive into it.
+  settingsSaveError.value = "";
+  // The whole body runs under one guard (S1-C, review finding F-2): a
+  // synchronous throw before the IPC — the weather-identity reset or the
+  // GitHub identity switch — has to reach the panel's footer like a backend
+  // refusal, or the panel's Save button would stay pending forever with no
+  // visible reason. The semantics are unchanged: memory and disk are touched
+  // only after `update_product_settings` commits, so anything thrown here
+  // leaves both exactly as they were.
   try {
+    const active = state.value.settings;
+    const weatherIdentityChanged =
+      active.weatherLatitude !== patch.weatherLatitude ||
+      active.weatherLongitude !== patch.weatherLongitude ||
+      active.weatherTimezone !== patch.weatherTimezone ||
+      active.temperatureUnit !== patch.temperatureUnit;
+    if (weatherIdentityChanged) {
+      // Never let a previous location/unit snapshot survive the instant at
+      // which the active settings identity changes. Matching SQLite cache will
+      // be loaded immediately after persistence, otherwise the UI stays empty
+      // while the new identity refreshes.
+      weather.value = {
+        ...browserWeatherState(nativeBridgeAvailable),
+        configured: patch.weatherLatitude !== null && patch.weatherLongitude !== null,
+        refreshRecommended: patch.weatherLatitude !== null && patch.weatherLongitude !== null,
+      };
+    }
+    if (active.githubUsername.trim() !== patch.githubUsername.trim()) {
+      // Same rule for the GitHub identity: a changed username must never keep
+      // rendering the previous account's numbers. The controller's
+      // `switchIdentity` resets the card to the new account's honest state,
+      // clears the previous account's message and not-found fact (M4), and
+      // invalidates every pending refresh intent of the old account (M1) —
+      // `github_state` re-reads the cache for the new username (cache keys are
+      // per-account) right after the save lands.
+      switchIdentity(patch.githubUsername);
+    }
+    if (!nativeBridgeAvailable) {
+      Object.assign(state.value.settings, patch);
+      reviewOpen.value = false;
+      closeSettings();
+      await loadAppearanceRuntime();
+      return;
+    }
     state.value = await invoke<ProductViewState>("update_product_settings", { patch });
-    settingsOpen.value = false;
-    weatherSettingsRequested.value = false;
-    githubSettingsRequested.value = false;
+    closeSettings();
     await loadAppearanceRuntime();
     await loadWeather();
     if (weather.value.configured && weather.value.refreshRecommended) {
@@ -729,6 +766,9 @@ async function saveSettings(patch: {
     }
   } catch (reason) {
     error.value = String(reason);
+    // The panel stays open on failure; the visible copy of the refusal is the
+    // one in its footer. The banner below would render behind the overlay.
+    settingsSaveError.value = String(reason);
   }
 }
 
@@ -740,7 +780,7 @@ function closeMenu(event?: Event) {
 function handleKey(event: KeyboardEvent) {
   if (event.key === "Escape") {
     menu.value.open = false;
-    settingsOpen.value = false;
+    closeSettings();
     reviewOpen.value = false;
   }
 }
@@ -887,7 +927,8 @@ onBeforeUnmount(() => {
       :weather-message="weatherMessage"
       :focus-weather="weatherSettingsRequested"
       :focus-github="githubSettingsRequested"
-      @close="settingsOpen = false"
+      :save-error="settingsSaveError"
+      @close="closeSettings"
       @save="saveSettings"
       @refresh-weather="refreshWeather(true)"
         :image-available="imageAsset.available"

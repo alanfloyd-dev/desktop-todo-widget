@@ -26,6 +26,7 @@ export const en: Record<string, string> = {
   "app.name": "Settings",
 
   // --- Product error / status surface ---------------------------------------
+
   "error.weatherRefreshCooldown": "Please wait before refreshing again.",
   "error.weatherRefreshInProgress": "Weather refresh is already running.",
   "error.weatherRefreshTimeout": "Weather request timed out. Cached data is unchanged.",
@@ -221,12 +222,32 @@ export const en: Record<string, string> = {
     "Collapsing is unavailable: this layout was saved by a newer app version",
 
   // --- Settings -------------------------------------------------------------
-  "settings.title": "SETTINGS",
   "settings.close": "Close",
   "settings.closeAriaLabel": "Close settings",
   "settings.panelAriaLabel": "Settings",
   "settings.save": "Save settings",
-  "settings.application.heading": "APPLICATION",
+  // --- Settings categories (S1-B) -------------------------------------------
+  // The five top-level categories and the accessible name of their navigation.
+  "settings.category.label": "Settings category",
+  "settings.category.appearance": "Appearance",
+  "settings.category.general": "General",
+  "settings.category.modules": "Modules",
+  "settings.category.weather": "Weather",
+  "settings.category.about": "About",
+  // Sticky footer.
+  "settings.cancel": "Cancel",
+  "settings.saving": "Saving…",
+  "settings.saveFailed": "Settings were not saved.",
+  "settings.unsavedChanges": "Unsaved changes",
+  // One-line explanations under each module switch (Modules category).
+  "settings.moduleDesc.todo": "Tasks and categories on the dashboard",
+  "settings.moduleDesc.weather": "Current conditions and forecast",
+  "settings.moduleDesc.shortcuts": "Quick links shown in the footer",
+  "settings.moduleDesc.review": "Reports, opened from the Today heading",
+  "settings.moduleDesc.github": "Public GitHub statistics. Off by default.",
+  // Replaces the username hint while the GitHub module is switched off.
+  "settings.githubUsernameHintDisabled": "Turn the GitHub module on above to show its statistics",
+  "settings.application.heading": "Application",
   "settings.application.uninstall": "Uninstall desktop-todo-widget",
   "settings.application.uninstallHint": "Opens the maintenance uninstaller and closes the app",
   "settings.application.confirmTitle": "Uninstall desktop-todo-widget?",
@@ -239,7 +260,6 @@ export const en: Record<string, string> = {
   "settings.application.error.busy": "The uninstaller is already opening.",
   "settings.application.error.notManaged": "This installation cannot be uninstalled from here.",
   "settings.developer": "Developer",
-  "settings.languageHeading": "LANGUAGE",
   "settings.language.label": "Language",
   "settings.language.hint": "Interface language",
   "settings.language.option.system": "System",
@@ -248,11 +268,9 @@ export const en: Record<string, string> = {
   "settings.language.effective": "Currently using {language}",
   "settings.language.restartHint": "Native menus and tray tooltips update after a restart.",
 
-  "settings.modulesHeading": "MODULES",
   "settings.modulesDescription": "Choose which modules appear on the desktop",
   "settings.modulesReset": "↻ Reset modules",
 
-  "settings.profileHeading": "PROFILE",
   "settings.displayName": "Display name",
   "settings.displayNameHint": "Footer profile",
   "settings.displayNamePlaceholder": "User",
@@ -286,7 +304,6 @@ export const en: Record<string, string> = {
   "quickLinks.error.urlRequired": "Enter a URL for this link.",
   "quickLinks.error.invalidUrl": "Invalid URL. Use http:// or https://.",
 
-  "settings.weatherHeading": "WEATHER",
   "settings.weatherLocation": "Weather location",
   "settings.weatherLocationHint": "Search, then explicitly select a result",
   "settings.weatherSearchPlaceholder": "Search location",
@@ -305,13 +322,12 @@ export const en: Record<string, string> = {
   "settings.refreshNow": "Refresh now",
   "settings.refreshing": "Refreshing…",
 
-  "settings.githubHeading": "GITHUB",
   "settings.githubUsername": "GitHub username",
   "settings.githubUsernameHint": "Public account for the dashboard module",
   "settings.githubUsernamePlaceholder": "octocat",
   "status.githubUpdated": "GitHub statistics updated.",
 
-  "settings.update.heading": "UPDATES",
+  "settings.update.heading": "Updates",
   "settings.update.currentVersion": "Current version",
   "settings.update.currentVersionHint": "The product version installed on this device",
   "settings.update.check": "Check for updates",
@@ -328,8 +344,6 @@ export const en: Record<string, string> = {
   "settings.update.error.notManaged": "This installation cannot update from within the app.",
   "settings.update.error.installationUnresolved": "The current installation could not be confirmed; updates are unavailable.",
 
-  "settings.appearanceHeading": "APPEARANCE",
-  "settings.appearanceMaterial": "Glass · Graphite Frost",
   "settings.appearanceFor": "Appearance for",
   "settings.appearanceForHint": "Each window mode keeps its own appearance",
   "settings.appearanceForAriaLabel": "Window mode whose appearance is being edited",
@@ -595,11 +609,31 @@ export const zhHans: Record<string, string> = {
   "modules.expandAction": "展开{module}",
   "modules.collapseUnavailable": "无法折叠：此布局由更新版本的应用保存",
 
-  "settings.title": "设置",
   "settings.close": "关闭",
   "settings.closeAriaLabel": "关闭设置",
   "settings.panelAriaLabel": "设置",
   "settings.save": "保存设置",
+  // --- 设置分类（S1-B） -------------------------------------------------------
+  // 五个顶层分类及其导航的可访问名称。
+  "settings.category.label": "设置分类",
+  "settings.category.appearance": "外观",
+  "settings.category.general": "常规",
+  "settings.category.modules": "模块",
+  "settings.category.weather": "天气",
+  "settings.category.about": "关于",
+  // 底部固定操作栏。
+  "settings.cancel": "取消",
+  "settings.saving": "正在保存…",
+  "settings.saveFailed": "设置未能保存。",
+  "settings.unsavedChanges": "有未保存的更改",
+  // 模块开关下方的一行说明（模块分类）。
+  "settings.moduleDesc.todo": "桌面上的任务与分类",
+  "settings.moduleDesc.weather": "当前的天气与预报",
+  "settings.moduleDesc.shortcuts": "显示在页脚的快捷链接",
+  "settings.moduleDesc.review": "回顾报告，从“今天”标题进入",
+  "settings.moduleDesc.github": "公开的 GitHub 统计。默认关闭。",
+  // GitHub 模块关闭时替换用户名提示。
+  "settings.githubUsernameHintDisabled": "开启上方的 GitHub 模块后才会显示其统计",
   "settings.application.heading": "应用",
   "settings.application.uninstall": "卸载 desktop-todo-widget",
   "settings.application.uninstallHint": "将打开卸载程序并关闭 desktop-todo-widget",
@@ -613,7 +647,6 @@ export const zhHans: Record<string, string> = {
   "settings.application.error.busy": "卸载程序已在打开中。",
   "settings.application.error.notManaged": "当前安装无法从这里卸载。",
   "settings.developer": "开发者",
-  "settings.languageHeading": "语言",
   "settings.language.label": "语言",
   "settings.language.hint": "界面显示语言",
   "settings.language.option.system": "跟随系统",
@@ -622,11 +655,9 @@ export const zhHans: Record<string, string> = {
   "settings.language.effective": "当前使用 {language}",
   "settings.language.restartHint": "原生菜单与托盘提示会在重启后更新。",
 
-  "settings.modulesHeading": "模块",
   "settings.modulesDescription": "选择显示在桌面上的模块",
   "settings.modulesReset": "↻ 恢复默认模块",
 
-  "settings.profileHeading": "个人资料",
   "settings.displayName": "显示名称",
   "settings.displayNameHint": "页脚个人信息",
   "settings.displayNamePlaceholder": "用户",
@@ -659,7 +690,6 @@ export const zhHans: Record<string, string> = {
   "quickLinks.error.urlRequired": "请输入该链接的 URL。",
   "quickLinks.error.invalidUrl": "URL 无效，请使用 http:// 或 https://。",
 
-  "settings.weatherHeading": "天气",
   "settings.weatherLocation": "天气地点",
   "settings.weatherLocationHint": "搜索后请明确选择一个结果",
   "settings.weatherSearchPlaceholder": "搜索地点",
@@ -678,7 +708,6 @@ export const zhHans: Record<string, string> = {
   "settings.refreshNow": "立即刷新",
   "settings.refreshing": "刷新中…",
 
-  "settings.githubHeading": "GITHUB",
   "settings.githubUsername": "GitHub 用户名",
   "settings.githubUsernameHint": "仪表盘模块使用的公开账号",
   "settings.githubUsernamePlaceholder": "octocat",
@@ -701,8 +730,6 @@ export const zhHans: Record<string, string> = {
   "settings.update.error.notManaged": "当前安装不支持从应用内更新。",
   "settings.update.error.installationUnresolved": "无法确认当前安装，更新不可用。",
 
-  "settings.appearanceHeading": "外观",
-  "settings.appearanceMaterial": "玻璃 · 石墨霜",
   "settings.appearanceFor": "外观设置",
   "settings.appearanceForHint": "每种窗口模式各自保存外观",
   "settings.appearanceForAriaLabel": "正在编辑外观的窗口模式",
