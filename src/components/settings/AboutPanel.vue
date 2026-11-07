@@ -220,6 +220,18 @@ async function confirmUninstall() {
               @click="updateChecker.install()"
             >{{ updateInstallLabel }}</button>
             <small class="update-install-hint">{{ t("settings.update.installHint") }}</small>
+            <!--
+              An install failure returns to this offer with the errorKey set
+              (the update is still offered and retrying is meaningful), so the
+              error renders here too: the `error` phase below is only reachable
+              from a failed check, and a phase-gated render would make every
+              install refusal a silent no-op.
+            -->
+            <small
+              v-if="updateErrorKey"
+              class="settings-error"
+              role="alert"
+            >{{ t(updateErrorKey) }}</small>
           </template>
           <small v-else-if="updatePhase === 'downloading'" role="status">{{ t("settings.update.downloading") }}</small>
           <small

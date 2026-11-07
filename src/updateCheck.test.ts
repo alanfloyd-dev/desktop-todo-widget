@@ -177,8 +177,13 @@ describe("manual update check state machine", () => {
     expect(checker.availableVersion.value).toBe("1.2.1");
     expect(checker.errorKey.value).toBe("settings.update.error.installFailed");
 
-    // The failed action is retryable.
-    await checker.install();
+    // The failed action is retryable; the stale error clears the moment the
+    // retry starts (install() resets it synchronously), so the offer row
+    // switches to the downloading status instead of keeping the refusal.
+    const retry = checker.install();
+    expect(checker.errorKey.value).toBeNull();
+    expect(checker.phase.value).toBe("downloading");
+    await retry;
     expect(invoke).toHaveBeenCalledWith("install_ready_update", { sessionId: "sid-2" });
     expect(checker.errorKey.value).toBeNull();
   });
@@ -331,6 +336,31 @@ describe("manual update check state machine", () => {
       for (const refusal of backendRefusals) {
         expect(refusal.includes("not-installed")).toBe(false);
       }
+    });
+  });
+
+  describe("install-failure error rendering", () => {
+    it("the available offer renders the checker's error, not just the error phase", () => {
+      // R-E1-01: an install failure returns to `available` (the update is
+      // still offered and retrying is meaningful), so the offer branch itself
+      // must surface the errorKey — a render gated on the `error` phase alone
+      // turns every install refusal into a silent no-op.
+      const offerBranch = aboutPanelSource.match(
+        /<template v-else-if="updatePhase === 'available'">([\s\S]*?)<\/template>/,
+      );
+      expect(offerBranch).not.toBeNull();
+      const offerBody = offerBranch?.[1] ?? "";
+      // The retryable offer stays on screen beside the error.
+      expect(offerBody).toContain('@click="updateChecker.install()"');
+      expect(offerBody).toMatch(
+        /<small\s+v-if="updateErrorKey"\s+class="settings-error"\s+role="alert"\s*>/,
+      );
+    });
+
+    it("the failed-check render in the error phase is untouched", () => {
+      expect(aboutPanelSource).toMatch(
+        /<small\s+v-else-if="updatePhase === 'error' && updateErrorKey"\s+class="settings-error"\s+role="alert"\s*>/,
+      );
     });
   });
 });
