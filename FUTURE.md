@@ -49,7 +49,7 @@ Current checkpoint (2026-11-07):
 - S1-B/C/D: completed and pushed to origin, Gitee, and GitLab.
 - S1-E1: AboutPanel extracted in local commit 82a0673; not yet
   pushed.
-- E1.1: updater install-failure message fix implemented and independently reviewed; pending commit.
+- E1.1: updater install-failure message fix implemented and independently reviewed; committed locally as 70a3228 (pending push).
 - E2 (WeatherPanel) and the remaining Settings work: not started.
 
 Exit condition: the Settings surface has clear component boundaries,
