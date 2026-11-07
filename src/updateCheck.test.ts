@@ -5,9 +5,10 @@ import {
   updateSurface,
   type UpdateBridge,
 } from "./updateCheck";
-// Vite's `?raw` import: the panel source as a string, for the structural
-// wiring contract below (no Node fs types needed).
-import panelSource from "./components/SettingsPanel.vue?raw";
+// Vite's `?raw` import: the panel sources as strings, for the structural
+// wiring contracts below (no Node fs types needed).
+import aboutPanelSource from "./components/settings/AboutPanel.vue?raw";
+import settingsPanelSource from "./components/SettingsPanel.vue?raw";
 
 /**
  * The bridge's `invoke` is runtime-generic (any result type); a test double
@@ -255,12 +256,59 @@ describe("manual update check state machine", () => {
       // shared surface rule, selects the inert bridge for every
       // preview-or-dev runtime, and disables the controls outside a live
       // backend.
-      expect(panelSource).toContain('v-if="updateSectionVisible"');
-      expect(panelSource).toContain(
+      expect(aboutPanelSource).toContain('v-if="updateSectionVisible"');
+      expect(aboutPanelSource).toContain(
         "createUpdateChecker(\n  isPreview || isDevRuntime ? previewUpdateBridge : { invoke },\n)",
       );
-      expect(panelSource).toContain(':disabled="updateControlsDisabled"');
-      expect(panelSource).toContain('v-if="!updateBackendLive" role="note"');
+      expect(aboutPanelSource).toContain(':disabled="updateControlsDisabled"');
+      expect(aboutPanelSource).toContain('v-if="!updateBackendLive" role="note"');
+    });
+
+    it("the About responsibilities live in AboutPanel, not SettingsPanel", () => {
+      // S1-E1: the updater, uninstall, version and admission wiring moved as a
+      // unit. A second owner would mean two checkers or two admission reads.
+      for (const owned of [
+        "createUpdateChecker",
+        "start_uninstall",
+        "maintenance_admission_state",
+        "getVersion",
+        "developerOpen",
+        "DeveloperDiagnostics",
+      ]) {
+        expect(aboutPanelSource, owned).toContain(owned);
+        expect(settingsPanelSource, owned).not.toContain(owned);
+      }
+    });
+
+    it("the parent mounts AboutPanel unconditionally inside its v-show tabpanel", () => {
+      // The wrapper stays the parent's and the child carries no `v-if`: updater
+      // and uninstall state must survive switching categories, and the admission
+      // read must keep happening once per panel session.
+      expect(settingsPanelSource).toMatch(
+        /<section\s+v-show="activeCategory === 'about'"\s+id="settings-panel-about"\s+class="settings-category-panel"\s+role="tabpanel"\s+aria-labelledby="settings-tab-about"\s*>\s*<AboutPanel :database-path="databasePath" \/>\s*<\/section>/,
+      );
+      expect(settingsPanelSource.match(/v-show="activeCategory === '/g)?.length).toBe(5);
+      expect(settingsPanelSource.match(/role="tabpanel"/g)?.length).toBe(5);
+    });
+
+    it("AboutPanel renders the databasePath it receives from a single root", () => {
+      expect(aboutPanelSource).toMatch(/defineProps<\{\s*databasePath: string;\s*\}>\(\)/);
+      expect(aboutPanelSource).toContain(
+        't("settings.developer.databasePath", { path: databasePath })',
+      );
+      expect(aboutPanelSource).toMatch(
+        /<template>\s*<div class="about-panel">[\s\S]*<\/div>\s*<\/template>\s*$/,
+      );
+    });
+
+    it("AboutPanel cannot reach the settings save path", () => {
+      for (const forbidden of ["defineEmits", "update_product_settings", "settingsSnapshot"]) {
+        expect(aboutPanelSource, forbidden).not.toContain(forbidden);
+      }
+      // Its single prop is the only thing crossing the boundary.
+      expect(settingsPanelSource.match(/<AboutPanel\b[^>]*>/g)).toEqual([
+        '<AboutPanel :database-path="databasePath" />',
+      ]);
     });
 
     it("the preview bridge marker never collides with the backend vocabulary", () => {
