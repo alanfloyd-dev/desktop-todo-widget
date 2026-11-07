@@ -1,68 +1,194 @@
 # Future work
 
-v1 ships local tasks, Daily/Weekly/Monthly Review, weather, Quick Links, and three window modes (Sidebar, Floating with Expanded/Orb, Desktop).
+This document records the product direction and the planned path to the
+next major release. It is a roadmap, not a specification or a promise
+that every idea will ship. Keep implementation details and historical
+release records in their dedicated documents; do not turn this file into
+a changelog or an unprioritized feature wishlist.
 
-This file is a roadmap and idea list, not a specification. Nothing here is promised, and nothing here is implemented until it ships. Directions carry a light status: **Planned** (intended next), **Exploring** (shaping up, not committed), **Ongoing** (standing policy).
+## Product direction
 
-## Directions
+Desktop Todo Widget should become a polished, lightweight desktop
+companion that people genuinely want to keep visible on their desktop.
 
-### Application lifecycle management — shipped in v1.2.0 (October 2026)
+The goal is not simply to add more features or make screenshots look
+impressive. The product should make a strong first impression while
+remaining comfortable and useful during everyday, long-term use: clear
+information hierarchy, coherent visual language, restrained motion,
+predictable interactions, and low visual noise.
 
-Goal: introduce installation maintenance, including authenticated updates, recovery, installation receipts, Windows Installed apps integration, and uninstall with local data retained by default.
+The next major milestone is v2.0.0. After that release, the project
+moves into a maintenance-focused phase rather than continuing open-ended
+feature expansion.
 
-**Phase 1 is implemented** (manual trusted bootstrap with v1.1 adoption, the installation receipt, launch admission, Windows Installed apps registration, Start Menu reconciliation, interrupted-install recovery, and native uninstall keeping local data by default — see [Application Lifecycle & Maintenance Architecture](docs/application-lifecycle.md) for the recorded semantics and deviations). The main app's Settings expose the managed uninstall entry, which hands off to the same native helper that Windows Installed apps uses.
+## Roadmap to v2.0.0
 
-**The signed updater shipped in v1.2.0.** The Phase 2 transaction engine — the verification core, provider discovery, durable trusted-target/package staging, the frozen `UpdateSession` + authenticated helper handoff, the runtime mutation transaction, and probation/HealthAck/commit/rollback/recovery — is implemented (commits `df75c83` through `b825d33`) together with the release infrastructure: the compiled production trust root provisioned with the real key (Phase 5A, `57d49d0`), the offline exact-byte signer (`46d911b`), and the package/publish/read-back tooling (`712a7bb`). The release itself is closed: after the first production RC failed real-Windows QA (helper heap corruption, fixed in `9bcc5e0`), the replacement RC2 — published to GitHub and Gitee, read-back and mirror verified — passed the real-Windows legacy-adoption E2E on a clean v1.1.0 VM baseline (Phase 5E-B1d) and was promoted to the v1.2.0 stable release unchanged. v1.1.x machines reach v1.2.0 only through the manual trusted bootstrap / legacy adoption — v1.1 predates the updater and has no discovery entry. Full semantics: [Application Lifecycle & Maintenance Architecture](docs/application-lifecycle.md); wire contract: [Maintenance protocol v1](docs/maintenance-protocol-v1.md); release closure record: [release-signing.md](docs/release-signing.md).
+### 1. Finish the Settings panel
 
-**Remaining work, in order:** **1.** the remaining in-app updater surface — the check/download/install-restart UI (`check_for_updates`, `download_update`, frozen `install_ready_update(sessionId)`) is implemented on main (`eef3916`, dev-visibility fix `4074cb7`): the update engine shipped in v1.2.0, the UI first ships in v1.2.1, leaving only the Settings release-source preference (Auto/GitHub/Gitee); the QA-only prerelease discovery seam (`38c65fa`) is test infrastructure, not user-facing functionality. **2.** real-machine rollback/crash-recovery QA from a restored clean baseline. **3.** the first production in-app self-update smoke — an installed v1.2.1 discovering and committing a successor release (a later patch or bridge release). v1.2.0 exposes no in-app check/download surface, so the v1.2.0 -> v1.2.1 transition still requires a manual installer/bootstrap, and the smoke becomes possible only once a successor to v1.2.1 exists; it is not a v1.2.0 blocker. **4.** cargo-deny adoption and tooling hardening (no committed deny.toml). **5.** beta channels, background/resumable downloads, and automatic update checks. Release preparation executed for v1.2.0: `THIRD_PARTY_NOTICES.md` synced to the real Windows shipping inventory (`72809e9`), `cargo audit` 0 vulnerabilities, `pnpm audit` clean.
+Status: In progress
 
-### Review export — Planned
+Complete the current Settings-panel restructuring and resolve the known
+behavior gaps before moving on to the product-wide visual refresh.
 
-Goal: export Review and statistics results.
+Scope:
 
-Likely scope: Markdown first, then CSV and JSON; PDF/image export only after those exist. Export reuses the existing read-only Review computation — the same aggregation, a different sink — and does not re-implement statistics.
+- Finish the remaining Settings-panel component extraction where it
+  improves ownership and maintainability.
+- Keep draft state, dirty-state calculation, save behavior,
+  navigation, language preview, asset cleanup, and deep-link handling
+  under clear ownership.
+- Preserve existing persistence and IPC contracts unless a separately
+  reviewed change is required.
+- Keep responsive navigation, keyboard behavior, contrast, and asset
+  lifecycle covered by automated and native QA.
+- Fix the known updater-install failure case so the user receives a
+  visible error and can retry.
 
-### Modular feature architecture — Exploring
+Current checkpoint (2026-11-07):
 
-Goal: make feature modules more independent and easier to enable, disable, and combine — without building a plugin system.
+- S1-B/C/D: completed and pushed to origin, Gitee, and GitLab.
+- S1-E1: AboutPanel extracted in local commit 82a0673; not yet
+  pushed.
+- E1.1: updater install-failure message fix implemented and independently reviewed; pending commit.
+- E2 (WeatherPanel) and the remaining Settings work: not started.
 
-Likely scope: Today, Weather, Review, Quick Links, News first, then further cards. Each module keeps an explicit data/provider boundary, settings, view/component, and lifecycle.
+Exit condition: the Settings surface has clear component boundaries,
+its existing behavior is preserved, known user-visible defects in scope
+are fixed, and the integrated panel passes the agreed test and native-QA
+gates.
 
-Not now: no generic plugin API, no dynamic loading, no marketplace.
+### 2. Refresh the product-wide UI
 
-### News / daily briefing — Exploring
+Status: Planned
 
-Goal: a card of user-chosen keywords/topics shown in the same surface, each item opening in the default browser. No extra complex window.
+After the Settings work is complete, give the application a coherent,
+product-level visual refresh.
 
-Boundary: prefer stable APIs, feeds, or other structured sources over fragile HTML scraping. Implementation is deliberately unspecified until the direction firms up.
+Focus:
 
-### Compatibility and maintainability — Ongoing
+- Establish a clear visual direction and consistent design rules for
+  typography, color, spacing, surfaces, icons, and component states.
+- Improve the overall layout and visual hierarchy across the main
+  widget and its modules.
+- Refine interaction feedback and motion without making the interface
+  distracting.
+- Make appearance options feel intentional and consistent rather than
+  like isolated effects.
+- Validate the result in the actual desktop window, across supported
+  window modes, practical sizes, DPI settings, and relevant light/dark
+  or wallpaper conditions.
 
-- The Windows native layer is frozen-by-default ([CONTRIBUTING.md](CONTRIBUTING.md)): only concrete bugs, OS/dependency compatibility, or a clear product need move it.
-- Prefer reducing environment dependencies over adding high-maintenance purely visual native effects.
-- Windows 10 compatibility is a possible future validation target, not a promise: it is not claimed as supported before it is actually tested.
+The design target is a product that feels distinctive at first glance
+but remains calm and comfortable to leave on screen all day. Visual
+effects should serve readability and usability, not compete with them.
+
+### 3. Improve the Review experience
+
+Status: Planned
+
+Improve how Review presents a user's progress and phase summaries.
+
+Focus:
+
+- Make daily, weekly, and monthly Review easier to scan and
+  understand.
+- Give phase summaries a stronger information hierarchy.
+- Present completed work, progress, and useful highlights clearly.
+- Improve the visual presentation of existing Review information
+  before expanding the underlying analytics.
+
+This phase is primarily about making the existing Review experience more
+useful and presentable. New scoring systems, speculative productivity
+judgments, or AI-generated conclusions are not prerequisites for v2.0.0.
+
+### 4. Stabilize and release v2.0.0
+
+Status: Planned
+
+Once Settings, the product-wide UI, and Review are ready, freeze the
+v2.0.0 feature scope and focus on release quality.
+
+Release work should include:
+
+- Integrated regression testing across the main widget, modules,
+  Settings, and Review.
+- Persistence, upgrade compatibility, and user-data integrity checks.
+- Real-machine validation of installation, update, recovery, and
+  uninstall flows.
+- Performance, resource-use, startup/shutdown, and
+  long-running-session checks.
+- Localization, responsive layout, accessibility, and error-state
+  review.
+- Updated documentation, release notes, and release artifacts.
+
+Do not keep adding features during release hardening unless a change is
+necessary to fix a release-blocking defect.
+
+### 5. Produce the product video
+
+Status: Planned
+
+Create a polished promotional/demo video based on the release candidate
+or final v2.0.0 build.
+
+The video should show the product as it is actually used:
+
+- Its presence and appearance on the desktop.
+- The everyday task workflow.
+- The available modules and their interactions.
+- Review and phase-summary presentation.
+- Personalization through Settings.
+
+The video should communicate why someone would want to keep the widget
+on their desktop. It should showcase real product behavior and avoid
+implying capabilities that are not shipped.
+
+### 6. Move into maintenance
+
+Status: Planned after v2.0.0
+
+After v2.0.0 and the product video are released, move the project into a
+maintenance-focused phase.
+
+Default priorities:
+
+- Bug fixes and regressions.
+- Security and dependency updates.
+- Windows, WebView2, Rust, and Tauri compatibility.
+- Installation, updater, recovery, and data-integrity maintenance.
+- Documentation and release-pipeline upkeep.
+- Small usability improvements when they address a concrete problem.
+
+Major feature development is no longer the default. New features should
+be considered separately, with a clear user need and an explicit scope
+decision, rather than being added continuously to the release plan.
 
 ## Deferred ideas
 
-No direction yet; recorded so they are not reinvented by accident.
+The previous idea list contained many possibilities without a committed
+priority. Those ideas should not distract from the v2.0.0 path.
 
-- Hourly and 7-day forecasts, radar, AQI, UV, sunrise/sunset, wind dashboards, severe-weather warnings, and weather notifications
-- Windows GPS, IP-based location, weather-driven backgrounds, and AI weather summaries
-- Charts, heatmaps, evaluative trends, productivity scoring, and AI-generated review summaries
-- Search, tags, projects, recurring tasks, subtasks, reminders, and bulk carry/cancel UI
-- A full history browser, undo stack, archive policy, and cross-day editing
-- Settings organization: group the current settings surface more deliberately
-- Theme marketplace, downloadable themes, per-task themes, and cloud asset sync
-- Animated/video/GIF/weather-driven backgrounds and remote background URLs
-- Whole-window/content opacity, live desktop capture, per-frame wallpaper sampling, and a wallpaper manager
-- Orb progress rings, Todo/weather/count/notification badges, and online avatars or Gravatar
-- AI image generation or any other remote image analysis
-- Autostart and more elaborate tray behavior
-- Sidebar auto-hide, complex snap animations, and other motion polish
-- Global shortcuts and click-through
-- Fullscreen Desktop overlays with selective click-through regions; current Desktop mode intentionally remains a bounded Widget so wallpaper, icons, and the native desktop context menu stay available outside its HWND
-- Multi-monitor hot-plug validation (recorded as a non-blocking deferred Phase 1 lifecycle gate)
-- Explorer restart, lock/sleep/resume, fullscreen, and broader Windows-version regression coverage
-- Bookmark-manager features on top of Quick Links: favicons, page-title fetching, folders/groups, tags, search, and cloud sync. v1 ships a plain name + URL list only.
+Advanced weather products, expanded task-management workflows, AI
+features, cloud accounts or synchronization, downloadable theme
+marketplaces, calendar and notification integrations, advanced window
+behavior, and richer Quick Links functionality remain uncommitted
+ideas. They are not part of the v2.0.0 scope unless explicitly brought
+back for review.
 
-The existing `tasks`, `categories`, `shortcuts`, and `app_settings` tables and the Vue/Rust boundaries are the intended foundations. Future phases should add focused repository methods and UI components without moving ordinary presentation/business logic into the Win32 adapter.
+Keep newly discovered ideas in issues or a separate backlog. Add them
+here only when they become a deliberate product direction.
+
+## Engineering principles
+
+- Preserve user data and compatibility; migrations and update paths
+  are product-critical behavior.
+- Keep the native/window-management layer stable by default. Change it
+  for a concrete defect, platform/dependency compatibility, or a clear
+  product requirement — not merely for architectural tidiness or
+  visual novelty.
+- Keep UI modules and component boundaries explicit, with clear
+  ownership of state and side effects.
+- Prefer focused, reviewable changes with tests and native validation
+  over broad rewrites.
+- Treat v2.0.0 as a product milestone, not a reason to expand scope
+  indefinitely.
