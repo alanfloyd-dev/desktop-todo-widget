@@ -41,6 +41,7 @@ import type {
   WeatherViewState,
 } from "../types";
 import AboutPanel from "./settings/AboutPanel.vue";
+import WeatherPanel from "./settings/WeatherPanel.vue";
 
 const props = defineProps<{
   settings: ProductSettings;
@@ -131,12 +132,6 @@ const weatherTimezone = ref(props.settings.weatherTimezone);
 const weatherCountry = ref(props.settings.weatherCountry);
 const weatherAdmin1 = ref(props.settings.weatherAdmin1);
 const temperatureUnit = ref<TemperatureUnit>(props.settings.temperatureUnit);
-const locationQuery = ref("");
-const candidates = ref<LocationCandidate[]>([]);
-const locationSearching = ref(false);
-const locationError = ref("");
-const weatherSection = ref<HTMLElement | null>(null);
-const locationInput = ref<HTMLInputElement | null>(null);
 const appearance = ref(props.settings.appearance);
 /**
  * Appearance drafts, one per window mode.
@@ -528,34 +523,15 @@ function resetAppearance() {
   imagePreviewAvailable.value = false;
 }
 
-function weatherErrorLabel(reason: unknown) {
-  const kind = typeof reason === "object" && reason && "kind" in reason
-    ? String((reason as { kind: unknown }).kind)
-    : String(reason);
-  if (kind.includes("Timeout")) return t("settings.error.locationTimeout");
-  if (kind.includes("InvalidResponse")) return t("settings.error.locationInvalidResponse");
-  return t("settings.error.locationUnavailable");
-}
-
-async function searchLocation() {
-  const query = locationQuery.value.trim();
-  locationError.value = "";
-  candidates.value = [];
-  if (query.length < 2) {
-    locationError.value = t("settings.error.locationQueryTooShort");
-    return;
-  }
-  locationSearching.value = true;
-  try {
-    candidates.value = await invoke<LocationCandidate[]>("search_weather_locations", { query });
-    if (!candidates.value.length) locationError.value = t("settings.error.locationNoMatch");
-  } catch (reason) {
-    locationError.value = weatherErrorLabel(reason);
-  } finally {
-    locationSearching.value = false;
-  }
-}
-
+/**
+ * --- Weather draft mutations -------------------------------------------------
+ *
+ * The Weather category's controls live in `WeatherPanel`, but the persisted
+ * fields are this panel's draft: the child owns the transient search UI and
+ * reports each choice back, and these handlers write the six location fields
+ * and the unit exactly as the inline controls always did. The dirty snapshot
+ * and Save read the same refs, so the ownership split cannot fork the draft.
+ */
 function selectLocation(candidate: LocationCandidate) {
   weatherLocationLabel.value = candidate.label;
   weatherLatitude.value = candidate.latitude;
@@ -563,34 +539,18 @@ function selectLocation(candidate: LocationCandidate) {
   weatherTimezone.value = candidate.timezone;
   weatherCountry.value = candidate.country;
   weatherAdmin1.value = candidate.admin1;
-  candidates.value = [];
-  locationQuery.value = "";
-  locationError.value = "";
 }
 
-function candidateDetail(candidate: LocationCandidate) {
-  return [candidate.admin1, candidate.country].filter(Boolean).join(", ");
-}
-
-async function openAttribution() {
-  try {
-    await invoke("open_weather_attribution");
-  } catch {
-    locationError.value = t("settings.error.openAttribution");
-  }
+function setTemperatureUnit(unit: TemperatureUnit) {
+  temperatureUnit.value = unit;
 }
 
 onMounted(async () => {
-  // Deep links (the weather card's "Set location", the GitHub card's setup
-  // entry) opened this panel on their own category — `initialCategory` chose
-  // it before first render, so the target is visible and `scrollIntoView`
-  // below never runs against a hidden panel.
-  if (props.focusWeather) {
-    await nextTick();
-    weatherSection.value?.scrollIntoView({ block: "start" });
-    locationInput.value?.focus();
-    return;
-  }
+  // Deep links (the GitHub card's setup entry) opened this panel on their own
+  // category — `initialCategory` chose it before first render, so the target
+  // is visible and `scrollIntoView` below never runs against a hidden panel.
+  // The weather deep link's focus behavior lives in WeatherPanel, which owns
+  // the section and input refs it scrolls to and focuses.
   if (props.focusGithub) {
     await nextTick();
     githubRow.value?.scrollIntoView({ block: "start" });
@@ -1012,69 +972,26 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
         role="tabpanel"
         aria-labelledby="settings-tab-weather"
       >
-        <section ref="weatherSection" class="weather-settings" aria-labelledby="weather-settings-heading">
-          <div class="settings-section-heading">
-          <span>
-            <strong id="weather-settings-heading">{{ t("settings.weatherLocation") }}</strong>
-            <small>{{ t("settings.weatherLocationHint") }}</small>
-          </span>
-          </div>
-          <div class="weather-search-row">
-            <input
-              ref="locationInput"
-              v-model="locationQuery"
-              type="search"
-              :placeholder="t('settings.weatherSearchPlaceholder')"
-              autocomplete="off"
-              @keydown.enter.prevent="searchLocation"
-            />
-            <button type="button" :disabled="locationSearching" @click="searchLocation">
-              {{ locationSearching ? t("settings.weatherSearching") : t("settings.weatherSearch") }}
-            </button>
-          </div>
-          <p v-if="locationError" class="settings-error" role="status">{{ locationError }}</p>
-          <div v-if="candidates.length" class="weather-candidates" :aria-label="t('settings.weatherResultsAriaLabel')">
-            <button
-              v-for="candidate in candidates"
-              :key="`${candidate.latitude}:${candidate.longitude}:${candidate.timezone}`"
-              type="button"
-              @click="selectLocation(candidate)"
-            >
-              <strong>{{ candidate.label }}</strong>
-              <small>{{ candidateDetail(candidate) || candidate.timezone }}</small>
-            </button>
-          </div>
-          <div class="settings-row weather-selected">
-            <span><strong>{{ t("settings.weatherSelected") }}</strong><small>{{ t("settings.weatherSelectedHint") }}</small></span>
-            <span class="selected-location">
-              <strong>{{ weatherLocationLabel || t("settings.weatherNotConfigured") }}</strong>
-              <small v-if="weatherLocationLabel">
-                {{ [weatherAdmin1, weatherCountry].filter(Boolean).join(", ") || weatherTimezone }}
-              </small>
-            </span>
-          </div>
-          <label class="settings-row">
-            <span><strong>{{ t("settings.temperature") }}</strong><small>{{ t("settings.temperatureHint") }}</small></span>
-            <select v-model="temperatureUnit">
-              <option value="celsius">{{ t("settings.celsius") }}</option>
-              <option value="fahrenheit">{{ t("settings.fahrenheit") }}</option>
-            </select>
-          </label>
-          <div class="settings-row weather-provider-row">
-            <span><strong>{{ t("settings.weatherData") }}</strong><small>{{ t("settings.weatherAttributionHint") }}</small></span>
-            <button type="button" @click="openAttribution">Open-Meteo ↗</button>
-          </div>
-          <div class="weather-refresh-row">
-            <button
-              type="button"
-              :disabled="!weather.configured || weather.refreshing"
-              @click="$emit('refreshWeather')"
-            >
-              {{ weather.refreshing ? t("settings.refreshing") : t("settings.refreshNow") }}
-            </button>
-            <small v-if="weatherMessage" role="status">{{ weatherMessage }}</small>
-          </div>
-        </section>
+        <!--
+          The Weather category's controls (S1-E2). The child owns the transient
+          search UI, the attribution action and the deep-link focus; the
+          persisted fields stay drafts of this panel — the child reports each
+          choice back through events, and the dirty snapshot and Save below
+          read the same refs they always read.
+        -->
+        <WeatherPanel
+          :weather-location-label="weatherLocationLabel"
+          :weather-timezone="weatherTimezone"
+          :weather-country="weatherCountry"
+          :weather-admin1="weatherAdmin1"
+          :temperature-unit="temperatureUnit"
+          :weather="weather"
+          :weather-message="weatherMessage"
+          :focus-weather="focusWeather"
+          @select-location="selectLocation"
+          @update-temperature-unit="setTemperatureUnit"
+          @refresh-weather="$emit('refreshWeather')"
+        />
       </section>
 
       <!-- ========================= About / 关于 ========================= -->
