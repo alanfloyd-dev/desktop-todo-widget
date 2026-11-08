@@ -3,8 +3,9 @@ import type { QuickLink } from "../../types";
 /**
  * Pure Quick Link list semantics, gathered from the Settings editor draft.
  *
- * The panel keeps owning the draft state and the editor flow; everything here
- * is locale-free and directly unit testable. The backend re-validates every
+ * SettingsPanel keeps owning the draft state; the ModulesPanel editor (S1-E3)
+ * owns the editor flow. Everything here is locale-free and directly unit
+ * testable. The backend re-validates every
  * patch, so these checks only keep the obvious mistakes next to the field.
  */
 

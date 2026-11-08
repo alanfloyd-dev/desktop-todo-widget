@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 // mounting, so the boundary is pinned at the source level).
 import settingsPanelVue from "../SettingsPanel.vue?raw";
 import weatherPanelVue from "./WeatherPanel.vue?raw";
+import modulesPanelVue from "./ModulesPanel.vue?raw";
 import appVue from "../../App.vue?raw";
 
 /**
@@ -206,8 +207,12 @@ describe("WeatherPanel extraction: lifecycle and deep link (S1-E2)", () => {
     );
   });
 
-  it("the GitHub deep link stays in the parent", () => {
-    expect(settingsPanelVue).toMatch(
+  it("the GitHub deep link's focus lives in the child that owns the row (since S1-E3)", () => {
+    // S1-E3 moved the GitHub username row into ModulesPanel, and with it the
+    // scrollIntoView + focus pair — the same split this file pins for the
+    // weather link. The parent keeps only the initialCategory choice.
+    expect(settingsPanelVue).not.toMatch(/githubRow|githubInput/);
+    expect(modulesPanelVue).toMatch(
       /if \(props\.focusGithub\) \{\s*await nextTick\(\);\s*githubRow\.value\?\.scrollIntoView\(\{ block: "start" \}\);\s*githubInput\.value\?\.focus\(\);\s*\}/,
     );
   });

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import {
   APPEARANCE_MODES,
@@ -9,10 +9,9 @@ import {
   sampleImageLuminance,
 } from "../appearance";
 import { languageOptionLabel, normalizeLanguage, useI18n, type Language } from "../i18n";
-import { moveLink, newLinkId, quickLinkUrlErrorKey } from "../modules/shortcuts/links";
+import { moveLink, newLinkId } from "../modules/shortcuts/links";
 import {
   DEFAULT_MODULE_VISIBILITY,
-  MODULE_REGISTRY,
   resolveModuleVisibility,
   type ModuleId,
   type ModuleVisibility,
@@ -41,6 +40,7 @@ import type {
   WeatherViewState,
 } from "../types";
 import AboutPanel from "./settings/AboutPanel.vue";
+import ModulesPanel from "./settings/ModulesPanel.vue";
 import WeatherPanel from "./settings/WeatherPanel.vue";
 
 const props = defineProps<{
@@ -102,29 +102,12 @@ let languageSaved = false;
 const dayRollover = ref(props.settings.dayRollover);
 /**
  * GitHub username draft (v1.3.0-G1). The Settings-minimal configuration the
- * GitHub module needs: one optional field, empty = unconfigured. Validation
- * mirrors the backend's grammar exactly (1–39 characters, letters/digits/
- * hyphens, no leading or trailing hyphen) so the inline error and the
- * backend's refusal can never disagree; the backend re-validates inside its
- * transaction and remains authoritative.
+ * GitHub module needs: one optional field, empty = unconfigured. The inline
+ * error and the row's deep-link focus live in `ModulesPanel`, which reports
+ * edits back through `update-github-username`; the backend re-validates
+ * inside its transaction and remains authoritative.
  */
 const githubUsername = ref(props.settings.githubUsername);
-const githubUsernameError = computed(() => {
-  const value = githubUsername.value.trim();
-  if (!value) return "";
-  if (
-    value.length > 39 ||
-    value.startsWith("-") ||
-    value.endsWith("-") ||
-    /[^A-Za-z0-9-]/.test(value)
-  ) {
-    return t("github.error.invalidUsername");
-  }
-  return "";
-});
-const githubInput = ref<HTMLInputElement | null>(null);
-/** The username row, for the GitHub card deep-link's scrollIntoView. */
-const githubRow = ref<HTMLElement | null>(null);
 const weatherLocationLabel = ref(props.settings.weatherLocationLabel);
 const weatherLatitude = ref(props.settings.weatherLatitude);
 const weatherLongitude = ref(props.settings.weatherLongitude);
@@ -194,65 +177,13 @@ function imageErrorLabel(reason: unknown): string {
 /**
  * Quick Links draft.
  *
- * The panel owns the whole list while it is open: add, edit, delete and reorder
- * all mutate this copy, and Save writes the finished list in one patch. That is
- * why ids are assigned here — the list has to stay addressable across a reorder
- * before anything is persisted.
+ * This panel owns the whole list while it is open: the ModulesPanel editor
+ * reports add, edit, delete and reorder back through events, the handlers
+ * below mutate this copy, and Save writes the finished list in one patch.
+ * That is why ids are assigned here — the list has to stay addressable across
+ * a reorder before anything is persisted.
  */
 const quickLinks = ref<QuickLink[]>(props.settings.quickLinks.map((link) => ({ ...link })));
-/** Id of the row being edited, or `null` when no editor is open. */
-const editingLinkId = ref<string | null>(null);
-const draftName = ref("");
-const draftUrl = ref("");
-const quickLinkError = ref("");
-
-function resetEditor() {
-  editingLinkId.value = null;
-  draftName.value = "";
-  draftUrl.value = "";
-  quickLinkError.value = "";
-}
-
-function addLink() {
-  resetEditor();
-  editingLinkId.value = "";
-}
-
-function editLink(link: QuickLink) {
-  editingLinkId.value = link.id;
-  draftName.value = link.name;
-  draftUrl.value = link.url;
-  quickLinkError.value = "";
-}
-
-function commitEditor() {
-  const name = draftName.value.trim();
-  const url = draftUrl.value.trim();
-  if (!name) {
-    quickLinkError.value = t("quickLinks.error.nameRequired");
-    return;
-  }
-  const urlErrorKey = quickLinkUrlErrorKey(url);
-  if (urlErrorKey) {
-    quickLinkError.value = t(urlErrorKey);
-    return;
-  }
-  if (editingLinkId.value) {
-    const existing = quickLinks.value.find((link) => link.id === editingLinkId.value);
-    if (existing) {
-      existing.name = name;
-      existing.url = url;
-    }
-  } else {
-    quickLinks.value.push({ id: newLinkId(), name, url });
-  }
-  resetEditor();
-}
-
-function deleteLink(id: string) {
-  quickLinks.value = quickLinks.value.filter((link) => link.id !== id);
-  if (editingLinkId.value === id) resetEditor();
-}
 
 /**
  * Module visibility draft.
@@ -279,15 +210,40 @@ function resetModules() {
 }
 
 /**
- * The GitHub username row's hint (decision D2): the field is always rendered,
- * and while the GitHub module is switched off the hint says what enabling it
- * does instead of describing a card that is not on the dashboard.
+ * --- Modules draft mutations (S1-E3) ----------------------------------------
+ *
+ * The Modules category's controls live in `ModulesPanel`, but the persisted
+ * fields are this panel's draft: the child owns the transient quick-link
+ * editor and reports each change back, and these handlers write the username
+ * and the link list exactly as the inline controls always did (the toggles
+ * above stay the toggle's handlers). The dirty snapshot and Save read the
+ * same refs, so the ownership split cannot fork the draft. New link ids are
+ * still assigned here — the list has to stay addressable across a reorder
+ * before anything is persisted.
  */
-const githubUsernameHint = computed(() =>
-  moduleVisibilityDraft.value.github
-    ? t("settings.githubUsernameHint")
-    : t("settings.githubUsernameHintDisabled"),
-);
+function updateGithubUsername(value: string) {
+  githubUsername.value = value;
+}
+
+function addQuickLink(draft: { name: string; url: string }) {
+  quickLinks.value.push({ id: newLinkId(), name: draft.name, url: draft.url });
+}
+
+function updateQuickLink(link: { id: string; name: string; url: string }) {
+  const existing = quickLinks.value.find((item) => item.id === link.id);
+  if (existing) {
+    existing.name = link.name;
+    existing.url = link.url;
+  }
+}
+
+function deleteQuickLink(id: string) {
+  quickLinks.value = quickLinks.value.filter((link) => link.id !== id);
+}
+
+function moveQuickLink(move: { id: string; delta: -1 | 1 }) {
+  moveLink(quickLinks.value, move.id, move.delta);
+}
 
 /**
  * --- Category navigation (S1-B) -------------------------------------------
@@ -545,18 +501,12 @@ function setTemperatureUnit(unit: TemperatureUnit) {
   temperatureUnit.value = unit;
 }
 
-onMounted(async () => {
-  // Deep links (the GitHub card's setup entry) opened this panel on their own
-  // category — `initialCategory` chose it before first render, so the target
-  // is visible and `scrollIntoView` below never runs against a hidden panel.
-  // The weather deep link's focus behavior lives in WeatherPanel, which owns
-  // the section and input refs it scrolls to and focuses.
-  if (props.focusGithub) {
-    await nextTick();
-    githubRow.value?.scrollIntoView({ block: "start" });
-    githubInput.value?.focus();
-  }
-});
+// Deep links (the GitHub card's setup entry, the weather card's "Set
+// location") open this panel on their own category — `initialCategory` chose
+// it before first render, so the target is visible when the child mounts. The
+// focus behaviors themselves live in the child that owns the row they scroll
+// to: WeatherPanel for the weather link (S1-E2), ModulesPanel for the GitHub
+// link (S1-E3).
 
 onBeforeUnmount(() => {
   // Revert an unsaved language preview.
@@ -838,130 +788,26 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
         role="tabpanel"
         aria-labelledby="settings-tab-modules"
       >
-        <p class="settings-intro">{{ t("settings.modulesDescription") }}</p>
         <!--
-          The module switches (decision D1): one row per registry module, a
-          real `role="switch"` control each, and one localized line saying
-          what the module does. They edit the draft only — the dashboard
-          updates on Save, and closing without Save discards them. Ids and
-          labels come from the module registry; GitHub ships disabled there
-          (ADR-DG-001 Amendment ①) and the registry default is untouched.
+          The Modules category's controls (S1-E3). The child owns the transient
+          quick-link editor and the deep-link focus; the persisted fields stay
+          drafts of this panel — the child reports each change back through
+          events, and the dirty snapshot and Save below read the same refs they
+          always read.
         -->
-        <ul class="module-switch-list">
-          <li v-for="module in MODULE_REGISTRY" :key="module.id" class="module-switch-row">
-            <span class="module-switch-text">
-              <strong :id="`module-switch-label-${module.id}`">{{ t(module.labelKey) }}</strong>
-              <small :id="`module-switch-desc-${module.id}`">{{ t(`settings.moduleDesc.${module.id}`) }}</small>
-            </span>
-            <button
-              type="button"
-              role="switch"
-              :aria-checked="moduleVisibilityDraft[module.id]"
-              :aria-labelledby="`module-switch-label-${module.id}`"
-              :aria-describedby="`module-switch-desc-${module.id}`"
-              class="module-switch"
-              :class="{ on: moduleVisibilityDraft[module.id] }"
-              @click="toggleModule(module.id)"
-            ><span class="module-switch-knob" aria-hidden="true"></span></button>
-          </li>
-        </ul>
-        <div class="settings-module-reset">
-          <button type="button" @click="resetModules">{{ t("settings.modulesReset") }}</button>
-        </div>
-
-        <!--
-          GitHub username (decision D2): always rendered and reachable, with a
-          hint that explains the enabling step while the module is off. The
-          inline error mirrors the backend's username grammar; the backend
-          re-validates inside its transaction.
-        -->
-        <label ref="githubRow" class="settings-row">
-          <span>
-            <strong>{{ t("settings.githubUsername") }}</strong>
-            <small>{{ githubUsernameHint }}</small>
-          </span>
-          <input
-            ref="githubInput"
-            v-model="githubUsername"
-            type="text"
-            :placeholder="t('settings.githubUsernamePlaceholder')"
-            autocomplete="off"
-            spellcheck="false"
-          />
-        </label>
-        <p v-if="githubUsernameError" class="settings-error" role="alert">{{ githubUsernameError }}</p>
-
-        <div class="settings-section-heading"><strong>{{ t("quickLinks.heading") }}</strong></div>
-        <section class="quick-links-settings" :aria-label="t('quickLinks.heading')">
-          <p v-if="!quickLinks.length" class="quick-links-empty">{{ t("quickLinks.empty") }}</p>
-          <ul v-else class="quick-links-rows">
-            <li v-for="(link, index) in quickLinks" :key="link.id" class="quick-link-row">
-              <span class="quick-link-fields">
-                <strong>{{ link.name }}</strong>
-                <small>{{ link.url }}</small>
-              </span>
-              <span class="quick-link-actions">
-                <button
-                  type="button"
-                  :disabled="index === 0"
-                  :title="t('quickLinks.moveUp')"
-                  :aria-label="t('quickLinks.moveUpAriaLabel', { name: link.name })"
-                  @click="moveLink(quickLinks, link.id, -1)"
-                >↑</button>
-                <button
-                  type="button"
-                  :disabled="index === quickLinks.length - 1"
-                  :title="t('quickLinks.moveDown')"
-                  :aria-label="t('quickLinks.moveDownAriaLabel', { name: link.name })"
-                  @click="moveLink(quickLinks, link.id, 1)"
-                >↓</button>
-                <button
-                  type="button"
-                  :aria-label="t('quickLinks.editAriaLabel', { name: link.name })"
-                  @click="editLink(link)"
-                >{{ t("quickLinks.edit") }}</button>
-                <button
-                  type="button"
-                  :aria-label="t('quickLinks.deleteAriaLabel', { name: link.name })"
-                  @click="deleteLink(link.id)"
-                >{{ t("quickLinks.delete") }}</button>
-              </span>
-            </li>
-          </ul>
-
-          <!--
-            One inline editor for both Add and Edit: the same two fields and the same
-            validation, so there is no second code path to keep in step.
-          -->
-          <div v-if="editingLinkId !== null" class="quick-link-editor">
-            <label class="settings-row">
-              <span><strong>{{ t("quickLinks.name") }}</strong></span>
-              <input
-                v-model="draftName"
-                type="text"
-                :placeholder="t('quickLinks.namePlaceholder')"
-                @keydown.enter.prevent="commitEditor"
-              />
-            </label>
-            <label class="settings-row">
-              <span><strong>{{ t("quickLinks.url") }}</strong></span>
-              <input
-                v-model="draftUrl"
-                type="url"
-                :placeholder="t('quickLinks.urlPlaceholder')"
-                @keydown.enter.prevent="commitEditor"
-              />
-            </label>
-            <p v-if="quickLinkError" class="settings-error" role="alert">{{ quickLinkError }}</p>
-            <div class="quick-link-editor-actions">
-              <button type="button" @click="commitEditor">{{ t("quickLinks.save") }}</button>
-              <button type="button" @click="resetEditor">{{ t("quickLinks.cancel") }}</button>
-            </div>
-          </div>
-          <button v-else type="button" class="quick-link-add" @click="addLink">
-            {{ t("quickLinks.add") }}
-          </button>
-        </section>
+        <ModulesPanel
+          :module-visibility="moduleVisibilityDraft"
+          :github-username="githubUsername"
+          :quick-links="quickLinks"
+          :focus-github="focusGithub"
+          @toggle-module="toggleModule"
+          @reset-modules="resetModules"
+          @update-github-username="updateGithubUsername"
+          @add-link="addQuickLink"
+          @update-link="updateQuickLink"
+          @delete-link="deleteQuickLink"
+          @move-link="moveQuickLink"
+        />
       </section>
 
       <!-- ======================== Weather / 天气 ======================== -->

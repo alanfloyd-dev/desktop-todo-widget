@@ -3,6 +3,7 @@ import { en, zhHans } from "../../i18n/catalog";
 // Vite's `?raw` import for the Vue sources — the same pinning pattern as
 // `updateCheck.test.ts` and `moduleSection.contract.test.ts`.
 import settingsPanelVue from "../SettingsPanel.vue?raw";
+import modulesPanelVue from "./ModulesPanel.vue?raw";
 import appVue from "../../App.vue?raw";
 // The stylesheet has to be read as a file: Vitest's CSS stubbing intercepts
 // `.css?raw` and yields an empty string. `node:fs` resolves fine at runtime;
@@ -196,8 +197,10 @@ describe("module rows (S1-C 2.3)", () => {
     // The markup contract (D1) stays untouched: the template still renders
     // real switches for every registry module. The control is unique in the
     // template (one v-for'd button; the string also appears once in a comment).
-    expect(settingsPanelVue).toContain('role="switch"');
-    expect(settingsPanelVue.match(/:aria-checked="moduleVisibilityDraft\[module\.id\]"/g)?.length).toBe(1);
+    // S1-E3 moved the switch rows into ModulesPanel, which renders them from
+    // the visibility draft it receives as a prop.
+    expect(modulesPanelVue).toContain('role="switch"');
+    expect(modulesPanelVue.match(/:aria-checked="moduleVisibility\[module\.id\]"/g)?.length).toBe(1);
   });
 });
 
