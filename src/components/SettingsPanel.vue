@@ -5,10 +5,9 @@ import {
   APPEARANCE_MODES,
   DEFAULT_APPEARANCE,
   normalizeAvatarImage,
-  profileInitials,
   sampleImageLuminance,
 } from "../appearance";
-import { languageOptionLabel, normalizeLanguage, useI18n, type Language } from "../i18n";
+import { normalizeLanguage, useI18n, type Language } from "../i18n";
 import { moveLink, newLinkId } from "../modules/shortcuts/links";
 import {
   DEFAULT_MODULE_VISIBILITY,
@@ -40,6 +39,7 @@ import type {
   WeatherViewState,
 } from "../types";
 import AboutPanel from "./settings/AboutPanel.vue";
+import GeneralPanel from "./settings/GeneralPanel.vue";
 import ModulesPanel from "./settings/ModulesPanel.vue";
 import WeatherPanel from "./settings/WeatherPanel.vue";
 
@@ -331,13 +331,32 @@ const isDirty = computed(() =>
  * unsaved preview is reverted in `onBeforeUnmount`.
  */
 const language = ref<Language>(normalizeLanguage(props.settings.language));
-const effectiveLanguage = computed(() =>
-  languageOptionLabel(i18n.locale.value, t),
-);
 
 function selectLanguage(value: Language) {
   language.value = value;
   i18n.setLanguage(value);
+}
+
+/**
+ * --- General draft mutations (S1-E4) ----------------------------------------
+ *
+ * The General category's controls live in `GeneralPanel`, but the persisted
+ * fields are this panel's draft: the child reports each change back through
+ * events, and these handlers write the display name and the rollover time
+ * exactly as the inline controls always did. `selectLanguage` above stays the
+ * language mutation too — the preview side effect (`setLanguage` on the app's
+ * one i18n instance) and the `onBeforeUnmount` rollback read the same flag
+ * and the same refs as before, so the child's event cannot fork them. The
+ * avatar actions route to `chooseAsset('avatar')`/`removeAvatar` below, whose
+ * native commands and provisional-asset lifecycle were never inline template
+ * state.
+ */
+function updateDisplayName(value: string) {
+  displayName.value = value;
+}
+
+function updateDayRollover(value: string) {
+  dayRollover.value = value;
 }
 
 /**
@@ -415,7 +434,9 @@ async function discard(assetId: string) {
  *   it is scaled to a whole window.
  *
  * A refusal (too large to read, unsupported format, undecodable image) is reported
- * in the row that owns the control.
+ * in the row that owns the control. For the avatar, a replacement is adopted
+ * before the provisional it supersedes is released (R-E4-01), so a cancelled or
+ * failed pick always leaves the current avatar usable and tracked.
  */
 async function chooseAsset(kind: "background" | "avatar") {
   assetError.value = null;
@@ -424,14 +445,6 @@ async function chooseAsset(kind: "background" | "avatar") {
     return;
   }
   try {
-    const previous = kind === "avatar"
-      ? avatarAssetId.value
-      : appearanceSettings.value.imageAssetId;
-    if (previous && provisionalAssets.has(previous)) {
-      provisionalAssets.delete(previous);
-      void discard(previous);
-    }
-
     if (kind === "avatar") {
       const picked = await invoke<AssetPayload | null>("choose_local_asset", { kind, persist: false });
       if (!picked?.dataUrl) return;
@@ -441,13 +454,32 @@ async function chooseAsset(kind: "background" | "avatar") {
         assetError.value = { kind, message: t("settings.error.imageUnreadable") };
         return;
       }
+      // Adopt the replacement before releasing the provisional it supersedes
+      // (R-E4-01): a cancelled, failed or rejected pick returns above with the
+      // current avatar — and its provisional tracking — untouched, so Save can
+      // never persist a reference whose file was already discarded. `previous`
+      // is snapshotted from the draft here, after the picker returns, because
+      // that is exactly the value this adoption replaces.
+      const previous = avatarAssetId.value;
       provisionalAssets.add(stored.assetId);
       avatarAssetId.value = stored.assetId;
       avatarPreviewUrl.value = stored.dataUrl;
       avatarPreviewAvailable.value = true;
+      if (previous && previous !== stored.assetId && provisionalAssets.has(previous)) {
+        provisionalAssets.delete(previous);
+        void discard(previous);
+      }
       return;
     }
 
+    // The background keeps its established release-early sequence (R-E4-01
+    // covers the avatar only): the superseded provisional is released before
+    // the picker opens, exactly as before the fix.
+    const previous = appearanceSettings.value.imageAssetId;
+    if (previous && provisionalAssets.has(previous)) {
+      provisionalAssets.delete(previous);
+      void discard(previous);
+    }
     const selected = await invoke<AssetPayload | null>("choose_local_asset", { kind });
     if (!selected?.assetId || !selected.dataUrl) return;
     provisionalAssets.add(selected.assetId);
@@ -731,53 +763,33 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
         role="tabpanel"
         aria-labelledby="settings-tab-general"
       >
-        <div class="settings-row">
-          <span>
-            <strong>{{ t("settings.language.label") }}</strong>
-            <small>
-              {{ t("settings.language.hint") }}<template v-if="language === 'system'"> · {{ t("settings.language.effective", { language: effectiveLanguage }) }}</template>
-              · {{ t("settings.language.restartHint") }}
-            </small>
-          </span>
-          <div class="appearance-options" role="group" :aria-label="t('settings.language.label')">
-            <button
-              v-for="option in (['system', 'en', 'zh-Hans'] as const)"
-              :key="option"
-              type="button"
-              :class="{ active: language === option }"
-              :aria-pressed="language === option"
-              @click="selectLanguage(option)"
-            >
-              {{ languageOptionLabel(option, t) }}
-            </button>
-          </div>
-        </div>
-        <label class="settings-row">
-          <span><strong>{{ t("settings.displayName") }}</strong><small>{{ t("settings.displayNameHint") }}</small></span>
-          <input v-model="displayName" type="text" :placeholder="t('settings.displayNamePlaceholder')" />
-        </label>
-        <div class="settings-row avatar-settings-row">
-          <span><strong>{{ t("settings.avatar") }}</strong><small>{{ t("settings.avatarHint") }}</small></span>
-          <div class="avatar-settings-control">
-            <span class="settings-avatar-preview" :aria-label="t('settings.avatarAriaLabel')">
-              <img v-if="avatarPreviewAvailable" :src="avatarPreviewUrl" alt="" />
-              <span v-else>{{ profileInitials(displayName) }}</span>
-            </span>
-            <button type="button" @click="chooseAsset('avatar')">{{ t("settings.chooseImage") }}</button>
-            <button type="button" :disabled="!avatarAssetId" @click="removeAvatar">{{ t("settings.removeAvatar") }}</button>
-            <!--
-              The failure is shown here, under the button that caused it, instead of
-              at the bottom of the panel: the picker is a native dialog whose
-              rejections are otherwise invisible, and "the click did nothing" is the
-              worst possible answer.
-            -->
+        <!--
+          The General category's controls (S1-E4). The child owns the
+          presentation; the persisted fields stay drafts of this panel — the
+          child reports each change back through events, and the dirty
+          snapshot and Save below read the same refs they always read. The
+          language preview and the avatar picker's native side effects stay
+          here, and the avatar row's error renders through the avatarError
+          slot because `assetError` is this panel's state (shared with the
+          background picker, which clears it).
+        -->
+        <GeneralPanel
+          :language="language"
+          :display-name="displayName"
+          :day-rollover="dayRollover"
+          :avatar-asset-id="avatarAssetId"
+          :avatar-preview-url="avatarPreviewUrl"
+          :avatar-preview-available="avatarPreviewAvailable"
+          @select-language="selectLanguage"
+          @update-display-name="updateDisplayName"
+          @update-day-rollover="updateDayRollover"
+          @choose-avatar="chooseAsset('avatar')"
+          @remove-avatar="removeAvatar"
+        >
+          <template #avatarError>
             <small v-if="assetError?.kind === 'avatar'" class="settings-error asset-error" role="status">{{ assetError.message }}</small>
-          </div>
-        </div>
-        <label class="settings-row">
-          <span><strong>{{ t("settings.dayRollover") }}</strong><small>{{ t("settings.dayRolloverHint") }}</small></span>
-          <input v-model="dayRollover" type="time" />
-        </label>
+          </template>
+        </GeneralPanel>
       </section>
 
       <!-- ======================== Modules / 模块 ======================== -->
