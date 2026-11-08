@@ -653,10 +653,14 @@ describe("R-E4-01 avatar provisional lifecycle (source pins)", () => {
     );
   });
 
-  it("the background keeps its established release-early sequence", () => {
-    // R-E4-01 is scoped to the avatar; the background's sequence is unchanged.
+  it("the background adopts its replacement before releasing the superseded provisional (E4.1)", () => {
+    // E4 scoped R-E4-01 to the avatar; E4.1 gave the background the same
+    // ordering. The block is pinned whole: snapshot after the pick returns,
+    // full adoption (draft, type, luminance, preview), then the release —
+    // the release-early form that dangled the draft on a cancelled pick must
+    // not come back.
     expect(settingsPanelVue).toMatch(
-      /const previous = appearanceSettings\.value\.imageAssetId;\s*if \(previous && provisionalAssets\.has\(previous\)\) \{\s*provisionalAssets\.delete\(previous\);\s*void discard\(previous\);\s*\}\s*const selected = await invoke<AssetPayload \| null>\("choose_local_asset", \{ kind \}\);/,
+      /const previous = appearanceSettings\.value\.imageAssetId;\s*provisionalAssets\.add\(selected\.assetId\);\s*appearanceSettings\.value\.imageAssetId = selected\.assetId;\s*appearanceSettings\.value\.backgroundType = "image";\s*appearanceSettings\.value\.sampledLuminance = await sampleImageLuminance\(selected\.dataUrl\);\s*pickedImage\.value = \{ mode: appearanceMode\.value, available: selected\.available \};\s*imagePreviewAvailable\.value = selected\.available;\s*if \(previous && previous !== selected\.assetId && provisionalAssets\.has\(previous\)\) \{\s*provisionalAssets\.delete\(previous\);\s*void discard\(previous\);\s*\}/,
     );
   });
 

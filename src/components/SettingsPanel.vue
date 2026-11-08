@@ -434,9 +434,10 @@ async function discard(assetId: string) {
  *   it is scaled to a whole window.
  *
  * A refusal (too large to read, unsupported format, undecodable image) is reported
- * in the row that owns the control. For the avatar, a replacement is adopted
- * before the provisional it supersedes is released (R-E4-01), so a cancelled or
- * failed pick always leaves the current avatar usable and tracked.
+ * in the row that owns the control. For both kinds, a replacement is adopted
+ * before the provisional it supersedes is released (R-E4-01 for the avatar,
+ * E4.1 for the background), so a cancelled or failed pick always leaves the
+ * current asset usable and tracked.
  */
 async function chooseAsset(kind: "background" | "avatar") {
   assetError.value = null;
@@ -472,22 +473,27 @@ async function chooseAsset(kind: "background" | "avatar") {
       return;
     }
 
-    // The background keeps its established release-early sequence (R-E4-01
-    // covers the avatar only): the superseded provisional is released before
-    // the picker opens, exactly as before the fix.
-    const previous = appearanceSettings.value.imageAssetId;
-    if (previous && provisionalAssets.has(previous)) {
-      provisionalAssets.delete(previous);
-      void discard(previous);
-    }
     const selected = await invoke<AssetPayload | null>("choose_local_asset", { kind });
     if (!selected?.assetId || !selected.dataUrl) return;
+    // Adopt the replacement before releasing the provisional it supersedes
+    // (the background twin of R-E4-01): a cancelled, failed or malformed pick
+    // returns above with the current background — and its provisional tracking
+    // — untouched, so Save can never persist a reference whose file was
+    // already discarded. `previous` is snapshotted from the draft here, after
+    // the picker returns, because that is exactly the value this adoption
+    // replaces. Nothing between the adoption and the release can reject:
+    // `sampleImageLuminance` reports failure as `null`, never as a throw.
+    const previous = appearanceSettings.value.imageAssetId;
     provisionalAssets.add(selected.assetId);
     appearanceSettings.value.imageAssetId = selected.assetId;
     appearanceSettings.value.backgroundType = "image";
     appearanceSettings.value.sampledLuminance = await sampleImageLuminance(selected.dataUrl);
     pickedImage.value = { mode: appearanceMode.value, available: selected.available };
     imagePreviewAvailable.value = selected.available;
+    if (previous && previous !== selected.assetId && provisionalAssets.has(previous)) {
+      provisionalAssets.delete(previous);
+      void discard(previous);
+    }
   } catch (reason) {
     assetError.value = { kind, message: imageErrorLabel(reason) };
   }
