@@ -29,7 +29,7 @@ desktop-todo-release-signer = { path = "../release-signer" }
 desktop-todo-maintenance = { path = "../maintenance" }
 # Deterministic package writing (same crate/version/features the shared
 # validator accepts: Stored and Deflate only).
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # Streaming SHA-256 for package/EXE fact hashing (the same crate the
 # protocol core and the signer pin).
 sha2 = "0.10"

@@ -38,7 +38,7 @@ desktop-todo-update-core = { path = "../update-core" }
 # Package archive validation (moved here in Phase 2C-B so the helper
 # re-validates the staged package through the single shared implementation).
 # No network, Tauri or SQLite dependency is introduced.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # Fixture-only signing/encoding for handoff tests. These crates are already
 # linked into every binary through desktop-todo-update-core (same versions,
 # zero new crates in the graph); no production code path in this crate uses

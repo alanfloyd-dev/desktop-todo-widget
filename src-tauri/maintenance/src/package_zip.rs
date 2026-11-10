@@ -284,7 +284,16 @@ pub fn validate_archive<R: std::io::Read + std::io::Seek>(
             .map_err(|e| ArchiveError::Malformed {
                 detail: e.to_string(),
             })?;
-        let name = entry.name().to_string();
+        // zip 9: name() decodes the raw entry name (UTF-8 or CP437) and
+        // returns Result — an undecodable name is malformed archive metadata
+        // (it can never equal an allowlist entry), so it lands in the same
+        // Malformed taxonomy as every other structural failure above.
+        let name = entry
+            .name()
+            .map_err(|e| ArchiveError::Malformed {
+                detail: e.to_string(),
+            })?
+            .into_owned();
         validate_entry(
             EntryFacts {
                 name: &name,
