@@ -268,6 +268,22 @@ pub fn validate_archive<R: std::io::Read + std::io::Seek>(
     let mut archive = zip::ZipArchive::new(reader).map_err(|e| ArchiveError::Malformed {
         detail: e.to_string(),
     })?;
+    // zip 9 folds byte-identical central-directory names into one entry (the
+    // IndexMap keeps the first position and the last occurrence's metadata),
+    // so the per-entry scan below can never observe an exact duplicate — and
+    // the folded view also invalidates archive.len()-based entry counting.
+    // The crate exposes the raw central-directory count only through this
+    // predicate: `true` means at least one name appeared twice byte-for-byte,
+    // which hides a first occurrence whose metadata is never validated.
+    // Case-insensitive aliases are unaffected: distinct raw bytes do not
+    // fold, and the seen_lower scan in validate_entry still rejects them.
+    if archive.has_duplicate_names() {
+        return Err(ArchiveError::DuplicateEntry {
+            // zip 9 does not expose *which* name was duplicated; the field
+            // stays diagnostic-only (Debug rendering).
+            name: "<central-directory duplicate>".to_string(),
+        });
+    }
     if archive.len() > ZIP_MAX_ENTRIES {
         return Err(ArchiveError::TooManyEntries {
             count: archive.len(),

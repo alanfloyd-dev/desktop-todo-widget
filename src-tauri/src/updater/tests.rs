@@ -2238,6 +2238,420 @@ fn archive_rule_violations_are_typed_and_fail_closed() {
     }
 }
 
+// =================================================== Task D.1: raw adversarial ZIP fixtures
+//
+// zip 9's parser folds byte-identical central-directory names into one
+// IndexMap entry (first position, last metadata wins), and `ZipWriter`
+// refuses duplicate names outright — so writer-built fixtures cannot express
+// the exact-duplicate attack at all. These fixtures are hand-assembled ZIPs
+// (local headers, central directory, EOCD, verbatim) with no writer in the
+// loop: duplicate names, arbitrary metadata and link-mode attributes all
+// survive exactly as written.
+
+/// One hand-assembled entry: verbatim raw name bytes, stored payload, plus
+/// made-by/external-attributes for link-style metadata.
+struct RawZipEntry<'a> {
+    name: &'a [u8],
+    data: &'a [u8],
+    made_by: u16,
+    external_attributes: u32,
+}
+
+impl<'a> RawZipEntry<'a> {
+    /// A plain stored entry (method 0, DOS made-by, no attributes).
+    fn stored(name: &'a [u8], data: &'a [u8]) -> Self {
+        Self {
+            name,
+            data,
+            made_by: 0,
+            external_attributes: 0,
+        }
+    }
+}
+
+/// IEEE CRC-32 (polynomial 0xEDB88320), bitwise — fixtures are tiny and the
+/// suite must not grow a dependency for them.
+fn fixture_crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+/// Hand-assemble a ZIP verbatim: one local file header + payload per entry,
+/// then the central directory (one header per entry, duplicates included)
+/// and the EOCD. No normalization of any kind.
+fn raw_zip_bytes(entries: &[RawZipEntry<'_>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    for entry in entries {
+        let offset = out.len() as u32;
+        let crc = fixture_crc32(entry.data);
+        let len = entry.data.len() as u32;
+        // Local file header.
+        out.extend_from_slice(&0x0403_4B50u32.to_le_bytes());
+        out.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        out.extend_from_slice(&0u16.to_le_bytes()); // flags
+        out.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+        out.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        out.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        out.extend_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&len.to_le_bytes()); // compressed
+        out.extend_from_slice(&len.to_le_bytes()); // uncompressed
+        out.extend_from_slice(&(entry.name.len() as u16).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // extra length
+        out.extend_from_slice(entry.name);
+        out.extend_from_slice(entry.data);
+        // Central directory header.
+        central.extend_from_slice(&0x0201_4B50u32.to_le_bytes());
+        central.extend_from_slice(&entry.made_by.to_le_bytes());
+        central.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        central.extend_from_slice(&0u16.to_le_bytes()); // flags
+        central.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+        central.extend_from_slice(&0u16.to_le_bytes()); // mod time
+        central.extend_from_slice(&0u16.to_le_bytes()); // mod date
+        central.extend_from_slice(&crc.to_le_bytes());
+        central.extend_from_slice(&len.to_le_bytes());
+        central.extend_from_slice(&len.to_le_bytes());
+        central.extend_from_slice(&(entry.name.len() as u16).to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes()); // extra
+        central.extend_from_slice(&0u16.to_le_bytes()); // comment
+        central.extend_from_slice(&0u16.to_le_bytes()); // disk start
+        central.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+        central.extend_from_slice(&entry.external_attributes.to_le_bytes());
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(entry.name);
+    }
+    let cd_offset = out.len() as u32;
+    out.extend_from_slice(&central);
+    let cd_size = central.len() as u32;
+    // End of central directory.
+    out.extend_from_slice(&0x0605_4B50u32.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes()); // this disk
+    out.extend_from_slice(&0u16.to_le_bytes()); // cd disk
+    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    out.extend_from_slice(&cd_size.to_le_bytes());
+    out.extend_from_slice(&cd_offset.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes()); // comment
+    out
+}
+
+/// The canonical nine allowlist names as stored entries over one payload.
+fn raw_nine<'a>(data: &'a [u8]) -> Vec<RawZipEntry<'a>> {
+    [
+        "desktop-todo-widget.exe",
+        "desktop-todo-maintenance.exe",
+        "install.ps1",
+        "uninstall.ps1",
+        "README.md",
+        "README_ZH.md",
+        "LICENSE",
+        "LICENSE_ZH.md",
+        "THIRD_PARTY_NOTICES.md",
+    ]
+    .iter()
+    .map(|name| RawZipEntry::stored(name.as_bytes(), data))
+    .collect()
+}
+
+/// A byte-identical duplicate of an allowlist name is invisible to the
+/// folded per-entry scan (zip 9 keeps the first position and the last
+/// occurrence's metadata, and this archive's unique-name set is exactly the
+/// allowlist), so only the duplicate-name rule can reject it. Regression for
+/// the zip 9.5.0 upgrade: `ArchiveError::DuplicateEntry` must stay reachable
+/// for exact duplicates, not just case aliases.
+#[test]
+fn byte_identical_duplicate_entry_is_rejected() {
+    let readme = b"readme".to_vec();
+    let mut entries = raw_nine(&readme);
+    // A second "install.ps1" at a different position: identical raw name
+    // bytes, identical payload.
+    entries.insert(4, RawZipEntry::stored(b"install.ps1", &readme));
+    let error =
+        desktop_todo_maintenance::package_zip::validate_archive(std::io::Cursor::new(
+            raw_zip_bytes(&entries),
+        ))
+        .expect_err("byte-identical duplicate entry must be rejected");
+    assert!(
+        matches!(error, ArchiveError::DuplicateEntry { .. }),
+        "unexpected error {error:?}"
+    );
+}
+
+/// The duplicate may also straddle the central directory: the same name
+/// opening and closing it folds the same way.
+#[test]
+fn duplicate_entry_at_first_and_last_position_is_rejected() {
+    let readme = b"readme".to_vec();
+    let mut entries = raw_nine(&readme);
+    entries.push(RawZipEntry::stored(b"desktop-todo-widget.exe", &readme));
+    let error =
+        desktop_todo_maintenance::package_zip::validate_archive(std::io::Cursor::new(
+            raw_zip_bytes(&entries),
+        ))
+        .expect_err("straddling duplicate entry must be rejected");
+    assert!(
+        matches!(error, ArchiveError::DuplicateEntry { .. }),
+        "unexpected error {error:?}"
+    );
+}
+
+/// The strongest adversarial shape: a duplicate managed-executable entry
+/// whose second copy is byte-identical to the first. The folded entry still
+/// matches the signed manifest's size and SHA-256, the unique-name set is
+/// exactly the allowlist, and the payload hashes correctly at package level
+/// — the only defect is the duplicate central-directory entry itself. The
+/// package must be quarantined before any extraction.
+#[test]
+fn duplicate_managed_executable_entry_is_quarantined() {
+    let exe1 = exe_payload(1);
+    let exe2 = exe_payload(2);
+    let readme = b"readme".to_vec();
+    let entries = [
+        RawZipEntry::stored(b"desktop-todo-widget.exe", &exe1),
+        // Exact duplicate of the managed executable: identical bytes, so the
+        // folded view is indistinguishable from a well-formed package.
+        RawZipEntry::stored(b"desktop-todo-widget.exe", &exe1),
+        RawZipEntry::stored(b"desktop-todo-maintenance.exe", &exe2),
+        RawZipEntry::stored(b"install.ps1", &readme),
+        RawZipEntry::stored(b"uninstall.ps1", &readme),
+        RawZipEntry::stored(b"README.md", &readme),
+        RawZipEntry::stored(b"README_ZH.md", &readme),
+        RawZipEntry::stored(b"LICENSE", &readme),
+        RawZipEntry::stored(b"LICENSE_ZH.md", &readme),
+        RawZipEntry::stored(b"THIRD_PARTY_NOTICES.md", &readme),
+    ];
+    let package = raw_zip_bytes(&entries);
+    let manifest = pipeline_manifest("1.4.0", &package, &exe1, &exe2);
+    let signature = sign(&signing_k1(), manifest.as_bytes());
+    let envelope = envelope_json(&signing_k1(), &signature).into_bytes();
+    let package_bytes = package.clone();
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/github/releases") {
+            let release = release_json(
+                1,
+                "v1.4.0",
+                false,
+                false,
+                &[
+                    (
+                        ENVELOPE_ASSET_NAME,
+                        &format!("http://{addr}/download/{ENVELOPE_ASSET_NAME}"),
+                    ),
+                    (
+                        MANIFEST_ASSET_NAME,
+                        &format!("http://{addr}/download/{MANIFEST_ASSET_NAME}"),
+                    ),
+                    (
+                        "desktop-todo-widget-v1.4.0-windows-x64.zip",
+                        &format!(
+                            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+                        ),
+                    ),
+                ],
+            );
+            return http_ok(format!("[{release}]").as_bytes());
+        }
+        if target.ends_with(ENVELOPE_ASSET_NAME) {
+            return http_ok(&envelope);
+        }
+        if target.ends_with(MANIFEST_ASSET_NAME) {
+            return http_ok(manifest.as_bytes());
+        }
+        if target.ends_with(".zip") {
+            return http_ok(&package_bytes);
+        }
+        not_found()
+    });
+    let fixture = fixture(addr);
+    let (target, envelope_bytes, _) = match run(&fixture, ReleaseSource::GitHub) {
+        DiscoveryOutcome::TargetFound {
+            target,
+            envelope_bytes,
+            ..
+        } => (target, envelope_bytes, None::<String>),
+        other => panic!("expected TargetFound, got {other:?}"),
+    };
+    let root = temp_root("duplicate-managed-exe");
+    let mut session = persist_trusted_target(
+        &root,
+        *target,
+        &envelope_bytes,
+        Some(&format!(
+            "http://{addr}/download/desktop-todo-widget-v1.4.0-windows-x64.zip"
+        )),
+        "GitHub",
+        &fixture.installed,
+    )
+    .expect("persist trusted target");
+    let error = acquire_and_stage(&mut session, &fixture.client)
+        .expect_err("duplicate-entry package must be quarantined");
+    assert!(
+        matches!(
+            error,
+            AcquisitionError::Archive(ArchiveError::DuplicateEntry { .. })
+        ),
+        "unexpected error {error:?}"
+    );
+    assert_eq!(session.record.state, MilestoneState::TrustedTargetPersisted);
+    assert!(!session.dir.join(STAGED_DIR).exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Case-insensitive aliasing keeps working against raw fixtures: distinct
+/// raw bytes do not fold in zip 9, so both entries reach the per-entry scan
+/// and the seen_lower rule rejects them.
+#[test]
+fn raw_case_alias_duplicate_is_rejected() {
+    let readme = b"readme".to_vec();
+    let mut entries = raw_nine(&readme);
+    entries.push(RawZipEntry::stored(b"Install.ps1", &readme));
+    let error =
+        desktop_todo_maintenance::package_zip::validate_archive(std::io::Cursor::new(
+            raw_zip_bytes(&entries),
+        ))
+        .expect_err("case-alias duplicate must be rejected");
+    assert!(
+        matches!(error, ArchiveError::DuplicateEntry { .. }),
+        "unexpected error {error:?}"
+    );
+}
+
+/// Symlink rejection had no fixture (the writer cannot easily emit Unix
+/// link-mode attributes): an S_IFLNK-mode allowlist entry must be rejected
+/// as EntryTypeUnsafe regardless of its name or payload.
+#[test]
+fn symlink_mode_entry_is_rejected() {
+    let readme = b"readme".to_vec();
+    let mut entries = raw_nine(&readme);
+    entries[2] = RawZipEntry {
+        name: b"install.ps1",
+        data: &readme,
+        made_by: 0x0314,                    // made by Unix, spec 2.0
+        external_attributes: 0o120777 << 16, // S_IFLNK | rwxrwxrwx
+    };
+    let error =
+        desktop_todo_maintenance::package_zip::validate_archive(std::io::Cursor::new(
+            raw_zip_bytes(&entries),
+        ))
+        .expect_err("symlink-mode entry must be rejected");
+    assert!(
+        matches!(error, ArchiveError::EntryTypeUnsafe { .. }),
+        "unexpected error {error:?}"
+    );
+}
+
+/// Duplicate detection outranks the allowlist comparison: the folded view
+/// invalidates entry counting and iteration semantics, so the structural
+/// duplicate is reported rather than the allowlist mismatch it hides behind.
+#[test]
+fn duplicate_entries_outrank_allowlist_mismatch() {
+    let readme = b"readme".to_vec();
+    let mut entries = raw_nine(&readme);
+    // Two entries outside the allowlist under the same name.
+    entries.push(RawZipEntry::stored(b"evil.txt", &readme));
+    entries.push(RawZipEntry::stored(b"evil.txt", &readme));
+    let error =
+        desktop_todo_maintenance::package_zip::validate_archive(std::io::Cursor::new(
+            raw_zip_bytes(&entries),
+        ))
+        .expect_err("duplicate-plus-unexpected archive must be rejected");
+    assert!(
+        matches!(error, ArchiveError::DuplicateEntry { .. }),
+        "unexpected error {error:?}"
+    );
+}
+
+/// Duplicate detection also outranks the entry-count check: the two rules are
+/// simultaneously observable only for an archive that both exceeds the entry
+/// cap and carries a byte-identical duplicate. 66 raw central-directory
+/// records over 65 distinct names make archive.len() = 65 > ZIP_MAX_ENTRIES
+/// while the fold is present, so the structural duplicate must be reported
+/// rather than the count violation the folded count hides behind.
+#[test]
+fn duplicate_entries_outrank_the_entry_count_cap() {
+    let readme = b"readme".to_vec();
+    let mut entries = raw_nine(&readme);
+    // 56 more distinct names: 65 distinct raw names, one record each.
+    let fillers: Vec<String> = (0..56).map(|i| format!("filler{i:02}")).collect();
+    for name in &fillers {
+        entries.push(RawZipEntry::stored(name.as_bytes(), &readme));
+    }
+    // A byte-identical duplicate: 66 raw records, archive.len() = 65 > 64.
+    entries.push(RawZipEntry::stored(b"install.ps1", &readme));
+    assert_eq!(entries.len(), 66);
+    let error =
+        desktop_todo_maintenance::package_zip::validate_archive(std::io::Cursor::new(
+            raw_zip_bytes(&entries),
+        ))
+        .expect_err("duplicate-plus-over-count archive must be rejected as a duplicate");
+    assert!(
+        matches!(error, ArchiveError::DuplicateEntry { .. }),
+        "unexpected error {error:?}"
+    );
+}
+
+/// Control: the raw builder produces a well-formed archive the parser
+/// accepts — validation passes and the two managed executables stage with
+/// matching facts. Guards the fixture grammar itself against false positives
+/// (a builder defect would surface here before any adversarial case).
+#[test]
+fn raw_valid_package_validates_and_stages() {
+    let exe1 = exe_payload(1);
+    let exe2 = exe_payload(2);
+    let readme = b"readme".to_vec();
+    let entries = [
+        RawZipEntry::stored(b"desktop-todo-widget.exe", &exe1),
+        RawZipEntry::stored(b"desktop-todo-maintenance.exe", &exe2),
+        RawZipEntry::stored(b"install.ps1", &readme),
+        RawZipEntry::stored(b"uninstall.ps1", &readme),
+        RawZipEntry::stored(b"README.md", &readme),
+        RawZipEntry::stored(b"README_ZH.md", &readme),
+        RawZipEntry::stored(b"LICENSE", &readme),
+        RawZipEntry::stored(b"LICENSE_ZH.md", &readme),
+        RawZipEntry::stored(b"THIRD_PARTY_NOTICES.md", &readme),
+    ];
+    let archive =
+        desktop_todo_maintenance::package_zip::validate_archive(std::io::Cursor::new(
+            raw_zip_bytes(&entries),
+        ))
+        .expect("raw well-formed package must validate");
+
+    let staged_dir = temp_root("raw-valid-staging").join("staged");
+    let expected = vec![
+        (
+            "mainExecutable".to_string(),
+            "desktop-todo-widget.exe".to_string(),
+            exe1.len() as u64,
+            sha_of(&exe1),
+        ),
+        (
+            "maintenanceHelper".to_string(),
+            "desktop-todo-maintenance.exe".to_string(),
+            exe2.len() as u64,
+            sha_of(&exe2),
+        ),
+    ];
+    let staged = desktop_todo_maintenance::package_zip::extract_managed_executables(
+        archive,
+        &staged_dir,
+        &expected,
+    )
+    .expect("managed executables must stage from a raw well-formed package");
+    assert_eq!(staged.len(), 2);
+    assert_eq!(staged[0].identity, "mainExecutable");
+    assert_eq!(staged[0].sha256_hex, sha_of(&exe1));
+    assert_eq!(staged[1].identity, "maintenanceHelper");
+    assert_eq!(staged[1].sha256_hex, sha_of(&exe2));
+    let _ = std::fs::remove_dir_all(staged_dir.parent().expect("staging parent"));
+}
+
 /// The two managed executables are cross-checked against the signed
 /// installFiles facts after extraction: package hash correctness alone
 /// never substitutes for per-file verification.
