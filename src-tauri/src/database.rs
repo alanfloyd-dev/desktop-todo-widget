@@ -1362,4 +1362,31 @@ mod tests {
         drop(future_connection);
         remove_db(&path);
     }
+
+    /// The compiled engine must carry the SQLite 3.54.0 fix for the WAL
+    /// page-size page-cache disclosure (RUSTSEC-2026-0459 /
+    /// CVE-2026-119375). This reads the version of the SQLite actually
+    /// linked into this binary — `rusqlite::version()` forwards the bundled
+    /// amalgamation's `SQLITE_VERSION` — not the package metadata, so a
+    /// dependency regression that quietly resolves back to an affected
+    /// engine fails here. A floor, not an equality pin: a future dependency
+    /// bump to a newer secure engine must not have to touch this test.
+    #[test]
+    fn compiled_sqlite_engine_meets_the_secure_minimum() {
+        let version = rusqlite::version();
+        let mut parts = version.split('.');
+        let mut parse = |label: &str| -> u32 {
+            parts
+                .next()
+                .and_then(|part| part.parse().ok())
+                .unwrap_or_else(|| panic!("SQLite version {version} has no {label} component"))
+        };
+        let major = parse("major");
+        let minor = parse("minor");
+        assert!(
+            (major, minor) >= (3, 54),
+            "bundled SQLite {version} is below the 3.54.0 security floor \
+             (RUSTSEC-2026-0459: WAL page-size page-cache disclosure)"
+        );
+    }
 }
