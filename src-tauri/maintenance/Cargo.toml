@@ -12,6 +12,16 @@ name = "desktop_todo_maintenance"
 name = "desktop-todo-maintenance"
 path = "src/main.rs"
 
+# Lockfile policy: `Cargo.lock` next to this manifest is intentionally
+# tracked. The canonical product build resolves through the parent
+# `src-tauri/Cargo.lock`, but this crate is also compiled standalone for its
+# own test suite (`cargo test --manifest-path src-tauri/maintenance/Cargo.toml`),
+# and that standalone resolution must stay pinned for repeatable runs. When
+# this crate's or `update-core`'s dependencies change, re-sync by running the
+# standalone suite once and committing the regenerated lock — a stale lock is
+# otherwise silently repaired by cargo on every invocation, which is the
+# drift this policy avoids. The parent resolution never reads this file.
+
 [features]
 # Explicitly opt-in; production binaries cannot redirect maintenance paths.
 qa = []

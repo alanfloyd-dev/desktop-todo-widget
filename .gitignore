@@ -56,3 +56,9 @@ __pycache__/
 # manifest; a nested lock/target here would fork the resolve graph.
 /src-tauri/release-signer/target/
 /src-tauri/release-signer/Cargo.lock
+
+# Release-pipeline operator tool: same policy as the release-signer —
+# built and tested through the canonical parent manifest; standalone
+# verification runs may create a local lock here, which stays untracked.
+/src-tauri/release-pipeline/target/
+/src-tauri/release-pipeline/Cargo.lock
