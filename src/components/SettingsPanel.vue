@@ -2,7 +2,6 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  APPEARANCE_MODES,
   DEFAULT_APPEARANCE,
   normalizeAvatarImage,
   sampleImageLuminance,
@@ -31,14 +30,19 @@ import type {
   AppearanceProfiles,
   AppearanceSettings,
   AssetPayload,
+  BackgroundType,
+  ImageFit,
+  ImagePosition,
   LocationCandidate,
   ProductSettings,
   ProductWindowMode,
   QuickLink,
   TemperatureUnit,
+  TextContrast,
   WeatherViewState,
 } from "../types";
 import AboutPanel from "./settings/AboutPanel.vue";
+import AppearancePanel from "./settings/AppearancePanel.vue";
 import GeneralPanel from "./settings/GeneralPanel.vue";
 import ModulesPanel from "./settings/ModulesPanel.vue";
 import WeatherPanel from "./settings/WeatherPanel.vue";
@@ -360,6 +364,78 @@ function updateDayRollover(value: string) {
 }
 
 /**
+ * --- Appearance draft mutations (S1-E5) --------------------------------------
+ *
+ * The Appearance category's controls live in `AppearancePanel`, but the
+ * persisted profiles are this panel's draft: the child reports each change
+ * back through events, and these handlers write the edited profile exactly as
+ * the inline controls always did. Which profile is being edited is this
+ * panel's UI state — selecting one never touches the mode the product runs
+ * in — and `resetAppearance` below (with the image-preview state it clears)
+ * stays the reset's handler. The dirty snapshot and Save read the same refs,
+ * so the ownership split cannot fork the draft.
+ */
+function selectAppearanceProfile(mode: ProductWindowMode) {
+  appearanceMode.value = mode;
+}
+
+function updateBackgroundType(value: BackgroundType) {
+  appearanceSettings.value.backgroundType = value;
+}
+
+function updateGlassTintColor(value: string) {
+  appearanceSettings.value.glassTintColor = value;
+}
+
+function updateGlassTintOpacity(value: number) {
+  appearanceSettings.value.glassTintOpacity = value;
+}
+
+function updateBlurPx(value: number) {
+  appearanceSettings.value.blurPx = value;
+}
+
+function updateSolidColor(value: string) {
+  appearanceSettings.value.solidColor = value;
+}
+
+function updateGradientStartColor(value: string) {
+  appearanceSettings.value.gradientStartColor = value;
+}
+
+function updateGradientEndColor(value: string) {
+  appearanceSettings.value.gradientEndColor = value;
+}
+
+function updateGradientAngle(value: number) {
+  appearanceSettings.value.gradientAngle = value;
+}
+
+function updateImageFit(value: ImageFit) {
+  appearanceSettings.value.imageFit = value;
+}
+
+function updateImagePosition(value: ImagePosition) {
+  appearanceSettings.value.imagePosition = value;
+}
+
+function updateBackgroundOpacity(value: number) {
+  appearanceSettings.value.backgroundOpacity = value;
+}
+
+function updateOverlayStrength(value: number) {
+  appearanceSettings.value.overlayStrength = value;
+}
+
+function updateTextContrast(value: TextContrast) {
+  appearanceSettings.value.textContrast = value;
+}
+
+function updateCustomTextColor(value: string) {
+  appearanceSettings.value.customTextColor = value;
+}
+
+/**
  * --- Save -------------------------------------------------------------------
  *
  * One save in flight at a time: the click sets `savePending`, which disables
@@ -635,130 +711,44 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
         aria-labelledby="settings-tab-appearance"
       >
         <!--
-          Which profile the controls below edit. This is Settings UI state only:
-          it never changes the window mode the product runs in, and it is not
-          persisted, so it reopens on the mode actually in use. The mode names
-          are the same ones the window menu uses.
+          The Appearance category's controls (S1-E5). The child owns the
+          presentation; the persisted profiles stay drafts of this panel —
+          the child reports each change back through events, and the dirty
+          snapshot and Save below read the same refs they always read. The
+          profile editor state (`appearanceMode`), the background image
+          picker's native side effects and the reset stay here, and the image
+          row's error renders through the backgroundError slot because
+          `assetError` is this panel's state (shared with the avatar picker,
+          which clears it) and the Rust source pin in `appearance.rs` keeps
+          the rendering expression in this file.
         -->
-        <div class="settings-row appearance-background-row">
-          <span>
-            <strong>{{ t("settings.appearanceFor") }}</strong>
-            <small>{{ t("settings.appearanceForHint") }}</small>
-          </span>
-          <div class="appearance-options" role="group" :aria-label="t('settings.appearanceForAriaLabel')">
-            <button
-              v-for="option in APPEARANCE_MODES"
-              :key="option"
-              type="button"
-              :class="{ active: appearanceMode === option }"
-              :aria-pressed="appearanceMode === option"
-              @click="appearanceMode = option"
-            >
-              {{ t(`menu.mode.${option}`) }}
-            </button>
-          </div>
-        </div>
-        <div class="settings-row appearance-background-row">
-          <span><strong>{{ t("settings.background") }}</strong><small>{{ t("settings.backgroundHint") }}</small></span>
-          <div class="appearance-options" role="group" :aria-label="t('settings.backgroundAriaLabel')">
-            <button
-              v-for="option in ['glass', 'solid', 'gradient', 'image', 'wallpaper'] as const"
-              :key="option"
-              type="button"
-              :class="{ active: appearanceSettings.backgroundType === option }"
-              @click="appearanceSettings.backgroundType = option"
-            >
-              {{ t(`settings.backgroundType.${option}`) }}
-            </button>
-          </div>
-        </div>
-
-        <template v-if="appearanceSettings.backgroundType === 'glass'">
-          <label class="settings-row">
-            <span><strong>{{ t("settings.tint") }}</strong><small>{{ t("settings.tintHint") }}</small></span>
-            <div class="color-control"><input v-model="appearanceSettings.glassTintColor" type="color" /><code>{{ appearanceSettings.glassTintColor }}</code></div>
-          </label>
-          <label class="settings-row">
-            <span><strong>{{ t("settings.tintOpacity") }}</strong><small>{{ t("settings.tintOpacityHint") }}</small></span>
-            <div class="range-control"><input v-model.number="appearanceSettings.glassTintOpacity" type="range" min="0" max="1" step="0.01" /><output>{{ Math.round(appearanceSettings.glassTintOpacity * 100) }}%</output></div>
-          </label>
-          <label class="settings-row">
-            <span><strong>{{ t("settings.blur") }}</strong><small>{{ t("settings.blurHint") }}</small></span>
-            <div class="range-control"><input v-model.number="appearanceSettings.blurPx" type="range" min="0" max="24" step="1" /><output>{{ appearanceSettings.blurPx }}px</output></div>
-          </label>
-        </template>
-
-        <label v-if="appearanceSettings.backgroundType === 'solid'" class="settings-row">
-          <span><strong>{{ t("settings.color") }}</strong><small>{{ t("settings.colorHint") }}</small></span>
-          <div class="color-control"><input v-model="appearanceSettings.solidColor" type="color" /><code>{{ appearanceSettings.solidColor }}</code></div>
-        </label>
-
-        <template v-if="appearanceSettings.backgroundType === 'gradient'">
-          <label class="settings-row">
-            <span><strong>{{ t("settings.gradientStart") }}</strong><small>{{ t("settings.gradientStartHint") }}</small></span>
-            <div class="color-control"><input v-model="appearanceSettings.gradientStartColor" type="color" /><code>{{ appearanceSettings.gradientStartColor }}</code></div>
-          </label>
-          <label class="settings-row">
-            <span><strong>{{ t("settings.gradientEnd") }}</strong><small>{{ t("settings.gradientEndHint") }}</small></span>
-            <div class="color-control"><input v-model="appearanceSettings.gradientEndColor" type="color" /><code>{{ appearanceSettings.gradientEndColor }}</code></div>
-          </label>
-          <label class="settings-row">
-            <span><strong>{{ t("settings.angle") }}</strong><small>{{ t("settings.angleHint") }}</small></span>
-            <div class="range-control"><input v-model.number="appearanceSettings.gradientAngle" type="range" min="0" max="360" step="1" /><output>{{ appearanceSettings.gradientAngle }}°</output></div>
-          </label>
-        </template>
-
-        <template v-if="appearanceSettings.backgroundType === 'image'">
-          <div class="settings-row">
-            <span><strong>{{ t("settings.customImage") }}</strong><small>{{ t("settings.customImageHint") }}</small></span>
-            <div class="asset-actions">
-              <button type="button" @click="chooseAsset('background')">{{ t("settings.chooseImage") }}</button>
-              <small v-if="editedImageUnavailable" class="asset-unavailable">{{ t("settings.imageUnavailable") }}</small>
-              <small v-if="assetError?.kind === 'background'" class="settings-error asset-error" role="status">{{ assetError.message }}</small>
-            </div>
-          </div>
-          <label class="settings-row">
-            <span><strong>{{ t("settings.fit") }}</strong><small>{{ t("settings.fitHint") }}</small></span>
-            <select v-model="appearanceSettings.imageFit"><option value="cover">{{ t("settings.fit.cover") }}</option><option value="contain">{{ t("settings.fit.contain") }}</option><option value="stretch">{{ t("settings.fit.stretch") }}</option></select>
-          </label>
-          <label class="settings-row">
-            <span><strong>{{ t("settings.position") }}</strong><small>{{ t("settings.positionHint") }}</small></span>
-            <select v-model="appearanceSettings.imagePosition"><option value="center">{{ t("settings.position.center") }}</option><option value="top">{{ t("settings.position.top") }}</option><option value="bottom">{{ t("settings.position.bottom") }}</option></select>
-          </label>
-        </template>
-
-        <div v-if="appearanceSettings.backgroundType === 'wallpaper'" class="settings-row">
-          <span><strong>{{ t("settings.desktopWallpaper") }}</strong><small>{{ t("settings.desktopWallpaperHint") }}</small></span>
-          <span class="asset-status">{{ wallpaperAvailable ? t("settings.wallpaperAvailable") : t("settings.wallpaperUnavailable") }}</span>
-        </div>
-
-        <label class="settings-row">
-          <span><strong>{{ t("settings.backgroundOpacity") }}</strong><small>{{ t("settings.backgroundOpacityHint") }}</small></span>
-          <div class="range-control"><input v-model.number="appearanceSettings.backgroundOpacity" type="range" min="0" max="1" step="0.01" /><output>{{ Math.round(appearanceSettings.backgroundOpacity * 100) }}%</output></div>
-        </label>
-        <label class="settings-row">
-          <span><strong>{{ t("settings.overlay") }}</strong><small>{{ t("settings.overlayHint") }}</small></span>
-          <div class="range-control"><input v-model.number="appearanceSettings.overlayStrength" type="range" min="0" max="0.72" step="0.01" /><output>{{ Math.round(appearanceSettings.overlayStrength * 100) }}%</output></div>
-        </label>
-        <div class="settings-row appearance-background-row">
-          <span><strong>{{ t("settings.textContrast") }}</strong><small>{{ t("settings.textContrastHint") }}</small></span>
-          <div class="appearance-options" role="group" :aria-label="t('settings.textContrastAriaLabel')">
-            <button
-              v-for="option in ['auto', 'light', 'dark', 'custom'] as const"
-              :key="option"
-              type="button"
-              :class="{ active: appearanceSettings.textContrast === option }"
-              @click="appearanceSettings.textContrast = option"
-            >
-              {{ t(`settings.textContrast.${option}`) }}
-            </button>
-          </div>
-        </div>
-        <label v-if="appearanceSettings.textContrast === 'custom'" class="settings-row">
-          <span><strong>{{ t("settings.customTextColor") }}</strong><small>{{ t("settings.customTextColorHint") }}</small></span>
-          <div class="color-control"><input v-model="appearanceSettings.customTextColor" type="color" /><code>{{ appearanceSettings.customTextColor }}</code></div>
-        </label>
-        <button type="button" class="reset-appearance" @click="resetAppearance">{{ t("settings.resetAppearance") }}</button>
+        <AppearancePanel
+          :mode="appearanceMode"
+          :settings="appearanceSettings"
+          :wallpaper-available="wallpaperAvailable"
+          :edited-image-unavailable="editedImageUnavailable"
+          @select-profile="selectAppearanceProfile"
+          @update-background-type="updateBackgroundType"
+          @update-glass-tint-color="updateGlassTintColor"
+          @update-glass-tint-opacity="updateGlassTintOpacity"
+          @update-blur-px="updateBlurPx"
+          @update-solid-color="updateSolidColor"
+          @update-gradient-start-color="updateGradientStartColor"
+          @update-gradient-end-color="updateGradientEndColor"
+          @update-gradient-angle="updateGradientAngle"
+          @update-image-fit="updateImageFit"
+          @update-image-position="updateImagePosition"
+          @update-background-opacity="updateBackgroundOpacity"
+          @update-overlay-strength="updateOverlayStrength"
+          @update-text-contrast="updateTextContrast"
+          @update-custom-text-color="updateCustomTextColor"
+          @choose-background="chooseAsset('background')"
+          @reset-appearance="resetAppearance"
+        >
+          <template #backgroundError>
+            <small v-if="assetError?.kind === 'background'" class="settings-error asset-error" role="status">{{ assetError.message }}</small>
+          </template>
+        </AppearancePanel>
       </section>
 
       <!-- ======================== General / 常规 ======================== -->
