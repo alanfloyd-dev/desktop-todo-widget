@@ -22,11 +22,27 @@
 //! compatibility fact the protocol requires the client to compile ("a direct
 //! hop is eligible only when every durable write the target runtime can
 //! perform before HealthAck is proven compatible with a rollback runtime at
-//! `source`"). Only patch hops inside a reviewed minor series are admitted
-//! today (v1.2.x → v1.2.y); no cross-minor direct hop has been reviewed, so
-//! a future v1.3.0 stays invisible to this client until the publisher
-//! extends the policy — the frozen "highest reachable safe next hop"
-//! behavior, not an availability failure.
+//! `source`"). Exactly two hop families are admitted, and no others:
+//!
+//! 1. Patch hops inside a reviewed minor series (v1.2.x → v1.2.y) — the
+//!    original policy, unchanged.
+//! 2. The reviewed bridge edge v1.2.x → v1.3.y (exactly one minor step,
+//!    major 1 only): every pre-HealthAck durable write a v1.3.y runtime can
+//!    perform is rollback-compatible with a v1.2.x runtime. The reviewed
+//!    basis: v1.3.y's SQLite migrations are additive-only (new tables via
+//!    `CREATE TABLE IF NOT EXISTS`; existing tables are never altered or
+//!    dropped, and the v1.2.x migration gate is `if current_version < N`, so
+//!    a database already migrated further is opened untouched); settings
+//!    documents round-trip unknown fields through the persisted `extra` map
+//!    verbatim; and the updater's durable milestone/session records keep the
+//!    frozen schema-1 layout the v1.2.x runtime either resumes or refuses
+//!    fail-closed — never repairs into a trusted state.
+//!
+//! No direct hop to v1.4.x or 2.x is admitted; a v1.3.y client compiles its
+//! own policy when that series ships. Strictly-newer targeting is frozen in
+//! the planner (update-core refuses `target <= installed` before the hop
+//! gate) and mirrored as a defense-in-depth guard in the predicate itself,
+//! so the compiled fact stands alone.
 
 use serde::Serialize;
 
@@ -45,18 +61,38 @@ use crate::updater::{
     ReleaseSource, ScanReport,
 };
 
-/// The compiled rollback-compatibility policy: a direct hop is eligible only
-/// within the same major.minor series, where every pre-HealthAck durable
-/// write is the same reviewed schema the installed runtime already handles.
-/// Cross-minor targets are ineligible until the publisher reviews and
-/// extends this policy alongside that release.
-struct CompiledHops;
+/// The compiled rollback-compatibility policy (publisher-reviewed): a direct
+/// hop is eligible only when every pre-HealthAck durable write the target
+/// runtime can perform is proven compatible with a rollback runtime at
+/// `source`. Two reviewed hop families — same-major.minor patch hops
+/// (the original policy, unchanged) and the single v1.2.x → v1.3.y bridge
+/// edge (exactly one minor step, major 1 only); everything else — v1.4.x,
+/// 2.x, rollbacks, equal versions — stays ineligible. The strictly-newer
+/// gate is frozen in the planner and mirrored here as a fail-closed guard,
+/// so the compiled fact stands alone. See the module documentation for the
+/// reviewed rollback basis of the bridge edge.
+pub(crate) struct CompiledHops;
 
 impl RollbackCompatibility for CompiledHops {
     fn hop_eligible(&self, source: &Version, target: &Version) -> bool {
+        // Defense-in-depth: the planner freezes "target strictly newer than
+        // installed" before the hop gate (update-core `VersionNotNewer`),
+        // but this compiled policy carries its own guard and refuses any
+        // non-newer target on its own.
+        if target <= source {
+            return false;
+        }
         let source = source.components();
         let target = target.components();
-        source[0] == target[0] && source[1] == target[1]
+        // Same-major.minor patch hops: the original reviewed policy,
+        // unchanged.
+        if source[0] == target[0] && source[1] == target[1] {
+            return true;
+        }
+        // The reviewed bridge edge: exactly v1.2.x → v1.3.y. One minor step,
+        // major 1 only, structural strictly-newer (minor 3 > minor 2 under
+        // an equal major). No direct hop to 1.4.x or 2.x is admitted.
+        source[0] == 1 && source[1] == 2 && target[0] == 1 && target[1] == 3
     }
 }
 
@@ -353,15 +389,34 @@ mod tests {
         );
     }
 
+    /// The compiled hop matrix, pinned: same-minor patch hops stay
+    /// eligible, the reviewed v1.2 → v1.3 bridge edge is eligible, and
+    /// everything beyond it — v1.4.x, 2.x, rollbacks, equal versions —
+    /// stays ineligible. The strictly-newer guard holds at the unit level,
+    /// not only through the planner.
     #[test]
-    fn compiled_hops_admit_only_patch_series() {
+    fn compiled_hops_admit_patch_series_and_the_reviewed_bridge() {
         let hops = CompiledHops;
         let v = |text: &str| Version::parse(text).unwrap();
+        // Same-minor patch hops (the original v1.2.x policy, unchanged).
         assert!(hops.hop_eligible(&v("1.2.0"), &v("1.2.1")));
-        assert!(hops.hop_eligible(&v("1.2.1"), &v("1.2.9")));
-        assert!(!hops.hop_eligible(&v("1.2.0"), &v("1.3.0")));
-        assert!(!hops.hop_eligible(&v("1.2.0"), &v("2.0.0")));
+        assert!(hops.hop_eligible(&v("1.2.1"), &v("1.2.2")));
+        assert!(hops.hop_eligible(&v("1.2.2"), &v("1.2.9")));
+        // The reviewed bridge edge: exactly one minor step, major 1 only.
+        assert!(hops.hop_eligible(&v("1.2.2"), &v("1.3.0")));
+        assert!(hops.hop_eligible(&v("1.2.2"), &v("1.3.1")));
+        assert!(hops.hop_eligible(&v("1.2.9"), &v("1.3.0")));
+        // No direct hop beyond the bridge edge.
+        assert!(!hops.hop_eligible(&v("1.2.2"), &v("1.4.0")));
+        assert!(!hops.hop_eligible(&v("1.2.2"), &v("2.0.0")));
+        // Strictly-newer guard: rollbacks and equal versions refuse.
         assert!(!hops.hop_eligible(&v("1.3.0"), &v("1.2.9")));
+        assert!(!hops.hop_eligible(&v("1.2.2"), &v("1.2.2")));
+        assert!(!hops.hop_eligible(&v("1.2.2"), &v("1.2.1")));
+        // The same-minor rule itself stays general (this binary's reachable
+        // source is always 1.2.2; a v1.3.y client compiles its own policy —
+        // the rule, not its reachability, is what is pinned here).
+        assert!(hops.hop_eligible(&v("1.3.0"), &v("1.3.1")));
     }
 
     /// No compiled endpoints is a discovery-layer failure, never an "up to

@@ -23,6 +23,7 @@ use desktop_todo_update_core::{
 use ed25519_dalek::{Signer, SigningKey};
 
 use super::*;
+use crate::updater::check::CompiledHops;
 use crate::updater::http_fetch::{discovery_client, fetch_bounded, BodyKind, FetchError};
 use crate::updater::providers::{
     combined_origin_allowlist, enumerate_candidates, ProviderEndpoints, ProviderKind,
@@ -185,7 +186,7 @@ fn test_endpoints(addr: SocketAddr) -> Vec<ProviderEndpoints> {
         },
         ProviderEndpoints {
             kind: ProviderKind::Gitee,
-            releases_url: format!("{base}/gitee/releases?page=1&per_page={{bound}}"),
+            releases_url: format!("{base}/gitee/releases?page=1&per_page={{bound}}&direction=desc"),
             download_origin_allowlist: vec![base.clone()],
         },
     ]
@@ -3807,3 +3808,336 @@ mod discovery_qa {
             "downloaded package bytes must equal the signed package digest"
         );
     }
+
+// --------------------------------------------- H. bridge hop policy (v1.2 → v1.3)
+
+/// The released v1.2.1 hop predicate (same-major.minor only), as a test
+/// stand-in for the policy this binary shipped with before the reviewed
+/// bridge edge. It exists so the scan-level before/after behavior is pinned
+/// against the production policy; it is never shipped itself.
+struct LegacyPatchHops;
+
+impl RollbackCompatibility for LegacyPatchHops {
+    fn hop_eligible(&self, source: &Version, target: &Version) -> bool {
+        let (source, target) = (source.components(), target.components());
+        source[0] == target[0] && source[1] == target[1]
+    }
+}
+
+/// Run one discovery with an explicit hop policy. The fixture's compiled
+/// policy stays the default for the pre-existing tests; the bridge tests
+/// need both the released v1.2.1 policy and the bridge policy against the
+/// same signed candidates.
+fn run_with_hop(
+    fixture: &Fixture,
+    source: ReleaseSource,
+    hop: &dyn RollbackCompatibility,
+) -> DiscoveryOutcome {
+    let ctx = DiscoveryContext {
+        config: &fixture.config,
+        scan_started: Instant::now(),
+        client: &fixture.client,
+        endpoints: &fixture.endpoints,
+        trust: &fixture.trust,
+        installed_version: &fixture.installed,
+        hop_policy: hop,
+    };
+    discover(source, &ctx)
+}
+
+/// Bridge scan matrix with signed candidates served newest-first
+/// ([1.3.0, 1.2.2], installed 1.2.1): the released v1.2.1 policy cannot see
+/// the bridge target and settles on 1.2.2, recording 1.3.0 as
+/// HopIncompatible; the bridge policy takes 1.3.0 directly. Eligibility is
+/// the only difference — same trust store, same signed bytes, same scan
+/// order.
+#[test]
+fn bridge_policy_selects_1_3_0_while_the_released_policy_selects_1_2_2() {
+    let addr = serve(|target, addr| {
+        if target.starts_with("/github/releases") {
+            let list = format!(
+                "[{},{}]",
+                release_with_assets(addr, 31, "v130", "1.3.0"),
+                release_with_assets(addr, 30, "v122", "1.2.2")
+            );
+            return http_ok(list.as_bytes());
+        }
+        if target.contains("/download/v130/") {
+            let (envelope, manifest) = signed_metadata(&signing_k1(), "1.3.0", 1);
+            return if target.ends_with(ENVELOPE_ASSET_NAME) {
+                http_ok(&envelope)
+            } else {
+                http_ok(&manifest)
+            };
+        }
+        if target.contains("/download/v122/") {
+            let (envelope, manifest) = signed_metadata(&signing_k1(), "1.2.2", 1);
+            return if target.ends_with(ENVELOPE_ASSET_NAME) {
+                http_ok(&envelope)
+            } else {
+                http_ok(&manifest)
+            };
+        }
+        not_found()
+    });
+    let mut fixture = fixture(addr);
+    fixture.installed = Version::parse("1.2.1").unwrap();
+
+    // Released v1.2.1 policy: the bridge target is invisible; the highest
+    // reachable safe next hop is 1.2.2.
+    match run_with_hop(&fixture, ReleaseSource::GitHub, &LegacyPatchHops) {
+        DiscoveryOutcome::TargetFound { target, scans, .. } => {
+            assert_eq!(target.manifest().version().to_string(), "1.2.2");
+            assert_eq!(
+                scans[0].records[0].result,
+                CandidateResultKind::Ineligible(IneligibilityReason::HopIncompatible)
+            );
+            assert_eq!(scans[0].records[1].result, CandidateResultKind::Accepted);
+        }
+        other => panic!("expected TargetFound 1.2.2, got {other:?}"),
+    }
+
+    // Bridge policy: the newest eligible candidate wins — 1.3.0.
+    let target = assert_target(run_with_hop(&fixture, ReleaseSource::GitHub, &CompiledHops), "1.3.0");
+    assert_eq!(target.manifest().version().to_string(), "1.3.0");
+}
+
+/// An eligible hop never bypasses verification: candidates signed by an
+/// untrusted key or carrying an unsupported updaterProtocol are refused on
+/// their own grounds and the scan continues. The bridge policy widens
+/// eligibility only — never trust, never the protocol surface.
+#[test]
+fn bridge_eligibility_never_bypasses_verification() {
+    let addr = serve(|target, addr| {
+        if target.starts_with("/github/releases") {
+            let list = format!(
+                "[{},{},{}]",
+                release_with_assets(addr, 33, "v130-untrusted", "1.3.0"),
+                release_with_assets(addr, 32, "v130-proto2", "1.3.0"),
+                release_with_assets(addr, 30, "v122", "1.2.2")
+            );
+            return http_ok(list.as_bytes());
+        }
+        if target.contains("/download/v130-untrusted/") {
+            let (envelope, manifest) = signed_metadata(&signing_k2(), "1.3.0", 1);
+            return if target.ends_with(ENVELOPE_ASSET_NAME) {
+                http_ok(&envelope)
+            } else {
+                http_ok(&manifest)
+            };
+        }
+        if target.contains("/download/v130-proto2/") {
+            let (envelope, manifest) = signed_metadata(&signing_k1(), "1.3.0", 2);
+            return if target.ends_with(ENVELOPE_ASSET_NAME) {
+                http_ok(&envelope)
+            } else {
+                http_ok(&manifest)
+            };
+        }
+        if target.contains("/download/v122/") {
+            let (envelope, manifest) = signed_metadata(&signing_k1(), "1.2.2", 1);
+            return if target.ends_with(ENVELOPE_ASSET_NAME) {
+                http_ok(&envelope)
+            } else {
+                http_ok(&manifest)
+            };
+        }
+        not_found()
+    });
+    let mut fixture = fixture(addr);
+    fixture.installed = Version::parse("1.2.1").unwrap();
+
+    match run_with_hop(&fixture, ReleaseSource::GitHub, &CompiledHops) {
+        DiscoveryOutcome::TargetFound { target, scans, .. } => {
+            assert_eq!(target.manifest().version().to_string(), "1.2.2");
+            assert_eq!(
+                scans[0].records[0].result,
+                CandidateResultKind::Ineligible(IneligibilityReason::UntrustedKey)
+            );
+            assert_eq!(
+                scans[0].records[1].result,
+                CandidateResultKind::Ineligible(IneligibilityReason::UnsupportedUpdaterProtocol)
+            );
+            assert_eq!(scans[0].records[2].result, CandidateResultKind::Accepted);
+        }
+        other => panic!("expected TargetFound 1.2.2, got {other:?}"),
+    }
+}
+
+/// Garbage in the newest position cannot borrow the bridge's eligibility:
+/// a release missing its metadata assets and a manifest that is malformed
+/// (yet signed over its exact bytes) are refused on their own grounds —
+/// MetadataUnavailable and Invalid — and the scan continues to the valid
+/// bridge. Eligibility never turns garbage into a target.
+#[test]
+fn bridge_scan_continues_past_garbage_candidates() {
+    let addr = serve(|target, addr| {
+        if target.starts_with("/github/releases") {
+            let missing = release_json(35, "v1.3.0", false, false, &[]);
+            let malformed = release_with_assets(addr, 34, "v130-malformed", "1.3.0");
+            let bridge = release_with_assets(addr, 30, "v122", "1.2.2");
+            return http_ok(format!("[{missing},{malformed},{bridge}]").as_bytes());
+        }
+        if target.contains("/download/v130-malformed/") {
+            // A validly signed but structurally malformed manifest: the
+            // signature is over these exact bytes, so verification fails at
+            // parsing — never at trust.
+            let manifest: &[u8] = b"{ not a manifest document";
+            let signature = sign(&signing_k1(), manifest);
+            let envelope = envelope_json(&signing_k1(), &signature).into_bytes();
+            return if target.ends_with(ENVELOPE_ASSET_NAME) {
+                http_ok(&envelope)
+            } else {
+                http_ok(manifest)
+            };
+        }
+        if target.contains("/download/v122/") {
+            let (envelope, manifest) = signed_metadata(&signing_k1(), "1.2.2", 1);
+            return if target.ends_with(ENVELOPE_ASSET_NAME) {
+                http_ok(&envelope)
+            } else {
+                http_ok(&manifest)
+            };
+        }
+        not_found()
+    });
+    let mut fixture = fixture(addr);
+    fixture.installed = Version::parse("1.2.1").unwrap();
+
+    match run_with_hop(&fixture, ReleaseSource::GitHub, &CompiledHops) {
+        DiscoveryOutcome::TargetFound { target, scans, .. } => {
+            assert_eq!(target.manifest().version().to_string(), "1.2.2");
+            assert!(matches!(
+                scans[0].records[0].result,
+                CandidateResultKind::MetadataUnavailable { .. }
+            ));
+            assert_eq!(
+                scans[0].records[1].result,
+                CandidateResultKind::Invalid(ErrorKind::ManifestMalformed)
+            );
+            assert_eq!(scans[0].records[2].result, CandidateResultKind::Accepted);
+        }
+        other => panic!("expected TargetFound 1.2.2, got {other:?}"),
+    }
+}
+
+/// The bridge edge ends at v1.3.y: a v1.4.0 candidate is HopIncompatible
+/// under the bridge policy, a rollback candidate (1.2.0 under installed
+/// 1.2.1) is VersionNotNewer, and the scan still settles on the eligible
+/// patch bridge. One reviewed minor step — never a version ladder.
+#[test]
+fn bridge_scan_refuses_beyond_the_edge_and_rollbacks() {
+    let addr = serve(|target, addr| {
+        if target.starts_with("/github/releases") {
+            let list = format!(
+                "[{},{},{}]",
+                release_with_assets(addr, 36, "v140", "1.4.0"),
+                release_with_assets(addr, 35, "v120", "1.2.0"),
+                release_with_assets(addr, 30, "v122", "1.2.2")
+            );
+            return http_ok(list.as_bytes());
+        }
+        if target.contains("/download/v140/") {
+            let (envelope, manifest) = signed_metadata(&signing_k1(), "1.4.0", 1);
+            return if target.ends_with(ENVELOPE_ASSET_NAME) {
+                http_ok(&envelope)
+            } else {
+                http_ok(&manifest)
+            };
+        }
+        if target.contains("/download/v120/") {
+            let (envelope, manifest) = signed_metadata(&signing_k1(), "1.2.0", 1);
+            return if target.ends_with(ENVELOPE_ASSET_NAME) {
+                http_ok(&envelope)
+            } else {
+                http_ok(&manifest)
+            };
+        }
+        if target.contains("/download/v122/") {
+            let (envelope, manifest) = signed_metadata(&signing_k1(), "1.2.2", 1);
+            return if target.ends_with(ENVELOPE_ASSET_NAME) {
+                http_ok(&envelope)
+            } else {
+                http_ok(&manifest)
+            };
+        }
+        not_found()
+    });
+    let mut fixture = fixture(addr);
+    fixture.installed = Version::parse("1.2.1").unwrap();
+
+    match run_with_hop(&fixture, ReleaseSource::GitHub, &CompiledHops) {
+        DiscoveryOutcome::TargetFound { target, scans, .. } => {
+            assert_eq!(target.manifest().version().to_string(), "1.2.2");
+            assert_eq!(
+                scans[0].records[0].result,
+                CandidateResultKind::Ineligible(IneligibilityReason::HopIncompatible)
+            );
+            assert_eq!(
+                scans[0].records[1].result,
+                CandidateResultKind::Ineligible(IneligibilityReason::VersionNotNewer)
+            );
+            assert_eq!(scans[0].records[2].result, CandidateResultKind::Accepted);
+        }
+        other => panic!("expected TargetFound 1.2.2, got {other:?}"),
+    }
+}
+
+/// The compiled Gitee endpoint pins `direction=desc` because Gitee's
+/// /releases default listing is oldest-first (live-probed 2026-11-14: the
+/// default returned oldest-first, and the parameter was accepted — HTTP 200
+/// — returning newest-first). Offline pin: with the compiled query shape
+/// (mirrored by the test endpoint), the adapter preserves the served
+/// newest-first order on the Gitee endpoint too, so the newest release is
+/// enumerated first and the newest eligible candidate wins the scan.
+#[test]
+fn gitee_enumeration_preserves_served_newest_first_order() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let seen_query = Arc::new(std::sync::Mutex::new(String::new()));
+    let hits_clone = hits.clone();
+    let seen_clone = seen_query.clone();
+    let addr = serve(move |target, addr| {
+        if target.starts_with("/gitee/releases") {
+            hits_clone.fetch_add(1, Ordering::SeqCst);
+            *seen_clone.lock().unwrap() = target.to_string();
+            let list = format!(
+                "[{},{}]",
+                release_with_assets(addr, 31, "v130", "1.3.0"),
+                release_with_assets(addr, 30, "v122", "1.2.2")
+            );
+            return http_ok(list.as_bytes());
+        }
+        if target.contains("/download/v130/") {
+            let (envelope, manifest) = signed_metadata(&signing_k1(), "1.3.0", 1);
+            return if target.ends_with(ENVELOPE_ASSET_NAME) {
+                http_ok(&envelope)
+            } else {
+                http_ok(&manifest)
+            };
+        }
+        if target.contains("/download/v122/") {
+            let (envelope, manifest) = signed_metadata(&signing_k1(), "1.2.2", 1);
+            return if target.ends_with(ENVELOPE_ASSET_NAME) {
+                http_ok(&envelope)
+            } else {
+                http_ok(&manifest)
+            };
+        }
+        not_found()
+    });
+    let config = test_config();
+    let endpoints = test_endpoints(addr);
+    assert!(
+        endpoints[1].releases_url.contains("direction=desc"),
+        "the test endpoint must mirror the production query shape"
+    );
+    let client = discovery_client(&config, &combined_origin_allowlist(&endpoints)).unwrap();
+    let enumeration = enumerate_candidates(&client, &endpoints[1], &config, None).unwrap();
+    assert_eq!(
+        *seen_query.lock().unwrap(),
+        "/gitee/releases?page=1&per_page=10&direction=desc"
+    );
+    assert_eq!(enumeration.candidates[0].tag, "v1.3.0");
+    assert_eq!(enumeration.candidates[1].tag, "v1.2.2");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}

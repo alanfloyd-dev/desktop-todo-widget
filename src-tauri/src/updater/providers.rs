@@ -134,8 +134,18 @@ pub fn production_endpoints() -> Vec<ProviderEndpoints> {
         },
         ProviderEndpoints {
             kind: ProviderKind::Gitee,
+            // The compiled endpoint pins descending order: Gitee's
+            // /releases default listing is oldest-first (live-probed
+            // 2026-11-14: default returned v1.0.1 → v1.2.1 ascending, while
+            // `direction=desc` was accepted — HTTP 200 — and returned
+            // newest-first). Without this supported parameter, every
+            // release past the compiled bound (10) would sort beyond page 1
+            // and the newest release would be invisible to stable discovery
+            // — an availability failure, not a trust change. The adapter
+            // still never reorders; this only makes the provider's served
+            // order the frozen newest→oldest scan order.
             releases_url:
-                "https://gitee.com/api/v5/repos/alanfloyd-dev/desktop-todo-widget/releases?page=1&per_page={bound}"
+                "https://gitee.com/api/v5/repos/alanfloyd-dev/desktop-todo-widget/releases?page=1&per_page={bound}&direction=desc"
                     .to_string(),
             download_origin_allowlist: GITEE_DOWNLOAD_ORIGINS
                 .iter()
@@ -202,8 +212,10 @@ pub struct Enumeration {
 /// Ordering authority: the frozen contract requires newest→oldest bounded
 /// enumeration and forbids relying on a host's arbitrary "latest" shortcut,
 /// so the adapter enumerates the bounded releases list in the provider's own
-/// newest-first order. That order is discovery metadata only — scan order,
-/// never a trust decision — and no reordering happens anywhere else.
+/// newest-first order. For GitHub that is the endpoint's default listing;
+/// for Gitee the compiled endpoint pins `direction=desc` (its default
+/// listing is oldest-first). That order is discovery metadata only — scan
+/// order, never a trust decision — and no reordering happens anywhere else.
 pub fn enumerate_candidates(
     client: &reqwest::blocking::Client,
     endpoints: &ProviderEndpoints,
@@ -346,4 +358,42 @@ fn asset_url_allowed(url: &str, endpoints: &ProviderEndpoints) -> bool {
         .download_origin_allowlist
         .iter()
         .any(|allowed| allowed.eq_ignore_ascii_case(&origin))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The compiled Gitee enumeration endpoint pins descending order:
+    /// Gitee's /releases default listing is oldest-first, so without the
+    /// supported `direction=desc` parameter every release past the compiled
+    /// bound (10) would sort beyond page 1 and the newest release would be
+    /// invisible to stable discovery. Live-probed 2026-11-14: default order
+    /// oldest-first (v1.0.1 → v1.2.1); `direction=desc` accepted (HTTP 200)
+    /// and returned newest-first. GitHub keeps its frozen parameter-minimal
+    /// endpoint (default-newest-first) and neither download allowlist
+    /// changes — this correction is ordering only, never a trust widening.
+    #[test]
+    fn gitee_endpoint_pins_descending_order_without_widening_anything() {
+        let endpoints = production_endpoints();
+        assert_eq!(endpoints.len(), 2);
+
+        let github = &endpoints[0];
+        assert_eq!(github.kind, ProviderKind::GitHub);
+        assert!(github.releases_url.contains("per_page={bound}"));
+        assert!(
+            !github.releases_url.contains("direction"),
+            "GitHub keeps its frozen default-newest-first listing"
+        );
+        assert_eq!(github.download_origin_allowlist.len(), GITHUB_DOWNLOAD_ORIGINS.len());
+
+        let gitee = &endpoints[1];
+        assert_eq!(gitee.kind, ProviderKind::Gitee);
+        assert!(
+            gitee.releases_url.contains("per_page={bound}&direction=desc"),
+            "Gitee must pin descending order: {}",
+            gitee.releases_url
+        );
+        assert_eq!(gitee.download_origin_allowlist.len(), GITEE_DOWNLOAD_ORIGINS.len());
+    }
 }
