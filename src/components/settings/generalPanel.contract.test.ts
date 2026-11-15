@@ -247,8 +247,9 @@ describe("GeneralPanel extraction: lifecycle (S1-E4)", () => {
     expect(settingsPanelVue).toMatch(
       /<section\s+v-show="activeCategory === 'general'"\s+id="settings-panel-general"\s+class="settings-category-panel"\s+role="tabpanel"\s+aria-labelledby="settings-tab-general"\s*>(?:\s*<!--[\s\S]*?-->\s*)*<GeneralPanel\b/,
     );
-    expect(settingsPanelVue.match(/v-show="activeCategory === '/g)?.length).toBe(5);
-    expect(settingsPanelVue.match(/role="tabpanel"/g)?.length).toBe(5);
+    // S2-P2 removed the Weather tabpanel: exactly four remain.
+    expect(settingsPanelVue.match(/v-show="activeCategory === '/g)?.length).toBe(4);
+    expect(settingsPanelVue.match(/role="tabpanel"/g)?.length).toBe(4);
   });
 
   it("the slot content is the only place the avatar error element remains", () => {

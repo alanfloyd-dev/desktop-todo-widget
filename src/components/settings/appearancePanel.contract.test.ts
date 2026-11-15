@@ -444,8 +444,9 @@ describe("AppearancePanel extraction: lifecycle (S1-E5)", () => {
     expect(settingsPanelVue).toMatch(
       /<section\s+v-show="activeCategory === 'appearance'"\s+id="settings-panel-appearance"\s+class="settings-category-panel"\s+role="tabpanel"\s+aria-labelledby="settings-tab-appearance"\s*>(?:\s*<!--[\s\S]*?-->\s*)*<AppearancePanel\b/,
     );
-    expect(settingsPanelVue.match(/v-show="activeCategory === '/g)?.length).toBe(5);
-    expect(settingsPanelVue.match(/role="tabpanel"/g)?.length).toBe(5);
+    // S2-P2 removed the Weather tabpanel: exactly four remain.
+    expect(settingsPanelVue.match(/v-show="activeCategory === '/g)?.length).toBe(4);
+    expect(settingsPanelVue.match(/role="tabpanel"/g)?.length).toBe(4);
   });
 
   it("the child carries no lifecycle of its own", () => {

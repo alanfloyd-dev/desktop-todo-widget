@@ -227,12 +227,12 @@ export const en: Record<string, string> = {
   "settings.panelAriaLabel": "Settings",
   "settings.save": "Save settings",
   // --- Settings categories (S1-B) -------------------------------------------
-  // The five top-level categories and the accessible name of their navigation.
+  // The four top-level categories and the accessible name of their navigation.
+  // Weather was a fifth until S2-P2 merged it into Modules as a section.
   "settings.category.label": "Settings category",
   "settings.category.appearance": "Appearance",
   "settings.category.general": "General",
   "settings.category.modules": "Modules",
-  "settings.category.weather": "Weather",
   "settings.category.about": "About",
   // Sticky footer.
   "settings.cancel": "Cancel",
@@ -267,6 +267,12 @@ export const en: Record<string, string> = {
   "settings.language.option.zhHans": "简体中文",
   "settings.language.effective": "Currently using {language}",
   "settings.language.restartHint": "Native menus and tray tooltips update after a restart.",
+
+  // The Modules page's group headings (S2-P2): the visibility switches, the
+  // Weather configuration section and the GitHub username row join the Quick
+  // Links heading as the page's four sections.
+  "settings.moduleVisibility.heading": "Module visibility",
+  "settings.githubConfig.heading": "GitHub",
 
   "settings.modulesDescription": "Choose which modules appear on the desktop",
   "settings.modulesReset": "↻ Reset modules",
@@ -614,12 +620,11 @@ export const zhHans: Record<string, string> = {
   "settings.panelAriaLabel": "设置",
   "settings.save": "保存设置",
   // --- 设置分类（S1-B） -------------------------------------------------------
-  // 五个顶层分类及其导航的可访问名称。
+  // 四个顶层分类及其导航的可访问名称。天气原为第五个分类，S2-P2 起并入“模块”。
   "settings.category.label": "设置分类",
   "settings.category.appearance": "外观",
   "settings.category.general": "常规",
   "settings.category.modules": "模块",
-  "settings.category.weather": "天气",
   "settings.category.about": "关于",
   // 底部固定操作栏。
   "settings.cancel": "取消",
@@ -654,6 +659,11 @@ export const zhHans: Record<string, string> = {
   "settings.language.option.zhHans": "简体中文",
   "settings.language.effective": "当前使用 {language}",
   "settings.language.restartHint": "原生菜单与托盘提示会在重启后更新。",
+
+  // “模块”页的分组标题（S2-P2）：可见性开关、天气配置节与 GitHub 用户名行，
+  // 与快捷链接标题共同构成页面的四个分组。
+  "settings.moduleVisibility.heading": "模块可见性",
+  "settings.githubConfig.heading": "GitHub",
 
   "settings.modulesDescription": "选择显示在桌面上的模块",
   "settings.modulesReset": "↻ 恢复默认模块",

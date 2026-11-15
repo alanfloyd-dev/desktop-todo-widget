@@ -10,11 +10,14 @@ import appVue from "../../App.vue?raw";
 
 /**
  * S1-E2 moved the Weather category's controls into `WeatherPanel` while the
- * persisted fields stayed SettingsPanel drafts. These pins hold the boundary
- * in place: the child owns the transient search UI and the two native
- * weather-lookup commands, the parent keeps the dirty snapshot, Save payload,
- * draft mutations and the `v-show` tabpanel, and the refresh chain stays
- * child → parent → App controller.
+ * persisted fields stayed SettingsPanel drafts. S2-P2 then merged the Weather
+ * category into Modules: `WeatherPanel` now renders inside `ModulesPanel`,
+ * which passes every binding through untouched, and the deep link redirects
+ * onto Modules. These pins hold the boundary in place: the child owns the
+ * transient search UI and the two native weather-lookup commands, the parent
+ * keeps the dirty snapshot, Save payload and draft mutations, the section
+ * renders inside the modules tabpanel (no tabpanel of its own), and the
+ * refresh chain stays child → ModulesPanel → parent → App controller.
  */
 
 const WEATHER_DRAFT_FIELD_LINES = [
@@ -113,13 +116,18 @@ describe("WeatherPanel extraction: child interface (S1-E2)", () => {
     }
   });
 
-  it("the parent passes every binding exactly once on the child element", () => {
-    const usages = settingsPanelVue.match(/<WeatherPanel\b[^>]*>/g);
+  it("ModulesPanel passes every binding exactly once on the child element (S2-P2 composition)", () => {
+    // WeatherPanel renders inside ModulesPanel since S2-P2; the usage and its
+    // bindings moved there verbatim, and SettingsPanel no longer mounts it.
+    const usages = modulesPanelVue.match(/<WeatherPanel\b[^>]*>/g);
     expect(usages?.length).toBe(1);
     const tag = usages![0];
-    // No conditional mounting may ride on the element itself.
+    // No conditional mounting may ride on the element itself — the section
+    // must render even when the Weather module is switched off, and the
+    // search state must survive category switches like every other panel's.
     expect(tag).not.toContain("v-if");
     expect(tag).not.toContain("v-show");
+    expect(tag).not.toContain("moduleVisibility.weather");
     for (const binding of [
       ":weather-location-label",
       ":weather-timezone",
@@ -135,6 +143,9 @@ describe("WeatherPanel extraction: child interface (S1-E2)", () => {
     ]) {
       expect(tag, binding).toContain(binding);
     }
+    // SettingsPanel no longer references the child at all: the grandchild
+    // chain is parent → ModulesPanel → WeatherPanel.
+    expect(settingsPanelVue).not.toContain("<WeatherPanel");
   });
 
   it("renders from a single weather-settings root (class and refs preserved)", () => {
@@ -184,24 +195,34 @@ describe("WeatherPanel extraction: moved-as-a-unit responsibilities (S1-E2)", ()
   });
 });
 
-describe("WeatherPanel extraction: lifecycle and deep link (S1-E2)", () => {
-  it("the parent mounts WeatherPanel unconditionally inside its v-show tabpanel", () => {
-    // The wrapper stays the parent's and the child carries no `v-if`: search
-    // state must survive switching categories, exactly like AboutPanel's
-    // checker state does.
-    expect(settingsPanelVue).toMatch(
-      /<section\s+v-show="activeCategory === 'weather'"\s+id="settings-panel-weather"\s+class="settings-category-panel"\s+role="tabpanel"\s+aria-labelledby="settings-tab-weather"\s*>(?:\s*<!--[\s\S]*?-->\s*)*<WeatherPanel\b/,
-    );
-    expect(settingsPanelVue.match(/v-show="activeCategory === '/g)?.length).toBe(5);
-    expect(settingsPanelVue.match(/role="tabpanel"/g)?.length).toBe(5);
+describe("WeatherPanel extraction: lifecycle and deep link (S1-E2, S2-P2)", () => {
+  it("ModulesPanel mounts WeatherPanel unconditionally inside the modules tabpanel", () => {
+    // Since S2-P2 the wrapper is ModulesPanel's fragment and the tabpanel is
+    // still the parent's `v-show` — the weather tabpanel is gone, and the
+    // child carries no `v-if`: search state must survive switching
+    // categories, exactly like AboutPanel's checker state does.
+    expect(settingsPanelVue.match(/v-show="activeCategory === '/g)?.length).toBe(4);
+    expect(settingsPanelVue.match(/role="tabpanel"/g)?.length).toBe(4);
+    // The section sits between the visibility group and the GitHub group —
+    // the approved Modules-page order (visibility → weather → GitHub →
+    // quick links).
+    const resetEnd = modulesPanelVue.indexOf("settings-module-reset");
+    const weatherUsage = modulesPanelVue.indexOf("<WeatherPanel");
+    const githubHeading = modulesPanelVue.indexOf("settings.githubConfig.heading");
+    expect(resetEnd).toBeGreaterThan(-1);
+    expect(weatherUsage).toBeGreaterThan(resetEnd);
+    expect(githubHeading).toBeGreaterThan(weatherUsage);
   });
 
-  it("the weather deep link still opens the category and focuses the search input", () => {
-    // initialCategory keeps choosing Weather before first render (so the
-    // tabpanel is visible when the child mounts), and the child owns the
-    // scrollIntoView + focus pair on its own refs.
+  it("the weather deep link still opens Modules and focuses the search input", () => {
+    // initialCategory redirects the legacy Weather flag onto Modules before
+    // first render (so the section is visible when the children mount), and
+    // the child owns the scrollIntoView + focus pair on its own refs. The
+    // parent references the flag exactly once outside that call: the
+    // `:focus-weather` pass-through binding.
     expect(settingsPanelVue).toContain("initialCategory(props.focusWeather, props.focusGithub)");
     expect(settingsPanelVue.match(/props\.focusWeather/g)?.length).toBe(1);
+    expect(settingsPanelVue).toContain(':focus-weather="focusWeather"');
     expect(weatherPanelVue).toMatch(
       /if \(props\.focusWeather\) \{\s*await nextTick\(\);\s*weatherSection\.value\?\.scrollIntoView\(\{ block: "start" \}\);\s*locationInput\.value\?\.focus\(\);\s*\}/,
     );
@@ -213,7 +234,7 @@ describe("WeatherPanel extraction: lifecycle and deep link (S1-E2)", () => {
     // weather link. The parent keeps only the initialCategory choice.
     expect(settingsPanelVue).not.toMatch(/githubRow|githubInput/);
     expect(modulesPanelVue).toMatch(
-      /if \(props\.focusGithub\) \{\s*await nextTick\(\);\s*githubRow\.value\?\.scrollIntoView\(\{ block: "start" \}\);\s*githubInput\.value\?\.focus\(\);\s*\}/,
+      /if \(props\.focusGithub && !props\.focusWeather\) \{\s*await nextTick\(\);\s*githubRow\.value\?\.scrollIntoView\(\{ block: "start" \}\);\s*githubInput\.value\?\.focus\(\);\s*\}/,
     );
   });
 

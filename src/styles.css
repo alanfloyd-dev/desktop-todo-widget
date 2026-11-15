@@ -1636,6 +1636,60 @@ button.profile-identity {
   border-bottom-color: var(--mineral);
 }
 
+/*
+ * Wide navigation shell (S2-P1): one row holding the vertical rail and the
+ * scrolling content column. Below the 560px boundary the rail is display:none
+ * (media pair at the bottom of the sheet), so this wrapper is layout-neutral
+ * for the medium and narrow presentations — the content keeps its full width.
+ */
+.settings-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/*
+ * The rail shares the same tokens as the other presentations: 112px fixed
+ * column, 1px separator, items ~32px high, and a 2px mineral left edge as the
+ * active indicator (the vertical twin of the tabs' mineral underline). Items
+ * wrap long translations inside the fixed width instead of clipping.
+ */
+.settings-nav--rail {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: 112px;
+  padding: 8px;
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.settings-panel .settings-nav--rail button {
+  flex: none;
+  padding: 8px 8px 8px 10px;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: left;
+  white-space: normal;
+}
+
+.settings-panel .settings-nav--rail button:hover {
+  color: var(--ink);
+}
+
+.settings-panel .settings-nav--rail button.active {
+  border-left-color: var(--mineral);
+  color: var(--ink);
+}
+
+.settings-panel .settings-nav--rail button:focus-visible {
+  outline: 1px solid var(--mineral);
+  outline-offset: -1px;
+}
+
 /* Only the active category's content scrolls; header, nav and footer stay. */
 .settings-content {
   flex: 1 1 auto;
@@ -2475,6 +2529,28 @@ button.module-section-toggle:disabled {
     flex: none;
     padding: 8px 20px 10px;
     border-bottom: 1px solid var(--line);
+  }
+}
+
+/*
+ * Wide navigation boundary (S2-P1): the 560px complement pair. The rail's
+ * visible state is the base rule; the negated min-width form — same DPR-proof
+ * strategy as the 420px boundary above — hides it below 560px, and the exact
+ * complement (plain min-width, matching at every width the negated query does
+ * not) hides the horizontal tabs at >=560px. The two predicates are strict
+ * complements, so the three presentations stay mutually exclusive at every
+ * width, fractional devicePixelRatio included: rail alone at >=560, tabs
+ * alone at 420-559, select alone below 420.
+ */
+@media not all and (min-width: 560px) {
+  .settings-nav--rail {
+    display: none;
+  }
+}
+
+@media (min-width: 560px) {
+  .settings-panel .settings-nav--tabs {
+    display: none;
   }
 }
 

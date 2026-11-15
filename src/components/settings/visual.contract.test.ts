@@ -156,6 +156,145 @@ describe("responsive boundary (S1-C 2.8 / review F-1)", () => {
   });
 });
 
+describe("wide navigation boundary (S2-P1)", () => {
+  // The rail's visible state is the base rule; the negated min-width form —
+  // the same DPR-proof strategy as the 420px boundary — hides it below 560px,
+  // and the exact complement hides the tabs at >=560px. The two predicates are
+  // strict complements, so exactly one presentation is active at any width.
+  it("expresses the 560px boundary as a negated min-width, DPR-proof", () => {
+    expect(stylesCss).toContain("@media not all and (min-width: 560px)");
+    // The obsolete one-pixel-early form must not survive anywhere in the sheet.
+    expect(stylesCss.includes("max-width: 559px")).toBe(false);
+    expect(stylesCss.includes("max-width: 560px")).toBe(false);
+  });
+
+  it("hides the rail below 560px and shows it from the base rule", () => {
+    // Media-inner rules are invisible to the single-level-brace rule helpers,
+    // so the hide is asserted textually inside the negated block; the base
+    // (visible) rule is the only exact `.settings-nav--rail` rule body.
+    const negatedStart = stylesCss.indexOf("@media not all and (min-width: 560px)");
+    expect(negatedStart).toBeGreaterThan(-1);
+    const negatedEnd = stylesCss.indexOf("@media (min-width: 560px)");
+    const negated = stylesCss.slice(negatedStart, negatedEnd);
+    expect(negated).toContain(".settings-nav--rail");
+    expect(negated).toContain("display: none");
+    const base = allRuleBodies(stylesCss, ".settings-nav--rail");
+    expect(base.length, "only the base rail rule is an exact selector body").toBe(1);
+    expect(decl(base[0], "display")).toBe("flex");
+    expect(base[0]).toContain("flex-direction: column");
+  });
+
+  it("hides the horizontal tabs at >=560px via the exact complement", () => {
+    const wideStart = stylesCss.indexOf("@media (min-width: 560px)");
+    expect(wideStart).toBeGreaterThan(-1);
+    const wide = stylesCss.slice(wideStart, stylesCss.indexOf("}", wideStart));
+    expect(wide).toContain(".settings-nav--tabs");
+    expect(wide).toContain("display: none");
+  });
+
+  it("keeps the 420px boundary block byte-identical", () => {
+    const block420 = `@media not all and (min-width: 420px) {
+  .settings-nav--tabs {
+    display: none;
+  }
+
+  .settings-nav--select {
+    display: flex;
+    flex: none;
+    padding: 8px 20px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+}`;
+    const start = stylesCss.indexOf("@media not all and (min-width: 420px)");
+    expect(start).toBeGreaterThan(-1);
+    // Brace-counted extraction: the block ends at its own balancing close,
+    // wherever later blocks were inserted after it.
+    let depth = 0;
+    let end = start;
+    for (; end < stylesCss.length; end++) {
+      if (stylesCss[end] === "{") depth++;
+      else if (stylesCss[end] === "}") {
+        depth--;
+        if (depth === 0) {
+          end++;
+          break;
+        }
+      }
+    }
+    const actual = stylesCss.slice(start, end).replace(/\r\n/g, "\n").trim();
+    expect(actual).toBe(block420);
+  });
+});
+
+describe("navigation rail (S2-P1)", () => {
+  it("renders a vertical WAI-ARIA tablist bound to the one shared category state", () => {
+    expect(settingsPanelVue).toContain('class="settings-nav settings-nav--rail"');
+    expect(settingsPanelVue).toContain('role="tablist"');
+    expect(settingsPanelVue).toContain('aria-orientation="vertical"');
+    // Exactly one activeCategory ref: all three presentations read and write it.
+    expect(settingsPanelVue.match(/const activeCategory = ref<SettingsCategoryId>/g)?.length).toBe(1);
+    // Tabs and rail switch through the same handler; the narrow select keeps
+    // its own change-bridge to the same state.
+    expect(settingsPanelVue.match(/@click="selectCategory\(category\.id\)"/g)?.length).toBe(2);
+  });
+
+  it("keeps roving tabindex, tabpanel associations, and rail controls across presentations", () => {
+    // Tabs and rail carry the identical roving-tabindex binding.
+    expect(settingsPanelVue.match(/:tabindex="activeCategory === category\.id \? 0 : -1"/g)?.length).toBe(2);
+    // The tabpanels still label off the horizontal tabs' ids — the original
+    // association is unchanged by the rail. Weather is no longer one of them
+    // (S2-P2 merged it into Modules), so exactly four remain.
+    expect(settingsPanelVue.match(/aria-labelledby="settings-tab-/g)?.length).toBe(4);
+    // Rail items point at the same four tabpanels; the rail and tabpanel ids
+    // are the same runtime bindings the tabs use.
+    expect(settingsPanelVue).toContain(':aria-controls="`settings-panel-${category.id}`"');
+    expect(settingsPanelVue).toContain(':id="`settings-rail-${category.id}`"');
+    for (const id of ["appearance", "general", "modules", "about"]) {
+      expect(settingsPanelVue).toContain(`id="settings-panel-${id}"`);
+    }
+    // The retired Weather tabpanel must not survive anywhere in the panel.
+    expect(settingsPanelVue).not.toContain("settings-panel-weather");
+    expect(settingsPanelVue).not.toContain("activeCategory === 'weather'");
+  });
+
+  it("drives the rail with the shared vertical reducer, focus following the active category", () => {
+    expect(settingsPanelVue).toContain("onRailKeydown");
+    expect(settingsPanelVue).toContain("nextVerticalTabCategory(activeCategory.value, event.key)");
+    expect(settingsPanelVue).toContain("#settings-rail-${next}");
+    // The horizontal model is untouched: same reducer name, same focus target.
+    expect(settingsPanelVue).toContain("nextTabCategory(activeCategory.value, event.key)");
+    expect(settingsPanelVue).toContain("#settings-tab-${next}");
+  });
+
+  it("adds only the navigation-shell wrapper; panel fragments keep their parents", () => {
+    expect(settingsPanelVue.match(/class="settings-body"/g)?.length).toBe(1);
+    expect(settingsPanelVue.match(/ref="settingsRail"/g)?.length).toBe(1);
+    expect(settingsPanelVue.match(/ref="settingsContent"/g)?.length).toBe(1);
+    // No new wrapper between the tabpanel sections and their panel components:
+    // every child panel still mounts directly inside its own v-show section.
+    // WeatherPanel is the S2-P2 exception by composition — it mounts inside
+    // ModulesPanel (pinned in weatherPanel.contract.test.ts), not here.
+    for (const panel of ["AppearancePanel", "GeneralPanel", "ModulesPanel", "AboutPanel"]) {
+      expect(settingsPanelVue).toContain(`<${panel}`);
+    }
+    expect(settingsPanelVue).not.toContain("<WeatherPanel");
+  });
+
+  it("keeps the rail on the existing palette tokens", () => {
+    // Two `.settings-nav--rail` rules exist (base + media hide); the base is
+    // the one carrying the layout declarations.
+    const rail = allRuleBodies(stylesCss, ".settings-nav--rail").find(
+      (b) => decl(b, "display") === "flex",
+    );
+    expect(rail, "base rail rule").toBeTruthy();
+    expect(decl(rail!, "width")).toBe("112px");
+    expect(decl(rail!, "border-right")).toBe("1px solid var(--line)");
+    const active = ruleBody(stylesCss, ".settings-panel .settings-nav--rail button.active");
+    expect(decl(active, "border-left-color")).toBe("var(--mineral)");
+    expect(decl(active, "color")).toBe("var(--ink)");
+  });
+});
+
 describe("secondary text tokens (S1-C 2.2)", () => {
   it("row hints, module descriptions and the intro share 11px muted", () => {
     for (const selector of [".settings-row small", ".module-switch-text small", ".settings-intro"]) {
@@ -214,9 +353,13 @@ describe("catalog cleanup (S1-C 2.6 / 2.7)", () => {
     "settings.appearanceHeading",
     "settings.appearanceMaterial",
     "settings.title",
+    // The Weather category's navigation label left with the category itself
+    // (S2-P2); the Weather section's own keys (`settings.weatherLocation`…)
+    // stay live inside WeatherPanel.
+    "settings.category.weather",
   ];
 
-  it("keeps the seven unused heading keys plus the stale eyebrow removed", () => {
+  it("keeps the unused heading keys, the stale eyebrow and the retired Weather category label removed", () => {
     for (const key of removedKeys) {
       expect(en[key], `en still carries ${key}`).toBeUndefined();
       expect(zhHans[key], `zh-Hans still carries ${key}`).toBeUndefined();

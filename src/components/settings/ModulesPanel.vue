@@ -3,11 +3,18 @@ import { computed, nextTick, onMounted, ref } from "vue";
 import { useI18n } from "../../i18n";
 import { quickLinkUrlErrorKey } from "../../modules/shortcuts/links";
 import { MODULE_REGISTRY, type ModuleId, type ModuleVisibility } from "../../modules/registry";
-import type { QuickLink } from "../../types";
+import type {
+  LocationCandidate,
+  QuickLink,
+  TemperatureUnit,
+  WeatherViewState,
+} from "../../types";
+import WeatherPanel from "./WeatherPanel.vue";
 
 /**
- * The Modules category: the module visibility switches, the GitHub username
- * row and the Quick Links editor.
+ * The Modules category: the module visibility switches, the Weather
+ * configuration section (S2-P2), the GitHub username row and the Quick Links
+ * editor.
  *
  * It renders inside the `v-show` tabpanel `SettingsPanel` owns, so it mounts
  * and unmounts with the Settings panel rather than with the active category,
@@ -18,10 +25,12 @@ import type { QuickLink } from "../../types";
  * (the dirty snapshot and Save read it there); this component owns only the
  * transient editor state and the presentation computeds, and reports every
  * persisted change back through events instead of touching the draft itself.
- * The template is a multi-root fragment on purpose: the moved markup stays
- * the tabpanel's direct children, so the rendered DOM — and with it every
- * descendant selector in styles.css — is identical to the inline layout this
- * extraction replaced.
+ * The Weather section follows the same rule one level deeper: WeatherPanel's
+ * persisted fields stay parent drafts, and this panel only re-emits its
+ * events. The template is a multi-root fragment on purpose: the moved markup
+ * stays the tabpanel's direct children, so the rendered DOM — and with it
+ * every descendant selector in styles.css — is identical to the inline layout
+ * this extraction replaced.
  */
 const props = defineProps<{
   /** The parent's module-visibility draft, rendered read-only here. */
@@ -36,6 +45,31 @@ const props = defineProps<{
    * initial focus.
    */
   focusGithub: boolean;
+  // --- Weather section pass-through (S2-P2) --------------------------------
+  //
+  // The Weather category merged into this page, and its WeatherPanel renders
+  // between the visibility switches and the GitHub row. Every binding below
+  // is a pure pass-through: the persisted location fields and the unit stay
+  // SettingsPanel drafts (this panel never writes them), and each event is
+  // re-emitted verbatim — the ownership rule is unchanged, only the wire
+  // grew one hop.
+  /** The parent's weather location label — display only in WeatherPanel. */
+  weatherLocationLabel: string;
+  weatherTimezone: string;
+  weatherCountry: string;
+  weatherAdmin1: string;
+  temperatureUnit: TemperatureUnit;
+  /** Live module view state, shared with the dashboard card. */
+  weather: WeatherViewState;
+  /** The parent's reply to the last manual refresh (shared message source). */
+  weatherMessage: string;
+  /**
+   * Deep link (the weather card's "Set location"): opens this category since
+   * the merge, forwarded so WeatherPanel scrolls to and focuses the location
+   * search. When both deep-link flags arrive together, this one wins — the
+   * same priority the standalone Weather category had (see onMounted below).
+   */
+  focusWeather: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -46,6 +80,10 @@ const emit = defineEmits<{
   updateLink: [link: { id: string; name: string; url: string }];
   deleteLink: [id: string];
   moveLink: [move: { id: string; delta: -1 | 1 }];
+  // Weather section pass-through (S2-P2): re-emitted verbatim to the parent.
+  selectLocation: [candidate: LocationCandidate];
+  updateTemperatureUnit: [unit: TemperatureUnit];
+  refreshWeather: [];
 }>();
 
 const { t } = useI18n();
@@ -164,12 +202,15 @@ function deleteLink(id: string) {
 }
 
 onMounted(async () => {
-  // Deep links (the GitHub card's setup entry) opened this panel on the
-  // modules category — `initialCategory` chose it before first render, so the
-  // target is visible and `scrollIntoView` below never runs against a hidden
-  // panel. The tabpanel is the parent's `v-show`, so this runs exactly once
-  // per panel session, on first mount.
-  if (props.focusGithub) {
+  // Deep links (the GitHub card's setup entry, and the weather card's since
+  // S2-P2 routes it here too) opened this panel on the modules category —
+  // `initialCategory` chose it before first render, so the target is visible
+  // and `scrollIntoView` below never runs against a hidden panel. The
+  // tabpanel is the parent's `v-show`, so this runs exactly once per panel
+  // session, on first mount. Weather's link stands above this one: when both
+  // flags arrive together its focus runs first (child before parent) and this
+  // one steps aside, preserving the standalone Weather category's priority.
+  if (props.focusGithub && !props.focusWeather) {
     await nextTick();
     githubRow.value?.scrollIntoView({ block: "start" });
     githubInput.value?.focus();
@@ -179,6 +220,12 @@ onMounted(async () => {
 
 <template>
   <p class="settings-intro">{{ t("settings.modulesDescription") }}</p>
+  <!--
+    The page's four groups (S2-P2), each with the shared section-heading
+    style: the visibility switches, the Weather configuration (WeatherPanel's
+    own heading), the GitHub username row and the Quick Links editor.
+  -->
+  <div class="settings-section-heading"><strong>{{ t("settings.moduleVisibility.heading") }}</strong></div>
   <!--
     The module switches (decision D1): one row per registry module, a
     real `role="switch"` control each, and one localized line saying
@@ -208,6 +255,31 @@ onMounted(async () => {
   <div class="settings-module-reset">
     <button type="button" @click="$emit('resetModules')">{{ t("settings.modulesReset") }}</button>
   </div>
+
+  <!--
+    The Weather configuration section (S2-P2): the Weather category merged
+    into this page, its WeatherPanel rendered verbatim between the visibility
+    switches and the GitHub row. The pass-through bindings keep every piece of
+    state owned exactly where it was before the merge — the persisted fields
+    in the parent's drafts, the search UI in WeatherPanel — and the section
+    renders regardless of the Weather module's switch above, exactly like the
+    GitHub row below renders regardless of its own module's switch.
+  -->
+  <WeatherPanel
+    :weather-location-label="weatherLocationLabel"
+    :weather-timezone="weatherTimezone"
+    :weather-country="weatherCountry"
+    :weather-admin1="weatherAdmin1"
+    :temperature-unit="temperatureUnit"
+    :weather="weather"
+    :weather-message="weatherMessage"
+    :focus-weather="focusWeather"
+    @select-location="$emit('selectLocation', $event)"
+    @update-temperature-unit="$emit('updateTemperatureUnit', $event)"
+    @refresh-weather="$emit('refreshWeather')"
+  />
+
+  <div class="settings-section-heading"><strong>{{ t("settings.githubConfig.heading") }}</strong></div>
 
   <!--
     GitHub username (decision D2): always rendered and reachable, with a

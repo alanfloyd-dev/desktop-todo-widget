@@ -5,17 +5,20 @@ import { useI18n } from "../../i18n";
 import type { LocationCandidate, TemperatureUnit, WeatherViewState } from "../../types";
 
 /**
- * The Weather category: location search, the selected location's display, the
- * temperature unit, the data attribution and the manual refresh entry.
+ * The Weather configuration section (S2-P2): location search, the selected
+ * location's display, the temperature unit, the data attribution and the
+ * manual refresh entry. Weather is no longer a Settings category of its own —
+ * this section renders inside the Modules tabpanel, composed by `ModulesPanel`
+ * between the visibility switches and the GitHub row, and still mounts and
+ * unmounts with the Settings panel rather than with the active category, so
+ * the transient search state below lives for exactly one panel session.
  *
- * It renders inside the `v-show` tabpanel `SettingsPanel` owns, so it mounts
- * and unmounts with the Settings panel rather than with the active category,
- * and the transient search state below lives for exactly one panel session.
- * The split with the parent follows the panel's ownership rule: everything
+ * The split with its owners follows the panel's ownership rule: everything
  * persisted — the six location fields and the temperature unit — stays a
- * SettingsPanel draft (the dirty snapshot and Save read them there); this
- * component owns only the search UI and reports every persisted change back
- * through events instead of touching the draft itself.
+ * SettingsPanel draft (the dirty snapshot and Save read them there), while
+ * `ModulesPanel` only passes bindings through; this component owns the search
+ * UI and reports every persisted change back through events instead of
+ * touching the draft itself.
  */
 const props = defineProps<{
   /** Persisted location label — display only here; the parent owns the draft. */
@@ -29,9 +32,9 @@ const props = defineProps<{
   /** The parent's reply to the last manual refresh (shared message source). */
   weatherMessage: string;
   /**
-   * Deep link (the weather card's "Set location"): the panel opened directly
-   * onto this category, so the location search is the entry point and receives
-   * the initial focus.
+   * Deep link (the weather card's "Set location"): since S2-P2 it opens the
+   * Modules category — where this section lives — so the location search is
+   * the entry point and receives the initial focus.
    */
   focusWeather: boolean;
 }>();
@@ -116,10 +119,11 @@ async function openAttribution() {
 
 onMounted(async () => {
   // Deep links (the weather card's "Set location") opened this panel on the
-  // weather category — `initialCategory` chose it before first render, so the
-  // target is visible and `scrollIntoView` below never runs against a hidden
-  // panel. The tabpanel is the parent's `v-show`, so this runs exactly once
-  // per panel session, on first mount.
+  // modules category since S2-P2 — `initialCategory` redirected the weather
+  // flag there before first render, so the section is visible and
+  // `scrollIntoView` below never runs against a hidden panel. The tabpanel is
+  // the grandparent's `v-show`, so this runs exactly once per panel session,
+  // on first mount.
   if (props.focusWeather) {
     await nextTick();
     weatherSection.value?.scrollIntoView({ block: "start" });

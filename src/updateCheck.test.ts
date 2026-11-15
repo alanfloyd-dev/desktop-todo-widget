@@ -292,8 +292,9 @@ describe("manual update check state machine", () => {
       expect(settingsPanelSource).toMatch(
         /<section\s+v-show="activeCategory === 'about'"\s+id="settings-panel-about"\s+class="settings-category-panel"\s+role="tabpanel"\s+aria-labelledby="settings-tab-about"\s*>\s*<AboutPanel :database-path="databasePath" \/>\s*<\/section>/,
       );
-      expect(settingsPanelSource.match(/v-show="activeCategory === '/g)?.length).toBe(5);
-      expect(settingsPanelSource.match(/role="tabpanel"/g)?.length).toBe(5);
+      // S2-P2 removed the Weather tabpanel: exactly four remain.
+      expect(settingsPanelSource.match(/v-show="activeCategory === '/g)?.length).toBe(4);
+      expect(settingsPanelSource.match(/role="tabpanel"/g)?.length).toBe(4);
     });
 
     it("AboutPanel renders the databasePath it receives from a single root", () => {

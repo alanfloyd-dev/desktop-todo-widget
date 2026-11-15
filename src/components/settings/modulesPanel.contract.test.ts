@@ -9,18 +9,25 @@ import appVue from "../../App.vue?raw";
 
 /**
  * S1-E3 moved the Modules category's controls into `ModulesPanel` while the
- * persisted fields stayed SettingsPanel drafts. These pins hold the boundary
- * in place: the child owns the transient quick-link editor, the GitHub
- * presentation computeds and the deep-link focus, the parent keeps the dirty
- * snapshot, the Save payload, the draft mutations (and the new link's id
- * assignment) and the `v-show` tabpanel, and the moved markup stays the
- * tabpanel's direct children (a multi-root fragment, no wrapper element).
+ * persisted fields stayed SettingsPanel drafts. S2-P2 then merged the Weather
+ * category into this page: `ModulesPanel` composes `WeatherPanel` between the
+ * visibility switches and the GitHub row, passing every Weather binding
+ * through untouched. These pins hold the boundary in place: the child owns
+ * the transient quick-link editor, the GitHub presentation computeds and both
+ * deep-link focuses, the parent keeps the dirty snapshot, the Save payload,
+ * the draft mutations (and the new link's id assignment) and the `v-show`
+ * tabpanel, and the moved markup stays the tabpanel's direct children (a
+ * multi-root fragment, no wrapper element).
  */
 
 /** Every catalog key the Modules category renders (in the child, after E3). */
 const MODULES_I18N_KEYS = [
   "settings.modulesDescription",
   "settings.modulesReset",
+  // The page's group headings (S2-P2): visibility switches, Weather section,
+  // GitHub row — Quick Links already carried its own.
+  "settings.moduleVisibility.heading",
+  "settings.githubConfig.heading",
   "settings.githubUsername",
   "settings.githubUsernameHint",
   "settings.githubUsernameHintDisabled",
@@ -116,13 +123,23 @@ describe("ModulesPanel extraction: parent draft ownership (S1-E3)", () => {
   });
 });
 
-describe("ModulesPanel extraction: child interface (S1-E3)", () => {
+describe("ModulesPanel extraction: child interface (S1-E3, S2-P2)", () => {
   it("receives the required display state as explicit typed props", () => {
     for (const prop of [
       "moduleVisibility: ModuleVisibility;",
       "githubUsername: string;",
       "quickLinks: QuickLink[];",
       "focusGithub: boolean;",
+      // The Weather section's pass-through props (S2-P2): typed on the way
+      // in, forwarded to WeatherPanel, never written here.
+      "weatherLocationLabel: string;",
+      "weatherTimezone: string;",
+      "weatherCountry: string;",
+      "weatherAdmin1: string;",
+      "temperatureUnit: TemperatureUnit;",
+      "weather: WeatherViewState;",
+      "weatherMessage: string;",
+      "focusWeather: boolean;",
     ]) {
       expect(modulesPanelVue, prop).toContain(prop);
     }
@@ -138,6 +155,11 @@ describe("ModulesPanel extraction: child interface (S1-E3)", () => {
       "updateLink: [link: { id: string; name: string; url: string }];",
       "deleteLink: [id: string];",
       "moveLink: [move: { id: string; delta: -1 | 1 }];",
+      // The Weather section's pass-through events (S2-P2), re-emitted
+      // verbatim toward the parent.
+      "selectLocation: [candidate: LocationCandidate];",
+      "updateTemperatureUnit: [unit: TemperatureUnit];",
+      "refreshWeather: [];",
     ]) {
       expect(modulesPanelVue, event).toContain(event);
     }
@@ -155,6 +177,15 @@ describe("ModulesPanel extraction: child interface (S1-E3)", () => {
       ":github-username",
       ":quick-links",
       ":focus-github",
+      // The Weather section's pass-through bindings (S2-P2).
+      ":weather-location-label",
+      ":weather-timezone",
+      ":weather-country",
+      ":weather-admin1",
+      ":temperature-unit",
+      ":weather",
+      ":weather-message",
+      ":focus-weather",
       "@toggle-module",
       "@reset-modules",
       "@update-github-username",
@@ -162,6 +193,9 @@ describe("ModulesPanel extraction: child interface (S1-E3)", () => {
       "@update-link",
       "@delete-link",
       "@move-link",
+      "@select-location",
+      "@update-temperature-unit",
+      "@refresh-weather",
     ]) {
       expect(tag, binding).toContain(binding);
     }
@@ -232,7 +266,7 @@ describe("ModulesPanel extraction: moved-as-a-unit responsibilities (S1-E3)", ()
   });
 });
 
-describe("ModulesPanel extraction: lifecycle and deep link (S1-E3)", () => {
+describe("ModulesPanel extraction: lifecycle and deep link (S1-E3, S2-P2)", () => {
   it("the parent mounts ModulesPanel unconditionally inside its v-show tabpanel", () => {
     // The wrapper stays the parent's and the child carries no `v-if`: editor
     // state must survive switching categories, exactly like the weather
@@ -240,6 +274,23 @@ describe("ModulesPanel extraction: lifecycle and deep link (S1-E3)", () => {
     expect(settingsPanelVue).toMatch(
       /<section\s+v-show="activeCategory === 'modules'"\s+id="settings-panel-modules"\s+class="settings-category-panel"\s+role="tabpanel"\s+aria-labelledby="settings-tab-modules"\s*>(?:\s*<!--[\s\S]*?-->\s*)*<ModulesPanel\b/,
     );
+  });
+
+  it("forwards the Weather section's events verbatim toward the parent", () => {
+    // The composition adds no state between the grandchild and the parent:
+    // each Weather event is a pure re-emit on the same slot it arrived on.
+    for (const forwarding of [
+      `@select-location="$emit('selectLocation', $event)"`,
+      `@update-temperature-unit="$emit('updateTemperatureUnit', $event)"`,
+      `@refresh-weather="$emit('refreshWeather')"`,
+    ]) {
+      expect(modulesPanelVue, forwarding).toContain(forwarding);
+    }
+    // The persisted fields are never written in this panel — the draft
+    // mutations for them stay in SettingsPanel (pinned in
+    // weatherPanel.contract.test.ts).
+    expect(modulesPanelVue).not.toContain("weatherLocationLabel.value");
+    expect(modulesPanelVue).not.toContain("temperatureUnit.value");
   });
 
   it("the GitHub deep link still opens the category and focuses the username field", () => {
@@ -251,8 +302,20 @@ describe("ModulesPanel extraction: lifecycle and deep link (S1-E3)", () => {
     expect(settingsPanelVue).toContain("initialCategory(props.focusWeather, props.focusGithub)");
     expect(settingsPanelVue.match(/props\.focusGithub/g)?.length).toBe(1);
     expect(modulesPanelVue).toMatch(
-      /if \(props\.focusGithub\) \{\s*await nextTick\(\);\s*githubRow\.value\?\.scrollIntoView\(\{ block: "start" \}\);\s*githubInput\.value\?\.focus\(\);\s*\}/,
+      /if \(props\.focusGithub && !props\.focusWeather\) \{\s*await nextTick\(\);\s*githubRow\.value\?\.scrollIntoView\(\{ block: "start" \}\);\s*githubInput\.value\?\.focus\(\);\s*\}/,
     );
     expect(appVue).toContain(':focus-github="githubSettingsRequested"');
+  });
+
+  it("the weather deep link keeps its focus priority over the GitHub row (S2-P2)", () => {
+    // With the standalone Weather category gone, both deep links land on this
+    // tabpanel, so the old "weather wins" rule (its tabpanel was the only one
+    // visible) is now explicit: the GitHub focus stands down when the weather
+    // flag is also set. WeatherPanel's own focus block carries the flag.
+    expect(modulesPanelVue).toContain("props.focusGithub && !props.focusWeather");
+    expect(modulesPanelVue).toContain(':focus-weather="focusWeather"');
+    // The guard is the only place the weather flag is consulted here — the
+    // template binding passes it through untouched.
+    expect(modulesPanelVue.match(/props\.focusWeather/g)?.length).toBe(1);
   });
 });

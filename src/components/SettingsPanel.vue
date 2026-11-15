@@ -19,6 +19,7 @@ import {
   initialCategory,
   isSettingsCategoryId,
   nextTabCategory,
+  nextVerticalTabCategory,
   type SettingsCategoryId,
 } from "./settings/categories";
 import {
@@ -45,7 +46,6 @@ import AboutPanel from "./settings/AboutPanel.vue";
 import AppearancePanel from "./settings/AppearancePanel.vue";
 import GeneralPanel from "./settings/GeneralPanel.vue";
 import ModulesPanel from "./settings/ModulesPanel.vue";
-import WeatherPanel from "./settings/WeatherPanel.vue";
 
 const props = defineProps<{
   settings: ProductSettings;
@@ -262,6 +262,7 @@ const activeCategory = ref<SettingsCategoryId>(
   initialCategory(props.focusWeather, props.focusGithub),
 );
 const settingsNav = ref<HTMLElement | null>(null);
+const settingsRail = ref<HTMLElement | null>(null);
 const settingsContent = ref<HTMLElement | null>(null);
 
 function selectCategory(id: SettingsCategoryId) {
@@ -292,6 +293,23 @@ function onTablistKeydown(event: KeyboardEvent) {
   activeCategory.value = next;
   void nextTick(() => {
     settingsNav.value?.querySelector<HTMLButtonElement>(`#settings-tab-${next}`)?.focus();
+  });
+}
+
+/**
+ * The rail's arrow-key model (S2-P1): the vertical twin of the tablist above,
+ * driven by the same shared reducer family in `settings/categories.ts` —
+ * ArrowUp/ArrowDown wrap through the same category order, Home/End jump to the
+ * ends, orthogonal arrows are ignored, and focus follows the new active
+ * category through the same roving-tabindex pattern.
+ */
+function onRailKeydown(event: KeyboardEvent) {
+  const next = nextVerticalTabCategory(activeCategory.value, event.key);
+  if (!next) return;
+  event.preventDefault();
+  activeCategory.value = next;
+  void nextTick(() => {
+    settingsRail.value?.querySelector<HTMLButtonElement>(`#settings-rail-${next}`)?.focus();
   });
 }
 
@@ -596,11 +614,13 @@ function resetAppearance() {
 /**
  * --- Weather draft mutations -------------------------------------------------
  *
- * The Weather category's controls live in `WeatherPanel`, but the persisted
- * fields are this panel's draft: the child owns the transient search UI and
- * reports each choice back, and these handlers write the six location fields
- * and the unit exactly as the inline controls always did. The dirty snapshot
- * and Save read the same refs, so the ownership split cannot fork the draft.
+ * The Weather configuration is a section of the Modules category since S2-P2
+ * (`WeatherPanel` renders inside `ModulesPanel`), but the persisted fields
+ * are still this panel's draft: the search UI stays in the grandchild, the
+ * events travel through `ModulesPanel` unchanged, and these handlers write
+ * the six location fields and the unit exactly as they always did. The dirty
+ * snapshot and Save read the same refs, so the ownership split cannot fork
+ * the draft.
  */
 function selectLocation(candidate: LocationCandidate) {
   weatherLocationLabel.value = candidate.label;
@@ -616,11 +636,12 @@ function setTemperatureUnit(unit: TemperatureUnit) {
 }
 
 // Deep links (the GitHub card's setup entry, the weather card's "Set
-// location") open this panel on their own category — `initialCategory` chose
-// it before first render, so the target is visible when the child mounts. The
-// focus behaviors themselves live in the child that owns the row they scroll
-// to: WeatherPanel for the weather link (S1-E2), ModulesPanel for the GitHub
-// link (S1-E3).
+// location") open this panel on Modules — the weather category became a
+// Modules section in S2-P2, and `initialCategory` redirects the weather flag
+// there before first render, so the section is visible when the children
+// mount. The focus behaviors live in the components that own the rows they
+// scroll to: WeatherPanel for the weather link (S1-E2), ModulesPanel for the
+// GitHub link (S1-E3).
 
 onBeforeUnmount(() => {
   // Revert an unsaved language preview.
@@ -664,7 +685,7 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
     <!--
       One shared `activeCategory`, two renderings of the same navigation
       (decision D5): the wide tablist below and, in windows too narrow for
-      five tabs, the category select. CSS decides which one renders; both
+      four tabs, the category select. CSS decides which one renders; both
       bind the same state, so crossing the breakpoint preserves the active
       category and every draft.
     -->
@@ -701,7 +722,39 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
       </label>
     </div>
 
-    <div ref="settingsContent" class="settings-content">
+    <!--
+      The rail is the wide navigation (S2-P1): the third rendering of the same
+      shared `activeCategory`, shown only at >=560px (see the stylesheet's
+      560px boundary pair). It is a vertical WAI-ARIA tablist — ArrowUp/ArrowDown
+      wrap, Home/End jump, roving tabindex, focus follows the active category —
+      reusing the exact ids/labels of the other two presentations' category
+      model. Rail and content share one row so the rail stays stationary while
+      the content column scrolls; below 560px the rail is display:none and this
+      wrapper is layout-neutral (the content keeps its full width).
+    -->
+    <div class="settings-body">
+      <nav
+        ref="settingsRail"
+        class="settings-nav settings-nav--rail"
+        role="tablist"
+        aria-orientation="vertical"
+        :aria-label="t('settings.category.label')"
+        @keydown="onRailKeydown"
+      >
+        <button
+          v-for="category in SETTINGS_CATEGORIES"
+          :id="`settings-rail-${category.id}`"
+          :key="category.id"
+          type="button"
+          role="tab"
+          :aria-selected="activeCategory === category.id"
+          :aria-controls="`settings-panel-${category.id}`"
+          :class="{ active: activeCategory === category.id }"
+          :tabindex="activeCategory === category.id ? 0 : -1"
+          @click="selectCategory(category.id)"
+        >{{ t(category.labelKey) }}</button>
+      </nav>
+      <div ref="settingsContent" class="settings-content">
       <!-- ======================= Appearance / 外观 ======================= -->
       <section
         v-show="activeCategory === 'appearance'"
@@ -797,10 +850,12 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
         aria-labelledby="settings-tab-modules"
       >
         <!--
-          The Modules category's controls (S1-E3). The child owns the transient
-          quick-link editor and the deep-link focus; the persisted fields stay
-          drafts of this panel — the child reports each change back through
-          events, and the dirty snapshot and Save below read the same refs they
+          The Modules category's controls (S1-E3), plus the Weather section
+          merged into it in S2-P2: the child owns the transient quick-link
+          editor and both deep-link focuses, and passes the Weather bindings
+          through to WeatherPanel untouched; the persisted fields stay drafts
+          of this panel — the events (forwarded or direct) report each change
+          back, and the dirty snapshot and Save below read the same refs they
           always read.
         -->
         <ModulesPanel
@@ -808,32 +863,6 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
           :github-username="githubUsername"
           :quick-links="quickLinks"
           :focus-github="focusGithub"
-          @toggle-module="toggleModule"
-          @reset-modules="resetModules"
-          @update-github-username="updateGithubUsername"
-          @add-link="addQuickLink"
-          @update-link="updateQuickLink"
-          @delete-link="deleteQuickLink"
-          @move-link="moveQuickLink"
-        />
-      </section>
-
-      <!-- ======================== Weather / 天气 ======================== -->
-      <section
-        v-show="activeCategory === 'weather'"
-        id="settings-panel-weather"
-        class="settings-category-panel"
-        role="tabpanel"
-        aria-labelledby="settings-tab-weather"
-      >
-        <!--
-          The Weather category's controls (S1-E2). The child owns the transient
-          search UI, the attribution action and the deep-link focus; the
-          persisted fields stay drafts of this panel — the child reports each
-          choice back through events, and the dirty snapshot and Save below
-          read the same refs they always read.
-        -->
-        <WeatherPanel
           :weather-location-label="weatherLocationLabel"
           :weather-timezone="weatherTimezone"
           :weather-country="weatherCountry"
@@ -842,6 +871,13 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
           :weather="weather"
           :weather-message="weatherMessage"
           :focus-weather="focusWeather"
+          @toggle-module="toggleModule"
+          @reset-modules="resetModules"
+          @update-github-username="updateGithubUsername"
+          @add-link="addQuickLink"
+          @update-link="updateQuickLink"
+          @delete-link="deleteQuickLink"
+          @move-link="moveQuickLink"
           @select-location="selectLocation"
           @update-temperature-unit="setTemperatureUnit"
           @refresh-weather="$emit('refreshWeather')"
@@ -858,6 +894,7 @@ function cloneProfiles(profiles: AppearanceProfiles): AppearanceProfiles {
       >
         <AboutPanel :database-path="databasePath" />
       </section>
+    </div>
     </div>
 
     <footer class="settings-footer">
